@@ -2,9 +2,12 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use color_eyre::eyre::OptionExt;
 use std::io::Seek;
 
+// todo: ("model") EndTag, as in SPen::EndTag::ParseImpl in _document.dll
+// That specific end tag is the one in end_tag.bin.
+
 #[derive(Debug)]
 struct BoundFile {
-    id: u32,
+    bind_id: u32,
     name: String,
     hash: String,
     ref_count: u16,
@@ -77,7 +80,7 @@ impl MediaInfo {
                     }
 
                     bound_files.push(BoundFile {
-                        id,
+                        bind_id: id,
                         name: filename,
                         hash: file_hash,
                         ref_count,
