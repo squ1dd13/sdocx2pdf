@@ -5,6 +5,7 @@ use color_eyre::eyre::{OptionExt, eyre};
 use std::{
     collections::HashMap,
     io::{Seek, SeekFrom},
+    path::PathBuf,
 };
 
 fn read_u8_buf(stream: &mut impl ReadBytesExt, n: usize) -> color_eyre::Result<Vec<u8>> {
@@ -785,70 +786,83 @@ impl MediaInfo {
     }
 }
 
-fn demo_media_info() -> color_eyre::Result<()> {
-    let media_info_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438/media/mediaInfo.dat",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554/media/mediaInfo.dat",
-    ];
+#[derive(Debug)]
+struct PageIdInfoPage {
+    page_id: String,
+    hash: [u8; 32],
+}
 
-    for path in media_info_paths {
-        let mut media_info = std::fs::File::open(path)?;
+#[derive(Debug)]
+struct PageIdInfo {
+    /// The SHA256 digest from the associated `note.note` file.
+    note_doc_sha256: [u8; 32],
+    pages: Vec<PageIdInfoPage>,
+}
 
-        let info = MediaInfo::try_parse(&mut media_info)?;
+impl PageIdInfo {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<PageIdInfo> {
+        let mut note_doc_sha256 = [0u8; 32];
+        stream.read_exact(&mut note_doc_sha256)?;
 
-        println!("{path}: {info:#?}");
+        let page_count = stream.read_u16::<LittleEndian>()?;
+
+        let mut pages = Vec::with_capacity(page_count.into());
+
+        for _ in 0..page_count {
+            pages.push(PageIdInfoPage {
+                page_id: read_short_u16_string(stream)?,
+                hash: {
+                    let mut buf = [0u8; 32];
+                    stream.read_exact(&mut buf)?;
+                    buf
+                },
+            });
+        }
+
+        Ok(PageIdInfo {
+            note_doc_sha256,
+            pages,
+        })
     }
+}
+
+fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> color_eyre::Result<()> {
+    let dir_path = dir_path.as_ref();
+
+    let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
+    let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
+    println!("{}: {media_info:#?}", media_info_path.display());
+
+    let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
+    let end_tag =
+        ModelEndTag::try_parse(&mut std::fs::File::open(&end_tag_path)?, NoteSdkType::SPen)?;
+    println!("{}: {end_tag:#?}", end_tag_path.display());
+
+    let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
+    let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
+    println!("{}: {note_note:#?}", note_note_path.display());
+
+    let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
+    let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
+    println!("{}: {page_id_info:?}", page_id_info_path.display());
 
     Ok(())
 }
 
-fn demo_end_tag() -> color_eyre::Result<()> {
-    let end_tag_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438/end_tag.bin",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554/end_tag.bin",
+fn demo_all() -> color_eyre::Result<()> {
+    let extracted_sdocx_paths = [
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
+        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
+        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
+        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
+        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
+        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
     ];
 
-    for path in end_tag_paths {
-        let mut end_tag_file = std::fs::File::open(path)?;
-
-        let end_tag = ModelEndTag::try_parse(&mut end_tag_file, NoteSdkType::SPen)?;
-
-        println!("{path}: {end_tag:#?}");
-    }
-
-    Ok(())
-}
-
-fn demo_note_doc() -> color_eyre::Result<()> {
-    let note_doc_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438/note.note",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554/note.note",
-    ];
-
-    for path in note_doc_paths {
-        let mut note_doc_file = std::fs::File::open(path)?;
-
-        let note_doc = NoteDoc::try_parse(&mut note_doc_file)?;
-
-        println!("{path}: {note_doc:#?}");
+    for path in extracted_sdocx_paths {
+        demo_for_extracted_dir(path)?;
     }
 
     Ok(())
@@ -857,9 +871,7 @@ fn demo_note_doc() -> color_eyre::Result<()> {
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    demo_media_info()?;
-    demo_end_tag()?;
-    demo_note_doc()?;
+    demo_all()?;
 
     Ok(())
 }
