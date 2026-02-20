@@ -1,7 +1,18 @@
 #![allow(unused)]
+#![warn(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_ptr_alignment,
+    clippy::cast_sign_loss,
+    clippy::char_lit_as_u8,
+    clippy::checked_conversions,
+    clippy::unnecessary_cast
+)]
+
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
-use color_eyre::eyre::{OptionExt, eyre};
+use color_eyre::eyre::{Context, OptionExt, eyre};
 use std::{
     collections::HashMap,
     io::{Seek, SeekFrom},
@@ -40,6 +51,23 @@ fn read_long_u16_string(stream: &mut impl ReadBytesExt) -> color_eyre::Result<St
 fn read_timestamp(stream: &mut impl ReadBytesExt) -> color_eyre::Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(stream.read_i64::<LittleEndian>()?)
         .ok_or_eyre("invalid timestamp")
+}
+
+fn read_variable_length_bitfield(stream: &mut impl ReadBytesExt) -> color_eyre::Result<u32> {
+    let n_bytes = stream.read_u8()?;
+
+    Ok(match n_bytes {
+        0 => 0,
+        1 => stream.read_u8()?.into(),
+        2 => stream.read_u16::<LittleEndian>()?.into(),
+        3 => stream.read_u24::<LittleEndian>()?,
+        4 => stream.read_u32::<LittleEndian>()?,
+        5.. => {
+            return Err(eyre!(
+                "variable length bitfield cannot be more than 4 bytes (found {n_bytes})"
+            ));
+        }
+    })
 }
 
 struct TextObject {
@@ -233,23 +261,6 @@ struct NoteDoc {
 }
 
 impl NoteDoc {
-    fn read_variable_length_bitfield<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<u32> {
-        let n_bytes = stream.read_u8()?;
-
-        Ok(match n_bytes {
-            0 => 0,
-            1 => stream.read_u8()?.into(),
-            2 => stream.read_u16::<LittleEndian>()?.into(),
-            3 => stream.read_u24::<LittleEndian>()?,
-            4 => stream.read_u32::<LittleEndian>()?,
-            5.. => {
-                return Err(eyre!(
-                    "variable length bitfield cannot be more than 4 bytes (found {n_bytes})"
-                ));
-            }
-        })
-    }
-
     fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<NoteDoc> {
         let flexible_data_area_offset = {
             let start_offset = stream.stream_position()?;
@@ -258,8 +269,8 @@ impl NoteDoc {
             start_offset + flexible_data_area_jump
         };
 
-        let property_flags = Self::read_variable_length_bitfield(stream)?;
-        let field_check_flags = Self::read_variable_length_bitfield(stream)?;
+        let property_flags = read_variable_length_bitfield(stream)?;
+        let field_check_flags = read_variable_length_bitfield(stream)?;
 
         let format_version = stream.read_u32::<LittleEndian>()?;
         let id = read_short_u16_string(stream)?;
@@ -559,7 +570,7 @@ struct EncryptionInfo {
 }
 
 impl EncryptionInfo {
-    fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<EncryptionInfo> {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<EncryptionInfo> {
         Ok(EncryptionInfo {
             encryption_size: stream.read_u32::<LittleEndian>()?,
 
@@ -581,6 +592,30 @@ impl EncryptionInfo {
     }
 }
 
+#[derive(Debug)]
+enum PagingType {
+    /// Traditional pages.
+    Paged,
+
+    /// Appears pageless to the user. Implemented by putting everything on one large page.
+    Pageless,
+
+    Unknown(u16),
+}
+
+impl PagingType {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<PagingType> {
+        Ok(match stream.read_u16::<LittleEndian>()? {
+            0 => PagingType::Paged,
+            1 => PagingType::Pageless,
+            x => {
+                eprintln!("Found unknown paging type {x}. This shouldn't happen!");
+                PagingType::Unknown(x)
+            }
+        })
+    }
+}
+
 /// The structure in `end_tag.bin`.
 #[derive(Debug)]
 struct ModelEndTag {
@@ -598,7 +633,7 @@ struct ModelEndTag {
     min_format_version: u32,
     created_time: DateTime<Utc>,
     last_viewed_page_index: u32,
-    page_model: u16,
+    page_model: PagingType,
     document_type: u16,
     owner_id: String,
     encryption_info: Option<EncryptionInfo>,
@@ -651,7 +686,7 @@ impl ModelEndTag {
         let created_time = read_timestamp(stream)?;
         let last_viewed_page_index = stream.read_u32::<LittleEndian>()?;
 
-        let page_model = stream.read_u16::<LittleEndian>()?;
+        let page_model = PagingType::try_parse(stream)?;
         let document_type = stream.read_u16::<LittleEndian>()?;
 
         let owner_id = read_short_u16_string(stream)?;
@@ -744,9 +779,9 @@ impl MediaInfo {
                 let mut bound_files = Vec::with_capacity(bound_file_count.into());
 
                 for _ in 0..bound_file_count {
-                    let data_size = stream.read_u32::<LittleEndian>()?;
+                    let data_size: u64 = stream.read_u32::<LittleEndian>()?.into();
                     let stream_pos_pre = stream.stream_position()?;
-                    let expected_data_end = stream_pos_pre + data_size as u64;
+                    let expected_data_end = stream_pos_pre + data_size;
 
                     let id = stream.read_u32::<LittleEndian>()?;
                     let filename = read_short_u16_string(stream)?;
@@ -826,6 +861,402 @@ impl PageIdInfo {
     }
 }
 
+#[derive(Debug)]
+struct RectF64 {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl RectF64 {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<RectF64> {
+        Ok(RectF64 {
+            left: stream.read_f64::<LittleEndian>()?,
+            top: stream.read_f64::<LittleEndian>()?,
+            right: stream.read_f64::<LittleEndian>()?,
+            bottom: stream.read_f64::<LittleEndian>()?,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PdfDataItem {
+    bind_id: u32,
+    page_index: u32,
+    pdf_rect: RectF64,
+}
+
+impl PdfDataItem {
+    fn try_parse<T: ReadBytesExt>(
+        stream: &mut T,
+        format_version: u32,
+    ) -> color_eyre::Result<PdfDataItem> {
+        Ok(PdfDataItem {
+            bind_id: stream.read_u32::<LittleEndian>()?,
+            page_index: stream.read_u32::<LittleEndian>()?,
+            pdf_rect: if format_version < 2034 {
+                RectF64::try_parse(stream)?
+            } else {
+                RectF64 {
+                    left: stream.read_i32::<LittleEndian>()?.into(),
+                    top: stream.read_i32::<LittleEndian>()?.into(),
+                    right: stream.read_i32::<LittleEndian>()?.into(),
+                    bottom: stream.read_i32::<LittleEndian>()?.into(),
+                }
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CanvasCacheEntry {
+    file_id: u32,
+    width: u32,
+    height: u32,
+    is_dark_mode: bool,
+    background_colour: [u8; 4],
+    version: [u32; 3],
+    cache_version: u32,
+    property: u32,
+    locale_list_id: u32,
+    system_font_path_hash: u32,
+}
+
+impl CanvasCacheEntry {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<CanvasCacheEntry> {
+        Ok(CanvasCacheEntry {
+            file_id: stream.read_u32::<LittleEndian>()?,
+            width: stream.read_u32::<LittleEndian>()?,
+            height: stream.read_u32::<LittleEndian>()?,
+            is_dark_mode: stream.read_u8()? == 1,
+            background_colour: stream.read_u32::<LittleEndian>()?.to_le_bytes(),
+            version: [
+                stream.read_u32::<LittleEndian>()?,
+                stream.read_u32::<LittleEndian>()?,
+                stream.read_u32::<LittleEndian>()?,
+            ],
+            cache_version: stream.read_u32::<LittleEndian>()?,
+            property: stream.read_u32::<LittleEndian>()?,
+            locale_list_id: stream.read_u32::<LittleEndian>()?,
+            system_font_path_hash: stream.read_u32::<LittleEndian>()?,
+        })
+    }
+}
+
+struct StrokeRecognitionEntry {
+    bytes: Vec<u8>,
+}
+
+impl StrokeRecognitionEntry {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<StrokeRecognitionEntry> {
+        let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
+
+        Ok(StrokeRecognitionEntry {
+            bytes: read_u8_buf(stream, size)?,
+        })
+    }
+}
+
+impl std::fmt::Debug for StrokeRecognitionEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "StrokeRecognitionEntry {{ ({} bytes) }}",
+            self.bytes.len()
+        )
+    }
+}
+
+struct CustomObject {
+    object_type: u32,
+    bytes: Vec<u8>,
+}
+
+impl CustomObject {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<CustomObject> {
+        let object_type = stream.read_u32::<LittleEndian>()?;
+        let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
+
+        Ok(CustomObject {
+            object_type,
+            bytes: read_u8_buf(stream, size)?,
+        })
+    }
+}
+
+impl std::fmt::Debug for CustomObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CustomObject {{ type: {}; ({} bytes) }}",
+            self.object_type,
+            self.bytes.len()
+        )
+    }
+}
+
+#[derive(Debug)]
+struct Page {
+    is_text_only: bool,
+
+    orientation: u32,
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    page_id: String,
+    modified_time: DateTime<Utc>,
+    format_version: u32,
+    min_format_version: u32,
+
+    drawn_rect: Option<RectF64>,
+    tag_list: Option<Vec<String>>,
+    template_uri: Option<String>,
+    background_image_id: Option<i32>,
+    background_image_mode: Option<u32>,
+    background_colour: Option<[u8; 4]>,
+    background_width: Option<u32>,
+    background_rotation: Option<u32>,
+    pdf_data_items: Option<Vec<PdfDataItem>>,
+    template_type: Option<u32>,
+    canvas_cache_map: Vec<(u32, CanvasCacheEntry)>,
+    imported_data_height: Option<u32>,
+    theme: Option<u32>,
+    recognised_data_modified_time: Option<DateTime<Utc>>,
+    stroke_recognition_data: Option<Vec<StrokeRecognitionEntry>>,
+    custom_objects: Vec<CustomObject>,
+
+    hash: [u8; 32],
+}
+
+impl Page {
+    const CLOSING_STRING: &str = "Page for SAMSUNG S-Pen SDK";
+
+    /// Parses a single page using all of `stream`.
+    ///
+    /// `stream` must not have anything after the end of the page data, because this method
+    /// seeks to the end of `stream` and expects it to match the correct format for a page.
+    fn try_parse_full<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<Page> {
+        let data_start_pos = stream.stream_position()?;
+        let closing_string_size: i64 = Self::CLOSING_STRING.len().try_into()?;
+
+        // Seek to where the closing string should begin.
+        stream.seek(SeekFrom::End(-closing_string_size))?;
+
+        let closing_string = read_u8_string(stream, Self::CLOSING_STRING.len())?;
+
+        if closing_string != Self::CLOSING_STRING {
+            return Err(eyre!(
+                "closing string '{closing_string}' does not match expected '{}'",
+                Self::CLOSING_STRING
+            ));
+        }
+
+        // Return to the beginning.
+        stream.seek(SeekFrom::Start(data_start_pos))?;
+
+        let page_size = stream.read_u32::<LittleEndian>()?;
+        let flex_data_offset: u64 = stream.read_u32::<LittleEndian>()?.into();
+
+        let property_flags = read_variable_length_bitfield(stream)?;
+        let is_text_only = property_flags & 0x1 != 0;
+
+        let field_check_flags = read_variable_length_bitfield(stream)?;
+
+        // == "Fixed area" ==
+        let orientation = stream.read_u32::<LittleEndian>()?;
+        let width = stream.read_u32::<LittleEndian>()?;
+        let height = stream.read_u32::<LittleEndian>()?;
+        let offset_x = stream.read_u32::<LittleEndian>()?;
+        let offset_y = stream.read_u32::<LittleEndian>()?;
+        let page_id = read_short_u16_string(stream)?;
+        let modified_time = read_timestamp(stream)?;
+        let format_version = stream.read_u32::<LittleEndian>()?;
+        let min_format_version = stream.read_u32::<LittleEndian>()?;
+        // == End ==
+
+        stream.seek(SeekFrom::Start(flex_data_offset))?;
+
+        // == "Flexible area" ==
+        let drawn_rect = (field_check_flags & 1 != 0)
+            .then(|| RectF64::try_parse(stream))
+            .transpose()?;
+
+        let tag_list: Option<Vec<String>> = if field_check_flags & 2 != 0 {
+            let tag_count = stream.read_u16::<LittleEndian>()?;
+
+            Some(
+                (0..tag_count)
+                    .map(|_| read_short_u16_string(stream))
+                    .collect::<color_eyre::Result<_>>()?,
+            )
+        } else {
+            None
+        };
+
+        let template_uri = (field_check_flags & 4 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let background_image_id = (field_check_flags & 8 != 0)
+            .then(|| stream.read_i32::<LittleEndian>())
+            .transpose()?;
+
+        let background_image_mode = (field_check_flags & 16 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let background_colour = (field_check_flags & 32 != 0)
+            .then(|| stream.read_u32::<LittleEndian>().map(u32::to_le_bytes))
+            .transpose()?;
+
+        let background_width = (field_check_flags & 64 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let background_rotation = (field_check_flags & 128 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let pdf_data_items: Option<Vec<PdfDataItem>> = if field_check_flags & 256 != 0 {
+            let item_count = stream.read_u16::<LittleEndian>()?;
+
+            let mut items = Vec::with_capacity(item_count.into());
+
+            for _ in 0..item_count {
+                items.push(PdfDataItem::try_parse(stream, format_version)?);
+            }
+
+            Some(items)
+        } else {
+            None
+        };
+
+        let template_type = (field_check_flags & 512 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        // The app uses a `LinkedHashMap` here, so entry order must be important.
+        // Since we are unlikely to use this for much, a `Vec` is fine in place of a real map.
+        let mut canvas_cache_map: Vec<(u32, CanvasCacheEntry)> = vec![];
+
+        if field_check_flags & 1024 != 0 {
+            let entry_count: i64 = stream.read_u32::<LittleEndian>()?.into();
+            let entry_size: i64 = stream.read_u16::<LittleEndian>()?.into();
+
+            if entry_size == 49 {
+                canvas_cache_map.reserve(entry_count.try_into()?);
+
+                for _ in 0..entry_count {
+                    let key = stream.read_u32::<LittleEndian>()?;
+                    let entry = CanvasCacheEntry::try_parse(stream)?;
+
+                    canvas_cache_map.push((key, entry));
+                }
+            } else {
+                eprintln!("Skipping canvas cache map: entry size is {entry_size}, not 49.");
+                stream.seek_relative(entry_count * entry_size)?;
+            }
+        }
+
+        let imported_data_height = (field_check_flags & 2048 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let theme = (field_check_flags & 4096 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let recognised_data_modified_time = (field_check_flags & 32768 != 0)
+            .then(|| read_timestamp(stream))
+            .transpose()?;
+
+        let stroke_recognition_data: Option<Vec<StrokeRecognitionEntry>> =
+            if field_check_flags & 65536 != 0 {
+                let entry_count = stream.read_u32::<LittleEndian>()?;
+
+                let mut entries = Vec::with_capacity(entry_count as usize);
+
+                for _ in 0..entry_count {
+                    entries.push(StrokeRecognitionEntry::try_parse(stream)?);
+                }
+
+                Some(entries)
+            } else {
+                None
+            };
+
+        let mut custom_objects: Vec<CustomObject> = vec![];
+
+        if field_check_flags & 262144 != 0 {
+            let custom_object_count: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
+            custom_objects.reserve(custom_object_count);
+
+            for _ in 0..custom_object_count {
+                custom_objects.push(CustomObject::try_parse(stream)?);
+            }
+        }
+
+        // == End flexible ==
+
+        // fixme: The hash could be read at basically any point, since we seek back after.
+        // Not sure why it's done here.
+        let hash = {
+            let pos = stream.stream_position()?;
+
+            // The hash comes before the closing string, so seek before both.
+            stream.seek(SeekFrom::End(-closing_string_size - 32))?;
+
+            let mut hash = [0u8; 32];
+            stream.read_exact(&mut hash)?;
+
+            // Return to where we were before.
+            stream.seek(SeekFrom::Start(pos))?;
+
+            hash
+        };
+
+        eprintln!(
+            "end at {}; expected end around {}",
+            stream.stream_position()?,
+            data_start_pos + u64::from(page_size)
+        );
+
+        // todo: Load layers.
+
+        Ok(Page {
+            is_text_only,
+            orientation,
+            width,
+            height,
+            offset_x,
+            offset_y,
+            page_id,
+            modified_time,
+            format_version,
+            min_format_version,
+            drawn_rect,
+            tag_list,
+            template_uri,
+            background_image_id,
+            background_image_mode,
+            background_colour,
+            background_width,
+            background_rotation,
+            pdf_data_items,
+            template_type,
+            canvas_cache_map,
+            imported_data_height,
+            theme,
+            recognised_data_modified_time,
+            stroke_recognition_data,
+            custom_objects,
+            hash,
+        })
+    }
+}
+
 fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> color_eyre::Result<()> {
     let dir_path = dir_path.as_ref();
 
@@ -846,6 +1277,18 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> color_eyre::Result<()> {
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
     println!("{}: {page_id_info:?}", page_id_info_path.display());
 
+    for page in &page_id_info.pages {
+        let mut page_path: PathBuf = [dir_path, &page.page_id].iter().collect();
+        page_path.set_extension("page");
+
+        let page = Page::try_parse_full(
+            &mut std::fs::File::open(&page_path)
+                .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?,
+        )?;
+
+        println!("{}: {page:#?}", page_path.display());
+    }
+
     Ok(())
 }
 
@@ -859,6 +1302,7 @@ fn demo_all() -> color_eyre::Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
+        "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052",
     ];
 
     for path in extracted_sdocx_paths {
@@ -867,6 +1311,8 @@ fn demo_all() -> color_eyre::Result<()> {
 
     Ok(())
 }
+
+// .ssf is "snap saved file"
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
