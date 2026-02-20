@@ -968,24 +968,24 @@ impl std::fmt::Debug for StrokeRecognitionEntry {
     }
 }
 
-struct CustomObject {
+struct CustomPageObject {
     object_type: u32,
     bytes: Vec<u8>,
 }
 
-impl CustomObject {
-    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<CustomObject> {
+impl CustomPageObject {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<CustomPageObject> {
         let object_type = stream.read_u32::<LittleEndian>()?;
         let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
 
-        Ok(CustomObject {
+        Ok(CustomPageObject {
             object_type,
             bytes: read_u8_buf(stream, size)?,
         })
     }
 }
 
-impl std::fmt::Debug for CustomObject {
+impl std::fmt::Debug for CustomPageObject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -995,6 +995,27 @@ impl std::fmt::Debug for CustomObject {
         )
     }
 }
+
+// Object types:
+// public static String ObjectTypeToString(int i) {
+//     return (i == 1 || i == 15) ? "stroke"
+//                       : i == 2 ? "textBox"
+//                       : i == 3 ? "image"
+//                       : i == 4 ? "container"
+//                       : i == 7 ? "shape"
+//                       : i == 8 ? "line"
+//                       : i == 10 ? "voice"
+//                       : i == 11 ? "formula"
+//                       : i == 22 ? "tableNew"
+//                       : i == 13 ? "web"
+//                       : i == 14 ? "painting"
+//                       : i == 17 ? "link"
+//                       : i == 19 ? "unknown"
+//                       : i == 21 ? "math"
+//                       : i == 20 ? "plot"
+//                       : i == 100 ? "strokeGroup"
+//                       : "none";
+// }
 
 #[derive(Debug)]
 struct Page {
@@ -1025,7 +1046,7 @@ struct Page {
     theme: Option<u32>,
     recognised_data_modified_time: Option<DateTime<Utc>>,
     stroke_recognition_data: Option<Vec<StrokeRecognitionEntry>>,
-    custom_objects: Vec<CustomObject>,
+    custom_objects: Vec<CustomPageObject>,
 
     hash: [u8; 32],
 }
@@ -1187,14 +1208,14 @@ impl Page {
                 None
             };
 
-        let mut custom_objects: Vec<CustomObject> = vec![];
+        let mut custom_objects: Vec<CustomPageObject> = vec![];
 
         if field_check_flags & 262144 != 0 {
             let custom_object_count: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
             custom_objects.reserve(custom_object_count);
 
             for _ in 0..custom_object_count {
-                custom_objects.push(CustomObject::try_parse(stream)?);
+                custom_objects.push(CustomPageObject::try_parse(stream)?);
             }
         }
 
