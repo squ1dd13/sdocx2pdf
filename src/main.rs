@@ -7,7 +7,40 @@
     clippy::cast_sign_loss,
     clippy::char_lit_as_u8,
     clippy::checked_conversions,
-    clippy::unnecessary_cast
+    clippy::unnecessary_cast,
+    clippy::cognitive_complexity,
+    clippy::dbg_macro,
+    clippy::debug_assert_with_mut_call,
+    clippy::doc_link_with_quotes,
+    clippy::doc_markdown,
+    clippy::empty_line_after_outer_attr,
+    clippy::empty_structs_with_brackets,
+    clippy::float_cmp,
+    clippy::float_cmp_const,
+    clippy::float_equality_without_abs,
+    keyword_idents,
+    clippy::missing_const_for_fn,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::mod_module_files,
+    non_ascii_idents,
+    noop_method_call,
+    clippy::option_if_let_else,
+    clippy::semicolon_if_nothing_returned,
+    clippy::unseparated_literal_suffix,
+    clippy::shadow_unrelated,
+    clippy::similar_names,
+    clippy::suspicious_operation_groupings,
+    unused_crate_dependencies,
+    unused_extern_crates,
+    unused_import_braces,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_dependencies,
+    clippy::wildcard_imports
 )]
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -20,7 +53,7 @@ use std::{
 };
 
 fn read_u8_buf(stream: &mut impl ReadBytesExt, n: usize) -> color_eyre::Result<Vec<u8>> {
-    let mut bytes = vec![0u8; n];
+    let mut bytes = vec![0_u8; n];
     stream.read_exact(&mut bytes)?;
 
     Ok(bytes)
@@ -145,7 +178,7 @@ impl PenInfo {
             name: read_short_u16_string(stream)?,
             size: stream.read_f32::<LittleEndian>()?,
             colour_rgba: {
-                let mut rgba = [0u8; 4];
+                let mut rgba = [0_u8; 4];
                 stream.read_exact(&mut rgba);
                 rgba
             },
@@ -347,10 +380,10 @@ impl NoteDoc {
                 let mut ids_and_strings = HashMap::with_capacity(string_count.into());
 
                 for _ in 0..string_count {
-                    let id = stream.read_u32::<LittleEndian>()?;
+                    let string_id = stream.read_u32::<LittleEndian>()?;
                     let string = read_short_u16_string(stream)?;
 
-                    ids_and_strings.insert(id, string);
+                    ids_and_strings.insert(string_id, string);
                 }
 
                 Some(ids_and_strings)
@@ -461,7 +494,7 @@ impl NoteDoc {
             None
         };
 
-        let mut sha256 = [0u8; 32];
+        let mut sha256 = [0_u8; 32];
         stream.read_exact(&mut sha256)?;
 
         Ok(NoteDoc {
@@ -518,7 +551,7 @@ enum NoteSdkType {
 }
 
 impl NoteSdkType {
-    fn ident(self) -> &'static str {
+    const fn ident(self) -> &'static str {
         match self {
             NoteSdkType::SamsungSPenPainting => "Document for SAMSUNG S-Pen PAINTING SDK",
             NoteSdkType::SPen => "Document for S-Pen SDK",
@@ -662,10 +695,10 @@ impl ModelEndTag {
         let expected_ident = sdk_type.ident();
 
         if !ident_matches {
-            return Err(match ident_found {
-                Some(found) => eyre!("ident '{found}' does not match expected '{expected_ident}'"),
-                None => eyre!("not enough space for ident '{expected_ident}'"),
-            });
+            return Err(ident_found.map_or_else(
+                || eyre!("not enough space for ident '{expected_ident}'"),
+                |found| eyre!("ident '{found}' does not match expected '{expected_ident}'"),
+            ));
         }
 
         let format_version = stream.read_u32::<LittleEndian>()?;
@@ -812,7 +845,7 @@ impl MediaInfo {
                         ref_count,
                         ref_count_modified_time,
                         is_attached: is_file_attached,
-                    })
+                    });
                 }
 
                 bound_files
@@ -836,7 +869,7 @@ struct PageIdInfo {
 
 impl PageIdInfo {
     fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<PageIdInfo> {
-        let mut note_doc_sha256 = [0u8; 32];
+        let mut note_doc_sha256 = [0_u8; 32];
         stream.read_exact(&mut note_doc_sha256)?;
 
         let page_count = stream.read_u16::<LittleEndian>()?;
@@ -847,7 +880,7 @@ impl PageIdInfo {
             pages.push(PageIdInfoPage {
                 page_id: read_short_u16_string(stream)?,
                 hash: {
-                    let mut buf = [0u8; 32];
+                    let mut buf = [0_u8; 32];
                     stream.read_exact(&mut buf)?;
                     buf
                 },
@@ -1229,7 +1262,7 @@ impl Page {
             // The hash comes before the closing string, so seek before both.
             stream.seek(SeekFrom::End(-closing_string_size - 32))?;
 
-            let mut hash = [0u8; 32];
+            let mut hash = [0_u8; 32];
             stream.read_exact(&mut hash)?;
 
             // Return to where we were before.
@@ -1298,8 +1331,8 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> color_eyre::Result<()> {
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
     println!("{}: {page_id_info:?}", page_id_info_path.display());
 
-    for page in &page_id_info.pages {
-        let mut page_path: PathBuf = [dir_path, &page.page_id].iter().collect();
+    for page_info in &page_id_info.pages {
+        let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
         page_path.set_extension("page");
 
         let page = Page::try_parse_full(
