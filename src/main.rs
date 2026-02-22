@@ -14,7 +14,6 @@
     clippy::doc_link_with_quotes,
     clippy::doc_markdown,
     clippy::empty_line_after_outer_attr,
-    clippy::empty_structs_with_brackets,
     clippy::float_cmp,
     clippy::float_cmp_const,
     clippy::float_equality_without_abs,
@@ -47,9 +46,11 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Context, OptionExt, eyre};
+use indexmap::IndexMap;
+use sha2::Digest;
 use std::{
     collections::HashMap,
-    io::{Seek, SeekFrom},
+    io::{Cursor, Seek, SeekFrom},
     path::PathBuf,
 };
 
@@ -83,9 +84,15 @@ fn read_long_u16_string(stream: &mut impl ReadBytesExt) -> color_eyre::Result<St
     read_u16_string(stream, n_chars)
 }
 
+fn read_short_u8_string(stream: &mut impl ReadBytesExt) -> color_eyre::Result<String> {
+    let n_chars: usize = stream.read_u16::<LittleEndian>()?.into();
+    read_u8_string(stream, n_chars)
+}
+
 fn read_timestamp(stream: &mut impl ReadBytesExt) -> color_eyre::Result<DateTime<Utc>> {
-    DateTime::from_timestamp_micros(stream.read_i64::<LittleEndian>()?)
-        .ok_or_eyre("Invalid timestamp")
+    let value = stream.read_i64::<LittleEndian>()?;
+
+    DateTime::from_timestamp_micros(value).ok_or_else(|| eyre!("Invalid timestamp value {value}"))
 }
 
 fn read_variable_length_bitfield(stream: &mut impl ReadBytesExt) -> color_eyre::Result<u32> {
@@ -115,11 +122,26 @@ struct OpaqueBytes {
 }
 
 impl OpaqueBytes {
-    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<OpaqueBytes> {
+    /// Reads `size: u32` and the `size` bytes that follow, reading `size + 4` bytes in total.
+    fn try_parse_exclusive<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<OpaqueBytes> {
         let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
 
         Ok(OpaqueBytes {
             bytes: read_u8_buf(stream, size)?,
+        })
+    }
+
+    /// Reads `size: u32` and the `size - 4` bytes that follow, reading `size` bytes in total.
+    fn try_parse_inclusive<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<OpaqueBytes> {
+        let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
+
+        Ok(OpaqueBytes {
+            bytes: read_u8_buf(
+                stream,
+                size.checked_sub(4).ok_or_else(|| {
+                    eyre!("Size ({size}) cannot be inclusive as it is less than 4")
+                })?,
+            )?,
         })
     }
 }
@@ -323,8 +345,8 @@ impl NoteDoc {
         let page_vertical_padding = stream.read_u32::<LittleEndian>()?;
         let min_format_version = stream.read_u32::<LittleEndian>()?;
 
-        let title_text = OpaqueBytes::try_parse(stream)?;
-        let body_text = OpaqueBytes::try_parse(stream)?;
+        let title_text = OpaqueBytes::try_parse_exclusive(stream)?;
+        let body_text = OpaqueBytes::try_parse_exclusive(stream)?;
 
         stream.seek(SeekFrom::Start(flexible_data_area_offset))?;
 
@@ -902,6 +924,21 @@ impl PageIdInfo {
 }
 
 #[derive(Debug)]
+struct PointF64 {
+    x: f64,
+    y: f64,
+}
+
+impl PointF64 {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<PointF64> {
+        Ok(PointF64 {
+            x: stream.read_f64::<LittleEndian>()?,
+            y: stream.read_f64::<LittleEndian>()?,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct RectF64 {
     left: f64,
     top: f64,
@@ -996,108 +1033,486 @@ impl CustomPageObject {
 
         Ok(CustomPageObject {
             object_type,
-            inner: OpaqueBytes::try_parse(stream)?,
+            inner: OpaqueBytes::try_parse_exclusive(stream)?,
         })
     }
 }
 
-// Object types:
-// public static String ObjectTypeToString(int i) {
-//     return (i == 1 || i == 15) ? "stroke"
-//                       : i == 2 ? "textBox"
-//                       : i == 3 ? "image"
-//                       : i == 4 ? "container"
-//                       : i == 7 ? "shape"
-//                       : i == 8 ? "line"
-//                       : i == 10 ? "voice"
-//                       : i == 11 ? "formula"
-//                       : i == 22 ? "tableNew"
-//                       : i == 13 ? "web"
-//                       : i == 14 ? "painting"
-//                       : i == 17 ? "link"
-//                       : i == 19 ? "unknown"
-//                       : i == 21 ? "math"
-//                       : i == 20 ? "plot"
-//                       : i == 100 ? "strokeGroup"
-//                       : "none";
-// }
+#[derive(Debug, Default)]
+struct DocBundle {
+    strings: IndexMap<String, String>,
+    integers: IndexMap<String, u32>,
+    string_vecs: IndexMap<String, Vec<String>>,
+    byte_vecs: IndexMap<String, OpaqueBytes>,
+}
+
+impl DocBundle {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<DocBundle> {
+        let map_presence_flags = stream.read_u8()?;
+
+        let mut bundle = DocBundle::default();
+
+        if map_presence_flags & 1 != 0 {
+            let entry_count: usize = stream.read_u16::<LittleEndian>()?.into();
+            bundle.strings.reserve(entry_count);
+
+            for _ in 0..entry_count {
+                bundle.strings.insert(
+                    read_short_u8_string(stream)?,
+                    read_short_u16_string(stream)?,
+                );
+            }
+        }
+
+        if map_presence_flags & 2 != 0 {
+            let entry_count: usize = stream.read_u16::<LittleEndian>()?.into();
+            bundle.integers.reserve(entry_count);
+
+            for _ in 0..entry_count {
+                bundle.integers.insert(
+                    read_short_u8_string(stream)?,
+                    stream.read_u32::<LittleEndian>()?,
+                );
+            }
+        }
+
+        if map_presence_flags & 4 != 0 {
+            let entry_count: usize = stream.read_u16::<LittleEndian>()?.into();
+            bundle.string_vecs.reserve(entry_count);
+
+            for _ in 0..entry_count {
+                let key = read_short_u8_string(stream)?;
+
+                let string_count: usize = stream.read_u16::<LittleEndian>()?.into();
+                let mut strings = Vec::with_capacity(string_count);
+
+                for _ in 0..string_count {
+                    strings.push(read_short_u16_string(stream)?);
+                }
+
+                bundle.string_vecs.insert(key, strings);
+            }
+        }
+
+        if map_presence_flags & 8 != 0 {
+            let entry_count: usize = stream.read_u16::<LittleEndian>()?.into();
+            bundle.byte_vecs.reserve(entry_count);
+
+            for _ in 0..entry_count {
+                bundle.byte_vecs.insert(
+                    read_short_u8_string(stream)?,
+                    OpaqueBytes::try_parse_exclusive(stream)?,
+                );
+            }
+        }
+
+        Ok(bundle)
+    }
+}
+
+#[derive(Debug)]
+struct ObjectBase {
+    rotatable: bool,
+    selectable: bool,
+    movable: bool,
+    visible: bool,
+    replayable: bool,
+    clippable: bool,
+    is_template_object: bool,
+    flippable: bool,
+    has_been_to_att: bool,
+    lock_state: bool,
+    removable: bool,
+
+    format_version: u32,
+    uuid: String,
+    modified_time: DateTime<Utc>,
+    rect: RectF64,
+    timestamp_int: u32,
+    resizable_b: u8,
+
+    rotation_degree: f32,
+    unknown_somethings: Option<Vec<[u8; 16]>>,
+    ao_info: Option<String>,
+    sor_bundle: Option<DocBundle>,
+    plugin_link: Option<String>,
+    extra_bundle: Option<DocBundle>,
+    attached_file_id: Option<u32>,
+    min_width_height: Option<(f32, f32)>,
+    max_width_height: Option<(f32, f32)>,
+    append_time: Option<DateTime<Utc>>,
+    owner_page_width_height: Option<(u32, u32)>,
+    layout_type: u32,
+    unknown_20: Option<[u8; 20]>,
+    thumbnail_bind_id: Option<u32>,
+    pivot: Option<PointF64>,
+    group_id: Option<String>,
+}
+
+impl ObjectBase {
+    fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<ObjectBase> {
+        let expected_end = {
+            let start = stream.stream_position()?;
+            let base_size: u64 = stream.read_u32::<LittleEndian>()?.into();
+
+            start + base_size
+        };
+
+        let data_type = stream.read_u16::<LittleEndian>()?;
+
+        if data_type != 0 {
+            return Err(eyre!("Data type should be 0, not {data_type}"));
+        }
+
+        let flex_offset = stream.read_u32::<LittleEndian>()?;
+        let has_flex_data = flex_offset != 0;
+
+        let property_flags = read_variable_length_bitfield(stream)?;
+
+        let rotatable = property_flags & 1 != 0;
+        let selectable = property_flags & 2 != 0;
+        let movable = property_flags & 4 != 0;
+        let visible = property_flags & 8 != 0;
+        let replayable = property_flags & 16 != 0;
+        let clippable = property_flags & 32 != 0;
+        let is_template_object = property_flags & 64 != 0;
+        let flippable = property_flags & 128 != 0;
+        let has_been_to_att = property_flags & 256 != 0;
+        let lock_state = property_flags & 512 != 0;
+
+        // Note: This is encoded as its inverse.
+        let removable = property_flags & 4096 == 0;
+
+        // These are the "stated" field check flags because if the flex offset is zero, we treat
+        // them all as unset.
+        let stated_field_check_flags = read_variable_length_bitfield(stream)?;
+        let format_version = stream.read_u32::<LittleEndian>()?;
+
+        if format_version > 5034 {
+            eprintln!("Warning: Version {format_version} newer than expected (5034)");
+        }
+
+        let uuid = read_short_u8_string(stream)?;
+        let modified_time = read_timestamp(stream)?;
+        let rect = RectF64::try_parse(stream)?;
+        let timestamp_int = stream.read_u32::<LittleEndian>()?;
+        let resizable_b = stream.read_u8()?;
+
+        let field_check_flags = if has_flex_data {
+            stated_field_check_flags
+        } else {
+            0
+        };
+
+        let rotation_degree = (field_check_flags & 1 != 0)
+            .then(|| stream.read_f32::<LittleEndian>())
+            .transpose()?
+            .unwrap_or(0.);
+
+        let unknown_somethings = if field_check_flags & 2 != 0 {
+            let count = stream.read_u16::<LittleEndian>()?;
+
+            // JVM code skips over these once it knows how many there are.
+            let mut somethings = Vec::with_capacity(count.into());
+
+            for _ in 0..count {
+                let mut bytes = [0_u8; 16];
+                stream.read_exact(&mut bytes)?;
+                somethings.push(bytes);
+            }
+
+            Some(somethings)
+        } else {
+            None
+        };
+
+        let ao_info = (field_check_flags & 4 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let sor_bundle = (field_check_flags & 8 != 0)
+            .then(|| DocBundle::try_parse(stream))
+            .transpose()?;
+
+        let plugin_link = (field_check_flags & 16 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let extra_bundle = (field_check_flags & 32 != 0)
+            .then(|| DocBundle::try_parse(stream))
+            .transpose()?;
+
+        let attached_file_id = (field_check_flags & 64 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let min_width_height = if field_check_flags & 128 != 0 {
+            Some((
+                stream.read_f32::<LittleEndian>()?,
+                stream.read_f32::<LittleEndian>()?,
+            ))
+        } else {
+            None
+        };
+
+        let max_width_height = if field_check_flags & 256 != 0 {
+            Some((
+                stream.read_f32::<LittleEndian>()?,
+                stream.read_f32::<LittleEndian>()?,
+            ))
+        } else {
+            None
+        };
+
+        let append_time = (field_check_flags & 8192 != 0)
+            .then(|| read_timestamp(stream))
+            .transpose()?;
+
+        let owner_page_width_height = if field_check_flags & 16384 != 0 {
+            Some((
+                stream.read_u32::<LittleEndian>()?,
+                stream.read_u32::<LittleEndian>()?,
+            ))
+        } else {
+            None
+        };
+
+        let layout_type = (field_check_flags & 32768 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?
+            .unwrap_or(0);
+
+        let unknown_20 = if field_check_flags & 65536 != 0 {
+            let mut bytes = [0_u8; 20];
+            stream.read_exact(&mut bytes)?;
+            Some(bytes)
+        } else {
+            None
+        };
+
+        let thumbnail_bind_id = (field_check_flags & 131072 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let pivot = (field_check_flags & 262144 != 0)
+            .then(|| PointF64::try_parse(stream))
+            .transpose()?;
+
+        let group_id = (field_check_flags & 524288 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let position_now = stream.stream_position()?;
+
+        // Higher-level objects have data after the `ObjectBase`. For them to read this correctly,
+        // the stream needs to be in exactly the right position.
+        if position_now != expected_end {
+            eprintln!(
+                "Warning: Position after parsing ObjectBase is {position_now}, \
+                 but {expected_end} expected. Will seek to correct this."
+            );
+
+            stream.seek(SeekFrom::Start(expected_end))?;
+        }
+
+        Ok(ObjectBase {
+            rotatable,
+            selectable,
+            movable,
+            visible,
+            replayable,
+            clippable,
+            is_template_object,
+            flippable,
+            has_been_to_att,
+            lock_state,
+            removable,
+            format_version,
+            uuid,
+            modified_time,
+            rect,
+            timestamp_int,
+            resizable_b,
+            rotation_degree,
+            unknown_somethings,
+            ao_info,
+            sor_bundle,
+            plugin_link,
+            extra_bundle,
+            attached_file_id,
+            min_width_height,
+            max_width_height,
+            append_time,
+            owner_page_width_height,
+            layout_type,
+            unknown_20,
+            thumbnail_bind_id,
+            pivot,
+            group_id,
+        })
+    }
+}
 
 #[derive(Debug)]
 struct OpaqueObjectInner {
-    child_count: usize,
+    child_count: u16,
     inner: OpaqueBytes,
 }
 
-impl OpaqueObjectInner {
+impl DocObjectInner for OpaqueObjectInner {
     fn try_parse<T: ReadBytesExt>(
         stream: &mut T,
-        child_count: usize,
+        child_count: u16,
     ) -> color_eyre::Result<OpaqueObjectInner> {
         Ok(OpaqueObjectInner {
             child_count,
-            inner: OpaqueBytes::try_parse(stream)?,
+            inner: OpaqueBytes::try_parse_inclusive(stream)?,
         })
     }
 }
 
+trait DocObjectInner: Sized + std::fmt::Debug {
+    fn try_parse<T: ReadBytesExt + Seek>(
+        stream: &mut T,
+        child_count: u16,
+    ) -> color_eyre::Result<Self>;
+}
+
+#[derive(Debug)]
+struct ObjectBaseWrapper<I: DocObjectInner> {
+    base: ObjectBase,
+    inner: I,
+}
+
+impl<I: DocObjectInner> ObjectBaseWrapper<I> {
+    fn try_parse<T: ReadBytesExt + Seek>(
+        stream: &mut T,
+    ) -> color_eyre::Result<ObjectBaseWrapper<I>> {
+        let child_count = stream.read_u16::<LittleEndian>()?;
+
+        // This is the size of the `ObjectBase`, the inner object, and the hash.
+        let total_size: u64 = stream.read_u32::<LittleEndian>()?.into();
+        let expected_end = stream.stream_position()? + total_size;
+
+        let base = ObjectBase::try_parse(stream)?;
+        let inner = I::try_parse(stream, child_count)?;
+
+        let mut hash_read = [0_u8; 32];
+        stream.read_exact(&mut hash_read)?;
+
+        let hash_calculated = sha2::Sha256::digest(
+            format!("{}{}", base.uuid, base.modified_time.timestamp_micros()).as_bytes(),
+        );
+
+        if hash_calculated[..] != hash_read {
+            eprintln!("Warning: Hash mismatch");
+        } else {
+            eprintln!("Hashes match!");
+        }
+
+        let here = stream.stream_position()?;
+
+        if here != expected_end {
+            eprintln!(
+                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
+            );
+
+            stream.seek(SeekFrom::Start(expected_end))?;
+        } else {
+            eprintln!("Object ended as expected");
+        }
+
+        Ok(ObjectBaseWrapper { base, inner })
+    }
+}
+
+// fixme: `ObjectBaseWrapper<OpaqueObjectInner>` is wrong for anything that is not a direct
+// subclass of `WCon_ObjectBase`.
+
 #[derive(Debug)]
 enum DocObject {
+    /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
     Stroke {
         is_old_type: bool,
-        inner: OpaqueObjectInner,
+        object: ObjectBaseWrapper<OpaqueObjectInner>,
     },
 
-    Text(OpaqueObjectInner),
-    Image(OpaqueObjectInner),
-    Container(OpaqueObjectInner),
-    Shape(OpaqueObjectInner),
-    Line(OpaqueObjectInner),
-    Voice(OpaqueObjectInner),
-    Formula(OpaqueObjectInner),
-    Table(OpaqueObjectInner),
-    Web(OpaqueObjectInner),
-    Painting(OpaqueObjectInner),
-    Link(OpaqueObjectInner),
-    Maths(OpaqueObjectInner),
-    Plot(OpaqueObjectInner),
-    StrokeGroup(OpaqueObjectInner),
-    Generic(OpaqueObjectInner),
+    /// `WCon_ObjectTextBoxOrImage` (variant 1) extends `WCon_ObjectShape` (`Shape`)
+    Text(ObjectBaseWrapper<OpaqueObjectInner>),
 
-    Unknown {
-        object_type: u8,
-        inner: OpaqueObjectInner,
-    },
+    /// `WCon_ObjectTextBoxOrImage` (variant 0) extends `WCon_ObjectShape` (`Shape`)
+    Image(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectContainer`; extends `WCon_ObjectBase`
+    Container(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectShape`; extends `WCon_ObjectShapeBase`, which extends `WCon_ObjectBase`
+    Shape(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectLine`; extends `WCon_ObjectShapeBase` (see `Shape`)
+    Line(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectVoice`; extends `WCon_ObjectBase`
+    Voice(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectFormula`; extends `WCon_ObjectBase`
+    Formula(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectTable`; extends `WCon_ObjectBase`
+    Table(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectWeb`; extends `WCon_ObjectBase`
+    Web(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectPainting`; extends `WCon_ObjectBase`
+    Painting(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectLink`; extends `WCon_ObjectBase`
+    Link(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectMath`; extends `WCon_ObjectBase`
+    Maths(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectPlot`; extends `WCon_ObjectBase`
+    Plot(ObjectBaseWrapper<OpaqueObjectInner>),
+
+    /// `WCon_ObjectUnknown`; extends `WCon_ObjectBase`
+    Generic(ObjectBaseWrapper<OpaqueObjectInner>),
 }
 
 impl DocObject {
     fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<DocObject> {
         let object_type = stream.read_u8()?;
-        let child_count: usize = stream.read_u16::<LittleEndian>()?.into();
-        let inner = OpaqueObjectInner::try_parse(stream, child_count)?;
+
+        eprintln!("Object type {object_type}");
+
+        let object = ObjectBaseWrapper::try_parse(stream)?;
 
         Ok(match object_type {
             1 | 15 => DocObject::Stroke {
                 is_old_type: object_type == 15,
-                inner,
+                object,
             },
 
-            2 => DocObject::Text(inner),
-            3 => DocObject::Image(inner),
-            4 => DocObject::Container(inner),
-            7 => DocObject::Shape(inner),
-            8 => DocObject::Line(inner),
-            10 => DocObject::Voice(inner),
-            11 => DocObject::Formula(inner),
-            13 => DocObject::Web(inner),
-            14 => DocObject::Painting(inner),
-            17 => DocObject::Link(inner),
-            19 => DocObject::Generic(inner),
-            20 => DocObject::Plot(inner),
-            21 => DocObject::Maths(inner),
-            22 => DocObject::Table(inner),
-            100 => DocObject::StrokeGroup(inner),
+            2 => DocObject::Text(object),
+            3 => DocObject::Image(object),
+            4 => DocObject::Container(object),
+            7 => DocObject::Shape(object),
+            8 => DocObject::Line(object),
+            10 => DocObject::Voice(object),
+            11 => DocObject::Formula(object),
+            13 => DocObject::Web(object),
+            14 => DocObject::Painting(object),
+            17 => DocObject::Link(object),
+            19 => DocObject::Generic(object),
+            20 => DocObject::Plot(object),
+            21 => DocObject::Maths(object),
+            22 => DocObject::Table(object),
 
-            _ => DocObject::Unknown { object_type, inner },
+            unknown => return Err(eyre!("Unrecognised object type {unknown}")),
+            // There is also an object type 100, for `WDocObjectStrokeGroup`.
+            // As far as I can tell, this is not supposed to be written to disk, so we should
+            // never read it.
         })
     }
 }
@@ -1167,7 +1582,7 @@ impl Layer {
             .transpose()?;
 
         let shadow_effect = (field_check_flags & 64 != 0)
-            .then(|| OpaqueBytes::try_parse(stream))
+            .then(|| OpaqueBytes::try_parse_exclusive(stream))
             .transpose()?;
 
         let objects = {
@@ -1391,7 +1806,7 @@ impl Page {
             let mut entries = Vec::with_capacity(entry_count as usize);
 
             for _ in 0..entry_count {
-                entries.push(OpaqueBytes::try_parse(stream)?);
+                entries.push(OpaqueBytes::try_parse_exclusive(stream)?);
             }
 
             Some(entries)
