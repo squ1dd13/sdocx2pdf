@@ -1,11 +1,11 @@
-use crate::{OpaqueBytes, byte_stream::ByteStreamLe, page::RectF64};
+use crate::{OpaqueBytes, byte_stream::ByteStreamLe, page::Rect};
 use color_eyre::Result;
 
 #[derive(Debug)]
 pub struct PdfDataItem {
     bind_id: u32,
     page_index: u32,
-    pdf_rect: RectF64,
+    pdf_rect: Rect,
 }
 
 impl PdfDataItem {
@@ -14,9 +14,9 @@ impl PdfDataItem {
             bind_id: stream.read_u32_le()?,
             page_index: stream.read_u32_le()?,
             pdf_rect: if format_version < 2034 {
-                RectF64::try_parse(stream)?
+                Rect::try_parse_f64(stream)?
             } else {
-                RectF64 {
+                Rect {
                     left: stream.read_i32_le()?.into(),
                     top: stream.read_i32_le()?.into(),
                     right: stream.read_i32_le()?.into(),

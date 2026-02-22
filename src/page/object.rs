@@ -1,13 +1,16 @@
 use crate::{
     OpaqueBytes,
     byte_stream::ByteStreamLe,
-    page::{PointF64, RectF64},
+    page::{Point, Rect, object::line::LineObject},
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use indexmap::IndexMap;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::io::{Seek, SeekFrom};
+
+mod line;
+mod shape_base;
 
 #[derive(Debug, Default)]
 struct DocBundle {
@@ -18,6 +21,22 @@ struct DocBundle {
 }
 
 impl DocBundle {
+    /// Like `read_short_u8_string`, but removes a single trailing `\0` from the string if
+    /// it finds one.
+    ///
+    /// This is useful because the keys for these maps tend to end with a nul for some reason.
+    /// (This seems intentional (?) in the JVM code; we see things
+    /// like `"SPEN_SDK_KEY_SYSTEM_RESERVED_EXTRA_DATA\u0000"`.)
+    fn read_short_u8_string_without_nul(stream: &mut impl ByteStreamLe) -> Result<String> {
+        let mut s = stream.read_short_u8_string()?;
+
+        if !s.is_empty() && s.ends_with('\0') {
+            s.pop();
+        }
+
+        Ok(s)
+    }
+
     fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<DocBundle> {
         let map_presence_flags = stream.read_u8()?;
 
@@ -25,11 +44,11 @@ impl DocBundle {
 
         if map_presence_flags & 1 != 0 {
             let entry_count: usize = stream.read_u16_le()?.into();
-            bundle.strings.reserve(entry_count);
+            bundle.strings.reserve_exact(entry_count);
 
             for _ in 0..entry_count {
                 bundle.strings.insert(
-                    stream.read_short_u8_string()?,
+                    Self::read_short_u8_string_without_nul(stream)?,
                     stream.read_short_u16_string()?,
                 );
             }
@@ -37,21 +56,22 @@ impl DocBundle {
 
         if map_presence_flags & 2 != 0 {
             let entry_count: usize = stream.read_u16_le()?.into();
-            bundle.integers.reserve(entry_count);
+            bundle.integers.reserve_exact(entry_count);
 
             for _ in 0..entry_count {
-                bundle
-                    .integers
-                    .insert(stream.read_short_u8_string()?, stream.read_u32_le()?);
+                bundle.integers.insert(
+                    Self::read_short_u8_string_without_nul(stream)?,
+                    stream.read_u32_le()?,
+                );
             }
         }
 
         if map_presence_flags & 4 != 0 {
             let entry_count: usize = stream.read_u16_le()?.into();
-            bundle.string_vecs.reserve(entry_count);
+            bundle.string_vecs.reserve_exact(entry_count);
 
             for _ in 0..entry_count {
-                let key = stream.read_short_u8_string()?;
+                let key = Self::read_short_u8_string_without_nul(stream)?;
 
                 let string_count: usize = stream.read_u16_le()?.into();
                 let mut strings = Vec::with_capacity(string_count);
@@ -66,11 +86,11 @@ impl DocBundle {
 
         if map_presence_flags & 8 != 0 {
             let entry_count: usize = stream.read_u16_le()?.into();
-            bundle.byte_vecs.reserve(entry_count);
+            bundle.byte_vecs.reserve_exact(entry_count);
 
             for _ in 0..entry_count {
                 bundle.byte_vecs.insert(
-                    stream.read_short_u8_string()?,
+                    Self::read_short_u8_string_without_nul(stream)?,
                     OpaqueBytes::try_parse_exclusive(stream)?,
                 );
             }
@@ -97,9 +117,9 @@ struct ObjectBase {
     format_version: u32,
     uuid: String,
     modified_time: DateTime<Utc>,
-    rect: RectF64,
+    rect: Rect,
     timestamp_int: u32,
-    resizable_b: u8,
+    resize_type: u8,
 
     rotation_degree: f32,
     unknown_somethings: Option<Vec<[u8; 16]>>,
@@ -115,9 +135,19 @@ struct ObjectBase {
     layout_type: u32,
     unknown_20: Option<[u8; 20]>,
     thumbnail_bind_id: Option<u32>,
-    pivot: Option<PointF64>,
+    pivot: Option<Point>,
     group_id: Option<String>,
 }
+
+trait InheritsObjectBase: Sized {
+    fn try_parse<T: ByteStreamLe + Seek>(
+        stream: &mut T,
+        object_base: ObjectBase,
+        child_count: u16,
+    ) -> Result<Self>;
+}
+
+trait ConcreteInheritsObjectBase: InheritsObjectBase {}
 
 impl ObjectBase {
     fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<ObjectBase> {
@@ -164,7 +194,7 @@ impl ObjectBase {
 
         let uuid = stream.read_short_u8_string()?;
         let modified_time = stream.read_timestamp()?;
-        let rect = RectF64::try_parse(stream)?;
+        let rect = Rect::try_parse_f64(stream)?;
         let timestamp_int = stream.read_u32_le()?;
         let resizable_b = stream.read_u8()?;
 
@@ -256,7 +286,7 @@ impl ObjectBase {
             .transpose()?;
 
         let pivot = (field_check_flags & 262144 != 0)
-            .then(|| PointF64::try_parse(stream))
+            .then(|| Point::try_parse_f64(stream))
             .transpose()?;
 
         let group_id = (field_check_flags & 524288 != 0)
@@ -293,7 +323,7 @@ impl ObjectBase {
             modified_time,
             rect,
             timestamp_int,
-            resizable_b,
+            resize_type: resizable_b,
             rotation_degree,
             unknown_somethings,
             ao_info,
@@ -311,6 +341,49 @@ impl ObjectBase {
             pivot,
             group_id,
         })
+    }
+
+    fn hash(&self) -> [u8; 32] {
+        let s = format!("{}{}", self.uuid, self.modified_time.timestamp_micros());
+        Sha256::digest(s.as_bytes()).into()
+    }
+
+    fn try_parse_wrapped<T: ByteStreamLe + Seek, I: ConcreteInheritsObjectBase>(
+        stream: &mut T,
+    ) -> Result<I> {
+        let child_count = stream.read_u16_le()?;
+
+        // This is the size of the `ObjectBase`, the inner object, and the hash.
+        let total_size: u64 = stream.read_u32_le()?.into();
+        let expected_end = stream.stream_position()? + total_size;
+
+        let base = ObjectBase::try_parse(stream)?;
+        let base_hash = base.hash();
+
+        let parsed = I::try_parse(stream, base, child_count)?;
+
+        let mut hash_read = [0_u8; 32];
+        stream.read_exact(&mut hash_read)?;
+
+        if base_hash != hash_read {
+            eprintln!("Warning: Hash mismatch");
+        } else {
+            eprintln!("Hashes match!");
+        }
+
+        let here = stream.stream_position()?;
+
+        if here != expected_end {
+            eprintln!(
+                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
+            );
+
+            stream.seek(SeekFrom::Start(expected_end))?;
+        } else {
+            eprintln!("Object ended as expected");
+        }
+
+        Ok(parsed)
     }
 }
 
@@ -353,7 +426,7 @@ impl<I: DocObjectInner> ObjectBaseWrapper<I> {
         let mut hash_read = [0_u8; 32];
         stream.read_exact(&mut hash_read)?;
 
-        let hash_calculated = sha2::Sha256::digest(
+        let hash_calculated = Sha256::digest(
             format!("{}{}", base.uuid, base.modified_time.timestamp_micros()).as_bytes(),
         );
 
@@ -382,6 +455,8 @@ impl<I: DocObjectInner> ObjectBaseWrapper<I> {
 // fixme: `ObjectBaseWrapper<OpaqueObjectInner>` is wrong for anything that is not a direct
 // subclass of `WCon_ObjectBase`.
 
+// todo: Remove boxes once everything is of a similar size.
+
 #[derive(Debug)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
@@ -403,7 +478,7 @@ pub enum DocObject {
     Shape(ObjectBaseWrapper<OpaqueObjectInner>),
 
     /// `WCon_ObjectLine`; extends `WCon_ObjectShapeBase` (see `Shape`)
-    Line(ObjectBaseWrapper<OpaqueObjectInner>),
+    Line(Box<LineObject>),
 
     /// `WCon_ObjectVoice`; extends `WCon_ObjectBase`
     Voice(ObjectBaseWrapper<OpaqueObjectInner>),
@@ -439,6 +514,12 @@ impl DocObject {
 
         eprintln!("Object type {object_type}");
 
+        if object_type == 8 {
+            return Ok(DocObject::Line(Box::new(ObjectBase::try_parse_wrapped(
+                stream,
+            )?)));
+        }
+
         let object = ObjectBaseWrapper::try_parse(stream)?;
 
         Ok(match object_type {
@@ -451,7 +532,6 @@ impl DocObject {
             3 => DocObject::Image(object),
             4 => DocObject::Container(object),
             7 => DocObject::Shape(object),
-            8 => DocObject::Line(object),
             10 => DocObject::Voice(object),
             11 => DocObject::Formula(object),
             13 => DocObject::Web(object),

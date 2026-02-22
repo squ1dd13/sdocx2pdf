@@ -165,6 +165,7 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
         "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052",
+        "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513",
     ];
 
     for path in extracted_sdocx_paths {
@@ -176,6 +177,7 @@ fn demo_all() -> Result<()> {
 
 // .ssf is "snap saved file"
 // https://github.com/fschutt/printpdf
+// Use e.g. SpenObjectBase to get names for constants and more context for the WCon classes
 
 fn main() -> Result<()> {
     color_eyre::install()?;

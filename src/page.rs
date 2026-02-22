@@ -16,31 +16,38 @@ mod header;
 mod object;
 
 #[derive(Debug)]
-struct PointF64 {
+struct Point {
     x: f64,
     y: f64,
 }
 
-impl PointF64 {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<PointF64> {
-        Ok(PointF64 {
+impl Point {
+    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> Result<Point> {
+        Ok(Point {
             x: stream.read_f64_le()?,
             y: stream.read_f64_le()?,
+        })
+    }
+
+    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> Result<Point> {
+        Ok(Point {
+            x: stream.read_f32_le()?.into(),
+            y: stream.read_f32_le()?.into(),
         })
     }
 }
 
 #[derive(Debug)]
-struct RectF64 {
+struct Rect {
     left: f64,
     top: f64,
     right: f64,
     bottom: f64,
 }
 
-impl RectF64 {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<RectF64> {
-        Ok(RectF64 {
+impl Rect {
+    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> Result<Rect> {
+        Ok(Rect {
             left: stream.read_f64_le()?,
             top: stream.read_f64_le()?,
             right: stream.read_f64_le()?,
@@ -164,7 +171,7 @@ pub struct Page {
     format_version: u32,
     min_format_version: u32,
 
-    drawn_rect: Option<RectF64>,
+    drawn_rect: Option<Rect>,
     tag_list: Option<Vec<String>>,
     template_uri: Option<String>,
     background_image_id: Option<i32>,
@@ -236,7 +243,7 @@ impl Page {
 
         // == "Flexible area" ==
         let drawn_rect = (field_check_flags & 1 != 0)
-            .then(|| RectF64::try_parse(stream))
+            .then(|| Rect::try_parse_f64(stream))
             .transpose()?;
 
         let tag_list: Option<Vec<String>> = if field_check_flags & 2 != 0 {
@@ -306,7 +313,7 @@ impl Page {
             let entry_size: i64 = stream.read_u16_le()?.into();
 
             if entry_size == 49 {
-                canvas_cache_map.reserve(entry_count.try_into()?);
+                canvas_cache_map.reserve_exact(entry_count.try_into()?);
 
                 for _ in 0..entry_count {
                     let key = stream.read_u32_le()?;
@@ -350,7 +357,7 @@ impl Page {
 
         if field_check_flags & 262144 != 0 {
             let custom_object_count: usize = stream.read_u32_le()?.try_into()?;
-            custom_objects.reserve(custom_object_count);
+            custom_objects.reserve_exact(custom_object_count);
 
             for _ in 0..custom_object_count {
                 custom_objects.push(CustomPageObject::try_parse(stream)?);
