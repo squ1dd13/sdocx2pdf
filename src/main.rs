@@ -33,6 +33,7 @@
     clippy::shadow_unrelated,
     clippy::similar_names,
     clippy::suspicious_operation_groupings,
+    clippy::todo,
     unused_crate_dependencies,
     unused_extern_crates,
     unused_import_braces,
@@ -64,9 +65,10 @@ fn read_u8_string(stream: &mut impl ReadBytesExt, n_chars: usize) -> color_eyre:
 }
 
 fn read_u16_string(stream: &mut impl ReadBytesExt, n_chars: usize) -> color_eyre::Result<String> {
-    let bytes = read_u8_buf(stream, 2 * n_chars)?;
+    let mut buf = vec![0_u16; n_chars];
+    stream.read_u16_into::<LittleEndian>(&mut buf)?;
 
-    char::decode_utf16((0..n_chars).map(|i| u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]])))
+    char::decode_utf16(buf)
         .collect::<color_eyre::Result<String, _>>()
         .map_err(From::from)
 }
@@ -83,7 +85,7 @@ fn read_long_u16_string(stream: &mut impl ReadBytesExt) -> color_eyre::Result<St
 
 fn read_timestamp(stream: &mut impl ReadBytesExt) -> color_eyre::Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(stream.read_i64::<LittleEndian>()?)
-        .ok_or_eyre("invalid timestamp")
+        .ok_or_eyre("Invalid timestamp")
 }
 
 fn read_variable_length_bitfield(stream: &mut impl ReadBytesExt) -> color_eyre::Result<u32> {
@@ -97,29 +99,34 @@ fn read_variable_length_bitfield(stream: &mut impl ReadBytesExt) -> color_eyre::
         4 => stream.read_u32::<LittleEndian>()?,
         5.. => {
             return Err(eyre!(
-                "variable length bitfield cannot be more than 4 bytes (found {n_bytes})"
+                "Variable length bitfield cannot be more than 4 bytes (found {n_bytes})"
             ));
         }
     })
 }
 
-struct TextObject {
+/// Holds a generic vector of bytes.
+///
+/// A common pattern in the binary formats is a 32-bit size `n` followed
+/// by `n` bytes. This structure is intended to store the bytes that occur in these
+/// patterns without having to actually parse whatever they encode.
+struct OpaqueBytes {
     bytes: Vec<u8>,
 }
 
-impl TextObject {
-    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<TextObject> {
+impl OpaqueBytes {
+    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<OpaqueBytes> {
         let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
 
-        Ok(TextObject {
+        Ok(OpaqueBytes {
             bytes: read_u8_buf(stream, size)?,
         })
     }
 }
 
-impl std::fmt::Debug for TextObject {
+impl std::fmt::Debug for OpaqueBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TextObject {{ ({} bytes) }}", self.bytes.len())
+        write!(f, "OpaqueBytes {{ ({} bytes) }}", self.bytes.len())
     }
 }
 
@@ -270,8 +277,8 @@ struct NoteDoc {
     page_horizontal_padding: u32,
     page_vertical_padding: u32,
     min_format_version: u32,
-    title_text: TextObject,
-    body_text: TextObject,
+    title_text: OpaqueBytes,
+    body_text: OpaqueBytes,
     metadata: NoteDocMetadata,
     template_uri: Option<String>,
     last_edited_page_index: Option<u32>,
@@ -316,8 +323,8 @@ impl NoteDoc {
         let page_vertical_padding = stream.read_u32::<LittleEndian>()?;
         let min_format_version = stream.read_u32::<LittleEndian>()?;
 
-        let title_text = TextObject::try_parse(stream)?;
-        let body_text = TextObject::try_parse(stream)?;
+        let title_text = OpaqueBytes::try_parse(stream)?;
+        let body_text = OpaqueBytes::try_parse(stream)?;
 
         stream.seek(SeekFrom::Start(flexible_data_area_offset))?;
 
@@ -696,8 +703,8 @@ impl ModelEndTag {
 
         if !ident_matches {
             return Err(ident_found.map_or_else(
-                || eyre!("not enough space for ident '{expected_ident}'"),
-                |found| eyre!("ident '{found}' does not match expected '{expected_ident}'"),
+                || eyre!("Not enough space for ident '{expected_ident}'"),
+                |found| eyre!("Ident '{found}' does not match expected '{expected_ident}'"),
             ));
         }
 
@@ -977,55 +984,20 @@ impl CanvasCacheEntry {
     }
 }
 
-struct StrokeRecognitionEntry {
-    bytes: Vec<u8>,
-}
-
-impl StrokeRecognitionEntry {
-    fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<StrokeRecognitionEntry> {
-        let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
-
-        Ok(StrokeRecognitionEntry {
-            bytes: read_u8_buf(stream, size)?,
-        })
-    }
-}
-
-impl std::fmt::Debug for StrokeRecognitionEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "StrokeRecognitionEntry {{ ({} bytes) }}",
-            self.bytes.len()
-        )
-    }
-}
-
+#[derive(Debug)]
 struct CustomPageObject {
     object_type: u32,
-    bytes: Vec<u8>,
+    inner: OpaqueBytes,
 }
 
 impl CustomPageObject {
     fn try_parse<T: ReadBytesExt>(stream: &mut T) -> color_eyre::Result<CustomPageObject> {
         let object_type = stream.read_u32::<LittleEndian>()?;
-        let size: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
 
         Ok(CustomPageObject {
             object_type,
-            bytes: read_u8_buf(stream, size)?,
+            inner: OpaqueBytes::try_parse(stream)?,
         })
-    }
-}
-
-impl std::fmt::Debug for CustomPageObject {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "CustomObject {{ type: {}; ({} bytes) }}",
-            self.object_type,
-            self.bytes.len()
-        )
     }
 }
 
@@ -1051,6 +1023,187 @@ impl std::fmt::Debug for CustomPageObject {
 // }
 
 #[derive(Debug)]
+struct OpaqueObjectInner {
+    child_count: usize,
+    inner: OpaqueBytes,
+}
+
+impl OpaqueObjectInner {
+    fn try_parse<T: ReadBytesExt>(
+        stream: &mut T,
+        child_count: usize,
+    ) -> color_eyre::Result<OpaqueObjectInner> {
+        Ok(OpaqueObjectInner {
+            child_count,
+            inner: OpaqueBytes::try_parse(stream)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum DocObject {
+    Stroke {
+        is_old_type: bool,
+        inner: OpaqueObjectInner,
+    },
+
+    Text(OpaqueObjectInner),
+    Image(OpaqueObjectInner),
+    Container(OpaqueObjectInner),
+    Shape(OpaqueObjectInner),
+    Line(OpaqueObjectInner),
+    Voice(OpaqueObjectInner),
+    Formula(OpaqueObjectInner),
+    Table(OpaqueObjectInner),
+    Web(OpaqueObjectInner),
+    Painting(OpaqueObjectInner),
+    Link(OpaqueObjectInner),
+    Maths(OpaqueObjectInner),
+    Plot(OpaqueObjectInner),
+    StrokeGroup(OpaqueObjectInner),
+    Generic(OpaqueObjectInner),
+
+    Unknown {
+        object_type: u8,
+        inner: OpaqueObjectInner,
+    },
+}
+
+impl DocObject {
+    fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<DocObject> {
+        let object_type = stream.read_u8()?;
+        let child_count: usize = stream.read_u16::<LittleEndian>()?.into();
+        let inner = OpaqueObjectInner::try_parse(stream, child_count)?;
+
+        Ok(match object_type {
+            1 | 15 => DocObject::Stroke {
+                is_old_type: object_type == 15,
+                inner,
+            },
+
+            2 => DocObject::Text(inner),
+            3 => DocObject::Image(inner),
+            4 => DocObject::Container(inner),
+            7 => DocObject::Shape(inner),
+            8 => DocObject::Line(inner),
+            10 => DocObject::Voice(inner),
+            11 => DocObject::Formula(inner),
+            13 => DocObject::Web(inner),
+            14 => DocObject::Painting(inner),
+            17 => DocObject::Link(inner),
+            19 => DocObject::Generic(inner),
+            20 => DocObject::Plot(inner),
+            21 => DocObject::Maths(inner),
+            22 => DocObject::Table(inner),
+            100 => DocObject::StrokeGroup(inner),
+
+            _ => DocObject::Unknown { object_type, inner },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Layer {
+    visible: bool,
+    lock_state: bool,
+    event_forwardable: bool,
+
+    layer_id: u32,
+
+    alpha: u8,
+    background_colour: [u8; 4],
+    name: Option<String>,
+    uuid: Option<String>,
+    modified_time: Option<DateTime<Utc>>,
+    thumbnail_media_id: Option<u32>,
+    shadow_effect: Option<OpaqueBytes>,
+
+    objects: Vec<DocObject>,
+
+    hash: [u8; 32],
+}
+
+impl Layer {
+    fn try_parse<T: ReadBytesExt + Seek>(stream: &mut T) -> color_eyre::Result<Layer> {
+        let data_size = stream.read_u32::<LittleEndian>()?;
+        let flex_offset: u64 = stream.read_u32::<LittleEndian>()?.into();
+
+        let property_flags = read_variable_length_bitfield(stream)?;
+        let field_check_flags = read_variable_length_bitfield(stream)?;
+
+        // The first property flag is for invisibility, so visibility is its inverse.
+        let visible = property_flags & 1 == 0;
+        let lock_state = property_flags & 4 != 0;
+        let event_forwardable = property_flags & 2 != 0;
+
+        let layer_id = stream.read_u32::<LittleEndian>()?;
+
+        stream.seek(SeekFrom::Start(flex_offset))?;
+
+        let alpha = (field_check_flags & 1 != 0)
+            .then(|| stream.read_u8())
+            .transpose()?
+            .unwrap_or(255);
+
+        let background_colour = (field_check_flags & 2 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?
+            .map_or([0xff, 0xff, 0xff, 0xff], u32::to_le_bytes);
+
+        let name = (field_check_flags & 4 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let uuid = (field_check_flags & 8 != 0)
+            .then(|| read_short_u16_string(stream))
+            .transpose()?;
+
+        let modified_time = (field_check_flags & 16 != 0)
+            .then(|| read_timestamp(stream))
+            .transpose()?;
+
+        let thumbnail_media_id = (field_check_flags & 32 != 0)
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?;
+
+        let shadow_effect = (field_check_flags & 64 != 0)
+            .then(|| OpaqueBytes::try_parse(stream))
+            .transpose()?;
+
+        let objects = {
+            let object_count: usize = stream.read_u32::<LittleEndian>()?.try_into()?;
+
+            let mut objects = Vec::with_capacity(object_count);
+
+            for _ in 0..object_count {
+                objects.push(DocObject::try_parse(stream)?);
+            }
+
+            objects
+        };
+
+        let mut hash = [0_u8; 32];
+        stream.read_exact(&mut hash)?;
+
+        Ok(Layer {
+            visible,
+            lock_state,
+            event_forwardable,
+            layer_id,
+            alpha,
+            background_colour,
+            name,
+            uuid,
+            modified_time,
+            thumbnail_media_id,
+            shadow_effect,
+            objects,
+            hash,
+        })
+    }
+}
+
+#[derive(Debug)]
 struct Page {
     is_text_only: bool,
 
@@ -1068,20 +1221,22 @@ struct Page {
     tag_list: Option<Vec<String>>,
     template_uri: Option<String>,
     background_image_id: Option<i32>,
-    background_image_mode: Option<u32>,
-    background_colour: Option<[u8; 4]>,
-    background_width: Option<u32>,
-    background_rotation: Option<u32>,
+    background_image_mode: u32,
+    background_colour: [u8; 4],
+    background_width: u32,
+    background_rotation: u32,
     pdf_data_items: Option<Vec<PdfDataItem>>,
     template_type: Option<u32>,
     canvas_cache_map: Vec<(u32, CanvasCacheEntry)>,
     imported_data_height: Option<u32>,
     theme: Option<u32>,
     recognised_data_modified_time: Option<DateTime<Utc>>,
-    stroke_recognition_data: Option<Vec<StrokeRecognitionEntry>>,
+    stroke_recognition_data: Option<Vec<OpaqueBytes>>,
     custom_objects: Vec<CustomPageObject>,
 
     hash: [u8; 32],
+
+    layers: Vec<Layer>,
 }
 
 impl Page {
@@ -1102,7 +1257,7 @@ impl Page {
 
         if closing_string != Self::CLOSING_STRING {
             return Err(eyre!(
-                "closing string '{closing_string}' does not match expected '{}'",
+                "Closing string '{closing_string}' does not match expected '{}'",
                 Self::CLOSING_STRING
             ));
         }
@@ -1159,19 +1314,23 @@ impl Page {
 
         let background_image_mode = (field_check_flags & 16 != 0)
             .then(|| stream.read_u32::<LittleEndian>())
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(0);
 
         let background_colour = (field_check_flags & 32 != 0)
-            .then(|| stream.read_u32::<LittleEndian>().map(u32::to_le_bytes))
-            .transpose()?;
+            .then(|| stream.read_u32::<LittleEndian>())
+            .transpose()?
+            .map_or([0xff, 0xff, 0xff, 0xff], u32::to_le_bytes);
 
         let background_width = (field_check_flags & 64 != 0)
             .then(|| stream.read_u32::<LittleEndian>())
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(0);
 
         let background_rotation = (field_check_flags & 128 != 0)
             .then(|| stream.read_u32::<LittleEndian>())
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(0);
 
         let pdf_data_items: Option<Vec<PdfDataItem>> = if field_check_flags & 256 != 0 {
             let item_count = stream.read_u16::<LittleEndian>()?;
@@ -1226,20 +1385,19 @@ impl Page {
             .then(|| read_timestamp(stream))
             .transpose()?;
 
-        let stroke_recognition_data: Option<Vec<StrokeRecognitionEntry>> =
-            if field_check_flags & 65536 != 0 {
-                let entry_count = stream.read_u32::<LittleEndian>()?;
+        let stroke_recognition_data: Option<Vec<OpaqueBytes>> = if field_check_flags & 65536 != 0 {
+            let entry_count = stream.read_u32::<LittleEndian>()?;
 
-                let mut entries = Vec::with_capacity(entry_count as usize);
+            let mut entries = Vec::with_capacity(entry_count as usize);
 
-                for _ in 0..entry_count {
-                    entries.push(StrokeRecognitionEntry::try_parse(stream)?);
-                }
+            for _ in 0..entry_count {
+                entries.push(OpaqueBytes::try_parse(stream)?);
+            }
 
-                Some(entries)
-            } else {
-                None
-            };
+            Some(entries)
+        } else {
+            None
+        };
 
         let mut custom_objects: Vec<CustomPageObject> = vec![];
 
@@ -1271,13 +1429,27 @@ impl Page {
             hash
         };
 
-        eprintln!(
-            "end at {}; expected end around {}",
-            stream.stream_position()?,
-            data_start_pos + u64::from(page_size)
-        );
+        let layer_count: usize = stream.read_u16::<LittleEndian>()?.into();
+        let current_layer_index = stream.read_u16::<LittleEndian>()?;
 
-        // todo: Load layers.
+        let mut layers = Vec::with_capacity(layer_count);
+
+        for _ in 0..layer_count {
+            layers.push(Layer::try_parse(stream)?);
+        }
+
+        let mut remaining_bytes = vec![];
+        stream.read_to_end(&mut remaining_bytes)?;
+
+        let expected_remaining_count: usize = (32 + closing_string_size).try_into()?;
+
+        if remaining_bytes.len() != expected_remaining_count {
+            return Err(eyre!(
+                "Wrong number of bytes remaining: found {}, not {}",
+                remaining_bytes.len(),
+                expected_remaining_count
+            ));
+        }
 
         Ok(Page {
             is_text_only,
@@ -1307,6 +1479,7 @@ impl Page {
             stroke_recognition_data,
             custom_objects,
             hash,
+            layers,
         })
     }
 }
