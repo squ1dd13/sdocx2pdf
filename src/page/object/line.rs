@@ -4,86 +4,17 @@ use crate::{
     page::{
         Point, Rect,
         object::{
-            ConcreteInheritsObjectBase, DocObjectInner, InheritsObjectBase, shape_base::ShapeBase,
+            ConcreteInheritsObjectBase, DocObjectInner, InheritsObjectBase, shape_base::Base,
+            shared::Path,
         },
     },
 };
 use color_eyre::eyre::{Result, eyre};
 use std::io::{Seek, SeekFrom};
 
-/// A segment of a `Path`. Variant names are based on `SpenPath` constants.
-#[derive(Debug)]
-enum PathSegment {
-    /// `TYPE_MOVETO`; 1
-    MoveTo(Point),
-
-    /// `TYPE_LINETO`; 2
-    LineTo(Point),
-
-    /// `TYPE_QUADTO`; 3
-    QuadTo(Point, Point),
-
-    /// `TYPE_CUBICTO`; 4
-    CubicTo(Point, Point, Point),
-
-    /// `TYPE_ARCTO`; 5
-    ArcTo(Rect, f64, f64),
-
-    /// `TYPE_CLOSE`; 6
-    Close,
-
-    /// `TYPE_ADDOVAL`; 7
-    AddOval(Rect),
-}
-
-#[derive(Debug)]
-struct Path {
-    segments: Vec<PathSegment>,
-}
-
-impl Path {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<Path> {
-        let segment_count: usize = stream.read_u32_le()?.try_into()?;
-        let mut segments = Vec::with_capacity(segment_count);
-
-        for _ in 0..segment_count {
-            segments.push(match stream.read_u8()? {
-                1 => PathSegment::MoveTo(Point::try_parse_f64(stream)?),
-
-                2 => PathSegment::LineTo(Point::try_parse_f64(stream)?),
-
-                3 => PathSegment::QuadTo(
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                ),
-
-                4 => PathSegment::CubicTo(
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                ),
-
-                5 => PathSegment::ArcTo(
-                    Rect::try_parse_f64(stream)?,
-                    stream.read_f64_le()?,
-                    stream.read_f64_le()?,
-                ),
-
-                6 => PathSegment::Close,
-
-                7 => PathSegment::AddOval(Rect::try_parse_f64(stream)?),
-
-                unknown => return Err(eyre!("Bad path segment type ID {unknown}")),
-            });
-        }
-
-        Ok(Path { segments })
-    }
-}
-
 #[derive(Debug)]
 pub struct LineObject {
-    shape_base: ShapeBase,
+    shape_base: Base,
     connector_type: u8,
     start_direction: u8,
     control_points: Vec<Point>,
@@ -104,7 +35,7 @@ impl InheritsObjectBase for LineObject {
         object_base: ObjectBase,
         child_count: u16,
     ) -> Result<LineObject> {
-        let shape_base = ShapeBase::try_parse(stream, object_base, child_count)?;
+        let shape_base = Base::try_parse(stream, object_base, child_count)?;
 
         let start_offset = stream.stream_position()?;
 

@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use indexmap::IndexMap;
 use sha2::Digest;
-use std::io::{Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom};
 
 mod header;
 mod object;
@@ -22,14 +22,14 @@ struct Point {
 }
 
 impl Point {
-    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> Result<Point> {
+    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> io::Result<Point> {
         Ok(Point {
             x: stream.read_f64_le()?,
             y: stream.read_f64_le()?,
         })
     }
 
-    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> Result<Point> {
+    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Point> {
         Ok(Point {
             x: stream.read_f32_le()?.into(),
             y: stream.read_f32_le()?.into(),
@@ -46,7 +46,7 @@ struct Rect {
 }
 
 impl Rect {
-    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> Result<Rect> {
+    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
         Ok(Rect {
             left: stream.read_f64_le()?,
             top: stream.read_f64_le()?,

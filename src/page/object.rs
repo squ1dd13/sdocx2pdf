@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use std::io::{Seek, SeekFrom};
 
 mod line;
+mod shape;
 mod shape_base;
+mod shared;
+mod text;
 
 #[derive(Debug, Default)]
 struct DocBundle {
@@ -505,9 +508,10 @@ pub enum DocObject {
 }
 
 impl DocObject {
-    pub fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<DocObject> {
-        let object_type = stream.read_u8()?;
-
+    pub fn try_parse_with_type<T: ByteStreamLe + Seek>(
+        stream: &mut T,
+        object_type: u8,
+    ) -> Result<DocObject> {
         eprintln!("Object type {object_type}");
 
         if object_type == 8 {
@@ -543,5 +547,10 @@ impl DocObject {
             // As far as I can tell, this is not supposed to be written to disk, so we should
             // never read it.
         })
+    }
+
+    pub fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<DocObject> {
+        let object_type = stream.read_u8()?;
+        Self::try_parse_with_type(stream, object_type)
     }
 }

@@ -3,7 +3,10 @@ use crate::{
     byte_stream::ByteStreamLe,
     page::{
         Point,
-        object::{DocObjectInner, InheritsObjectBase},
+        object::{
+            DocObjectInner, InheritsObjectBase,
+            shared::{ColourType, GradientColour, GradientType},
+        },
     },
 };
 use color_eyre::{
@@ -14,32 +17,6 @@ use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::io::{Seek, SeekFrom};
 
-#[derive(Debug, FromPrimitive)]
-enum ColourType {
-    /// `COLOR_SOLID`
-    Solid = 0,
-    /// `COLOR_GRADIENT`
-    Gradient = 1,
-}
-
-#[derive(Debug, FromPrimitive)]
-enum GradientType {
-    /// `GRADIENT_LINEAR`
-    Linear = 0,
-    /// `GRADIENT_RADIAL`
-    Radial = 1,
-    /// `GRADIENT_RECTANGULAR`
-    Rectangular = 2,
-    /// `GRADIENT_PATH`
-    Path = 3,
-}
-
-#[derive(Debug)]
-struct GradientColour {
-    colour: [u8; 4],
-    position: f32,
-}
-
 #[derive(Debug)]
 struct LineColourEffect {
     gradient_rotatable: bool,
@@ -47,7 +24,7 @@ struct LineColourEffect {
     solid_colour: [u8; 4],
     gradient_type: GradientType,
     angle: u16,
-    position: Point,
+    radial_gradient_pos: Point,
     colours: Vec<GradientColour>,
 }
 
@@ -75,7 +52,7 @@ impl LineColourEffect {
                 GradientType::from_u8(val).ok_or_else(|| eyre!("Bad gradient type {val}"))?
             },
             angle: stream.read_u16_le()?,
-            position: Point::try_parse_f32(stream)?,
+            radial_gradient_pos: Point::try_parse_f32(stream)?,
             colours: {
                 let count: usize = stream.read_u8()?.into();
                 let mut colours = Vec::with_capacity(count);
@@ -241,7 +218,7 @@ struct ConnectionPoint {
 }
 
 #[derive(Debug)]
-pub struct ShapeBase {
+pub struct Base {
     object_base: ObjectBase,
 
     line_colour_effect: Option<LineColourEffect>,
@@ -253,12 +230,12 @@ pub struct ShapeBase {
     points_of_connection: Vec<Point>,
 }
 
-impl InheritsObjectBase for ShapeBase {
+impl InheritsObjectBase for Base {
     fn try_parse<T: ByteStreamLe + Seek>(
         stream: &mut T,
         object_base: ObjectBase,
         child_count: u16,
-    ) -> Result<ShapeBase> {
+    ) -> Result<Base> {
         if child_count != 0 {
             return Err(eyre!(
                 "Shape base should not have children, but {child_count} declared"
@@ -359,7 +336,7 @@ impl InheritsObjectBase for ShapeBase {
             ));
         }
 
-        Ok(ShapeBase {
+        Ok(Base {
             object_base,
             line_colour_effect,
             line_style_effect,

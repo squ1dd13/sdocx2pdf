@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use std::io;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Error, Debug)]
 pub enum ReadStringError {
     #[error("failed to read size field")]
     SizeIo(io::Error),
@@ -21,7 +21,7 @@ pub enum ReadStringError {
     Utf8Decode(#[from] std::string::FromUtf8Error),
 }
 
-#[derive(Debug, Error)]
+#[derive(Error, Debug)]
 pub enum ReadTimestampError {
     #[error("failed to read")]
     Io(#[from] io::Error),
@@ -30,7 +30,7 @@ pub enum ReadTimestampError {
     OutOfRange(i64),
 }
 
-#[derive(Debug, Error)]
+#[derive(Error, Debug)]
 pub enum ReadBitfieldError {
     #[error("failed to read size field")]
     SizeIo(io::Error),
