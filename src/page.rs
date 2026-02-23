@@ -1,6 +1,6 @@
 use crate::{
     OpaqueBytes,
-    byte_stream::ByteStreamLe,
+    byte_stream::{ByteStreamLe, ReadStringError},
     page::{
         header::{CanvasCacheEntry, CustomPageObject, PdfDataItem},
         object::DocObject,
@@ -252,7 +252,7 @@ impl Page {
             Some(
                 (0..tag_count)
                     .map(|_| stream.read_short_u16_string())
-                    .collect::<Result<_>>()?,
+                    .collect::<Result<_, _>>()?,
             )
         } else {
             None
