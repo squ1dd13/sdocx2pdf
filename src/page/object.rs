@@ -132,7 +132,7 @@ struct ObjectBase {
     max_width_height: Option<(f32, f32)>,
     append_time: Option<DateTime<Utc>>,
     owner_page_width_height: Option<(u32, u32)>,
-    layout_type: u32,
+    layout_type: u8,
     unknown_20: Option<[u8; 20]>,
     thumbnail_bind_id: Option<u32>,
     pivot: Option<Point>,
@@ -269,7 +269,7 @@ impl ObjectBase {
         };
 
         let layout_type = (field_check_flags & 32768 != 0)
-            .then(|| stream.read_u32_le())
+            .then(|| stream.read_u8())
             .transpose()?
             .unwrap_or(0);
 
@@ -295,15 +295,11 @@ impl ObjectBase {
 
         let position_now = stream.stream_position()?;
 
-        // Higher-level objects have data after the `ObjectBase`. For them to read this correctly,
-        // the stream needs to be in exactly the right position.
         if position_now != expected_end {
-            eprintln!(
-                "Warning: Position after parsing ObjectBase is {position_now}, \
-                 but {expected_end} expected. Will seek to correct this."
-            );
-
-            stream.seek(SeekFrom::Start(expected_end))?;
+            return Err(eyre!(
+                "Position after parsing ObjectBase is {position_now}, \
+            but it should be {expected_end}. Field check flags: {field_check_flags:#x}"
+            ));
         }
 
         Ok(ObjectBase {
