@@ -58,10 +58,7 @@ impl LineColourEffect {
                 let mut colours = Vec::with_capacity(count);
 
                 for _ in 0..count {
-                    colours.push(GradientColour {
-                        colour: stream.read_u32_le()?.to_le_bytes(),
-                        position: stream.read_f32_le()?,
-                    });
+                    colours.push(GradientColour::try_parse(stream)?);
                 }
 
                 colours

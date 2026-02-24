@@ -1,7 +1,10 @@
 use crate::{
     OpaqueBytes,
     byte_stream::ByteStreamLe,
-    page::{Point, Rect, object::line::LineObject},
+    page::{
+        Point, Rect,
+        object::{line::LineObject, shape::ShapeObject},
+    },
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
@@ -405,7 +408,7 @@ pub enum DocObject {
     Container(OpaqueObject),
 
     /// `WCon_ObjectShape`; extends `WCon_ObjectShapeBase`, which extends `WCon_ObjectBase`
-    Shape(OpaqueObject),
+    Shape(Box<ShapeObject>),
 
     /// `WCon_ObjectLine`; extends `WCon_ObjectShapeBase` (see `Shape`)
     Line(Box<LineObject>),
@@ -458,6 +461,13 @@ impl DocObject {
             )?)));
         }
 
+        if object_type == 7 {
+            return Ok(DocObject::Shape(Box::new(ObjectBase::try_parse_inheritor(
+                stream,
+                child_count,
+            )?)));
+        }
+
         let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
@@ -469,7 +479,6 @@ impl DocObject {
             2 => DocObject::Text(object),
             3 => DocObject::Image(object),
             4 => DocObject::Container(object),
-            7 => DocObject::Shape(object),
             10 => DocObject::Voice(object),
             11 => DocObject::Formula(object),
             13 => DocObject::Web(object),
@@ -490,6 +499,7 @@ impl DocObject {
     pub fn object_base(&self) -> &ObjectBase {
         match self {
             DocObject::Line(line_object) => line_object.object_base(),
+            DocObject::Shape(shape_object) => shape_object.object_base(),
 
             DocObject::Stroke {
                 is_old_type: _,
@@ -498,7 +508,6 @@ impl DocObject {
             | DocObject::Text(object)
             | DocObject::Image(object)
             | DocObject::Container(object)
-            | DocObject::Shape(object)
             | DocObject::Voice(object)
             | DocObject::Formula(object)
             | DocObject::Table(object)

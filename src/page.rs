@@ -37,7 +37,7 @@ impl Point {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Rect {
     left: f64,
     top: f64,
@@ -52,6 +52,24 @@ impl Rect {
             top: stream.read_f64_le()?,
             right: stream.read_f64_le()?,
             bottom: stream.read_f64_le()?,
+        })
+    }
+
+    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
+        Ok(Rect {
+            left: stream.read_f32_le()?.into(),
+            top: stream.read_f32_le()?.into(),
+            right: stream.read_f32_le()?.into(),
+            bottom: stream.read_f32_le()?.into(),
+        })
+    }
+
+    fn try_parse_i32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
+        Ok(Rect {
+            left: stream.read_i32_le()?.into(),
+            top: stream.read_i32_le()?.into(),
+            right: stream.read_i32_le()?.into(),
+            bottom: stream.read_i32_le()?.into(),
         })
     }
 }

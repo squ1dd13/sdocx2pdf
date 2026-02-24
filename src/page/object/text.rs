@@ -71,6 +71,7 @@ enum IntervalType {
     ExclusiveInclusive = 3,
 }
 
+#[derive(Debug)]
 struct SpanBase {
     span_type: SpanType,
     start_pos: u32,
@@ -90,6 +91,7 @@ pub enum SpanParseError {
     BadIntervalType(u32),
 }
 
+#[derive(Debug)]
 struct Span {
     span_base: SpanBase,
     bytes: Vec<u8>,
@@ -145,6 +147,7 @@ enum ParagraphType {
     ParsingState = 6,
 }
 
+#[derive(Debug)]
 struct ParagraphBase {
     paragraph_type: ParagraphType,
     start_pos: u32,
@@ -160,6 +163,7 @@ pub enum ParagraphParseError {
     BadParagraphType(u32),
 }
 
+#[derive(Debug)]
 struct Paragraph {
     paragraph_base: ParagraphBase,
     bytes: Vec<u8>,
@@ -195,6 +199,7 @@ impl Paragraph {
 // todo: Contained DocObject may need to be boxed in the future to avoid recursion, depending on
 // what DocObject ends up looking like.
 
+#[derive(Debug)]
 struct DocObjectSpan {
     object: DocObject,
     start: u32,
@@ -239,6 +244,7 @@ pub enum CommonParseError {
     BadEndOffset(WrongEndOffsetError),
 }
 
+#[derive(Debug)]
 pub struct Common {
     text: String,
     left_margin: f32,
@@ -328,7 +334,8 @@ impl Common {
         let mut object_spans = vec![];
 
         if format_version >= 2035 {
-            let object_spans_present = stream.read_u8()? != 0;
+            // This is stored as a Boolean and written explicitly as a 32-bit integer.
+            let object_spans_present = stream.read_u32_le()? != 0;
             let _zero = stream.read_u32_le()?;
 
             if object_spans_present {

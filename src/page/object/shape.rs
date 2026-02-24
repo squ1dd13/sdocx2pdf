@@ -3,7 +3,7 @@ use crate::{
     page::{
         Point, Rect,
         object::{
-            InheritsObjectBase, ObjectBase,
+            ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,
             shape_base::ShapeBase,
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
             text,
@@ -12,7 +12,10 @@ use crate::{
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io::{self, Seek, SeekFrom};
+use std::{
+    hint,
+    io::{self, Seek, SeekFrom},
+};
 use thiserror::Error;
 
 #[derive(Debug, FromPrimitive)]
@@ -201,66 +204,150 @@ enum ShapeType {
     Curve = 90,
 }
 
-struct FillBackgroundEffect {
-    alpha: f32,
-}
-
 #[derive(Error, Debug)]
 enum FillColourEffectParseError {
     #[error("io error")]
     Io(#[from] io::Error),
 
-    #[error("invalid colour type ID {0}")]
-    BadColourType(u8),
+    #[error("failed to read property flags")]
+    PropertyFlags(#[from] ReadBitfieldError),
 
     #[error("invalid gradient type ID {0}")]
     BadGradientType(u8),
 }
 
 // C.f. `LineColourEffect`, which is very similar but is serialised differently.
+#[derive(Debug)]
 struct FillColourEffect {
     solid_colour: [u8; 4],
     colour_type: ColourType,
     gradient_rotatable: bool,
     gradient_type: GradientType,
-    angle: f32,
+    angle: i16,
     radial_gradient_pos: Point,
     colours: Vec<GradientColour>,
 }
 
-#[derive(Error, Debug)]
-enum FillImageEffectParseError {
-    #[error("io error")]
-    Io(#[from] io::Error),
+impl FillColourEffect {
+    fn try_parse<T: ByteStreamLe>(
+        stream: &mut T,
+    ) -> Result<FillColourEffect, FillColourEffectParseError> {
+        let property_flags = stream.read_variable_length_bitfield()?;
 
-    #[error("failed to read image hash")]
-    BadHash(ReadStringError),
+        // `unwrap` is fine here because the first bit can only be 0 or 1.
+        let colour_type = ColourType::from_u32(property_flags & 1).unwrap();
+        let gradient_rotatable = property_flags & 2 != 0;
+
+        let solid_colour = stream.read_u32_le()?.to_le_bytes();
+
+        let gradient_type = {
+            let val = stream.read_u8()?;
+            GradientType::from_u8(val).ok_or(FillColourEffectParseError::BadGradientType(val))?
+        };
+
+        let angle = stream.read_i16_le()?;
+        let radial_gradient_pos = Point::try_parse_f32(stream)?;
+
+        let col_count: usize = stream.read_u8()?.into();
+        let mut colours = Vec::with_capacity(col_count);
+
+        for _ in 0..col_count {
+            colours.push(GradientColour::try_parse(stream)?);
+        }
+
+        Ok(FillColourEffect {
+            solid_colour,
+            colour_type,
+            gradient_rotatable,
+            gradient_type,
+            angle,
+            radial_gradient_pos,
+            colours,
+        })
+    }
 }
 
+#[derive(Debug)]
 struct FillImageEffect {
     image_type: u8,
-    image_id: u32,
-    image_hash: String,
+    image_id: i32,
     nine_patch_rect: Rect,
     nine_patch_width: u32,
     stretch_offset: Rect,
-    tiling_offset: Rect,
+    tiling_offset: Point,
     tiling_scale_x: f32,
     tiling_scale_y: f32,
     alpha: f32,
     rotatable: bool,
 }
 
-#[derive(Error, Debug)]
-enum FillPatternEffectParseError {
-    #[error("io error")]
-    Io(#[from] io::Error),
+impl FillImageEffect {
+    fn try_parse(stream: &mut impl ByteStreamLe) -> io::Result<FillImageEffect> {
+        Ok(FillImageEffect {
+            image_type: stream.read_u8()?,
+            image_id: stream.read_i32_le()?,
+            stretch_offset: Rect::try_parse_f32(stream)?,
+            tiling_offset: Point::try_parse_f32(stream)?,
+            tiling_scale_x: stream.read_f32_le()?,
+            tiling_scale_y: stream.read_f32_le()?,
+            alpha: stream.read_f32_le()?,
+            rotatable: stream.read_u8()? != 0,
+            nine_patch_rect: Rect::try_parse_i32(stream)?,
+            nine_patch_width: stream.read_u32_le()?,
+        })
+    }
 }
 
-struct FillPatternEffect {
-    pattern: Vec<u8>,
-    foreground_colour: [u8; 4],
-    background_colour: [u8; 4],
+#[derive(Error, Debug)]
+enum FillEffectParseError {
+    #[error("io error")]
+    Io(#[from] io::Error),
+
+    #[error("invalid fill effect type {0}")]
+    BadEffectType(u8),
+
+    #[error("failed to parse fill colour effect")]
+    ColourEffect(#[from] FillColourEffectParseError),
+}
+
+#[derive(Debug)]
+enum FillEffect {
+    Background {
+        transparency: f32,
+    },
+
+    Colour(FillColourEffect),
+    Image(FillImageEffect),
+
+    Pattern {
+        pattern: [u8; 8],
+        foreground_colour: [u8; 4],
+        background_colour: [u8; 4],
+    },
+}
+
+impl FillEffect {
+    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<FillEffect, FillEffectParseError> {
+        let _effect_size = stream.read_u32_le()?;
+        let effect_type = stream.read_u8()?;
+
+        match effect_type {
+            1 => Ok(FillEffect::Colour(FillColourEffect::try_parse(stream)?)),
+            2 => Ok(FillEffect::Image(FillImageEffect::try_parse(stream)?)),
+
+            3 => Ok(FillEffect::Pattern {
+                pattern: stream.read_u64_le()?.to_le_bytes(),
+                foreground_colour: stream.read_u32_le()?.to_le_bytes(),
+                background_colour: stream.read_u32_le()?.to_le_bytes(),
+            }),
+
+            4 => Ok(FillEffect::Background {
+                transparency: stream.read_f32_le()?,
+            }),
+
+            bad => Err(FillEffectParseError::BadEffectType(bad)),
+        }
+    }
 }
 
 #[derive(Debug, FromPrimitive)]
@@ -277,6 +364,7 @@ enum BorderType {
     Image = 4,
 }
 
+#[derive(Debug)]
 struct Template {
     is_flipped_horizontally: bool,
     is_flipped_vertically: bool,
@@ -285,27 +373,27 @@ struct Template {
     path: Path,
 }
 
+#[derive(Debug)]
 struct Data {
     shape_type: ShapeType,
-    fill_background_effect: FillBackgroundEffect,
-    fill_colour_effect: FillColourEffect,
-    fill_image_effect: FillImageEffect,
-    fill_pattern_effect: FillPatternEffect,
-    template: Template,
-    border_colour: [u8; 4],
-    border_width: f32,
-    border_type: BorderType,
+    fill_effect: Option<FillEffect>,
+    template: Option<Template>,
+    border_colour: Option<[u8; 4]>,
+    border_width: Option<f32>,
+    border_type: Option<BorderType>,
     original_drawn_rect: Rect,
     original_rect: Rect,
     original_angle: f32,
 }
 
+#[derive(Debug)]
 struct Pen {
     pen_name_id: Option<u32>,
     default_pen_name_id: Option<u32>,
     file_id: Option<u32>,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum TextAreaType {
     /// `TEXT_AREA_TYPE_MARGIN`
     Margin = 0,
@@ -315,6 +403,7 @@ enum TextAreaType {
     Path = 2,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum HintTextStyle {
     /// `HINT_TEXT_STYLE_NONE` = 0;
     None = 0,
@@ -328,6 +417,7 @@ enum HintTextStyle {
     Mask = 7,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum ImeActionType {
     /// `IME_ACTION_TYPE_UNSPECIFIED`
     Unspecified = 0,
@@ -347,6 +437,7 @@ enum ImeActionType {
     Previous = 7,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum TextInputType {
     /// `INPUT_TYPE_NONE`
     None = 0,
@@ -360,6 +451,7 @@ enum TextInputType {
     Datetime = 4,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum EllipsisType {
     /// `ELLIPSIS_TYPE_NONE`
     None = 0,
@@ -369,6 +461,7 @@ enum EllipsisType {
     Triangle = 2,
 }
 
+#[derive(Debug, FromPrimitive)]
 enum TextAutoFitType {
     /// `AUTO_FIT_OPTION_NONE`
     None = 0,
@@ -380,36 +473,38 @@ enum TextAutoFitType {
     Both = 3,
 }
 
+#[derive(Debug)]
 struct Text {
-    text_common: text::Common,
-    text_area_type: TextAreaType,
-    hint_text: String,
-    hint_text_vertical_offset: f32,
-    hint_text_style: HintTextStyle,
-    text_binary_size: u32,
+    text_common: Option<text::Common>,
+    text_area_type: Option<TextAreaType>,
+    hint_text: Option<String>,
+    hint_text_vertical_offset: Option<f32>,
+    hint_text_style: Option<HintTextStyle>,
     is_hint_text_visible: bool,
-    text_read_only: bool,
+    is_read_only: bool,
     is_text_editable: bool,
-    hint_text_font_size: f32,
-    hint_text_colour: [u8; 4],
-    ime_action_type: ImeActionType,
+    hint_text_font_size: Option<f32>,
+    hint_text_colour: Option<[u8; 4]>,
+    ime_action_type: Option<ImeActionType>,
     text_input_type: TextInputType,
-    ellipsis_type: EllipsisType,
-    text_auto_fit: TextAutoFitType,
+    ellipsis_type: Option<EllipsisType>,
+    text_auto_fit_type: Option<TextAutoFitType>,
 }
 
+#[derive(Debug)]
 struct Image {
-    border_image_hash: String,
-    border_image_nine_patch_width: u32,
-    original_image_hash: String,
-    crop_rect: Rect,
-    image_border_line_width: Rect,
-    border_image_id: u32,
-    border_image_nine_patch_rect: Rect,
-    compat_image_id: u32,
-    original_image_id: u32,
     transparency: bool,
-    original_rect: Rect,
+
+    border_image_hash: Option<String>,
+    border_image_nine_patch_width: Option<u32>,
+    original_image_hash: Option<String>,
+    crop_rect: Option<Rect>,
+    image_border_line_width: Option<Rect>,
+    border_image_id: Option<u32>,
+    border_image_nine_patch_rect: Option<Rect>,
+    compat_image_id: Option<u32>,
+    original_image_id: Option<u32>,
+    original_rect: Option<Rect>,
 }
 
 #[derive(Error, Debug)]
@@ -432,15 +527,6 @@ enum ShapeParseError {
     #[error("invalid shape type ID {0}")]
     BadShapeType(u32),
 
-    #[error("failed to parse fill colour effect")]
-    FillColourEffect(#[from] FillColourEffectParseError),
-
-    #[error("failed to parse fill image effect")]
-    FillImageEffect(#[from] FillImageEffectParseError),
-
-    #[error("failed to parse fill pattern effect")]
-    FillPatternEffect(#[from] FillPatternEffectParseError),
-
     #[error("invalid border type ID {0}")]
     BadBorderType(u8),
 
@@ -450,11 +536,36 @@ enum ShapeParseError {
     #[error("failed to parse common text data")]
     TextCommon(#[from] text::CommonParseError),
 
+    #[error("invalid text area type {0}")]
+    BadTextAreaType(u8),
+
+    #[error("failed to parse fill effect")]
+    FillEffect(#[from] FillEffectParseError),
+
+    #[error("failed to read hint text")]
+    HintText(ReadStringError),
+
+    #[error("invalid hint text style {0}")]
+    BadHintTextStyle(u8),
+
+    #[error("invalid ellipsis type {0}")]
+    BadEllipsisType(u8),
+
+    #[error("invalid text auto-fit type {0}")]
+    BadTextAutoFitType(u8),
+
+    #[error("invalid ime action type {0}")]
+    BadImeActionType(u8),
+
+    #[error("invalid text input type {0}")]
+    BadTextInputType(u8),
+
     #[error("parsed wrong number of bytes")]
     BadEndOffset(#[from] WrongEndOffsetError),
 }
 
-struct Shape {
+#[derive(Debug)]
+pub struct ShapeObject {
     base: ShapeBase,
     data: Data,
     pen: Pen,
@@ -462,17 +573,18 @@ struct Shape {
     image: Image,
 
     control_points: Vec<Point>,
-    span_order_data: Vec<String>,
+
+    unk_32_1: Option<u32>,
+    unk_32_2: Option<u32>,
+    unk_16: Option<u16>,
 }
 
-// fixme: This should be `impl InheritsObjectBase` (with `ConcreteInheritsObjectBase` after), but
-// the error types are incompatible.
-impl Shape {
-    fn try_parse<T: ByteStreamLe + Seek>(
+impl ShapeObject {
+    fn try_parse_inner<T: ByteStreamLe + Seek>(
         stream: &mut T,
         object_base: ObjectBase,
         child_count: u16,
-    ) -> Result<Shape, ShapeParseError> {
+    ) -> Result<ShapeObject, ShapeParseError> {
         let shape_base = ShapeBase::try_parse(stream, object_base, child_count)
             .map_err(ShapeParseError::ShapeBase)?;
 
@@ -497,7 +609,7 @@ impl Shape {
         let template_is_flipped_horizontally = property_flags & 1 != 0;
         let template_is_flipped_vertically = property_flags & 2 != 0;
         let text_is_editable = property_flags & 4 != 0;
-        let text_is_hint_text_visible = property_flags & 8 != 0;
+        let is_hint_text_visible = property_flags & 8 != 0;
         let text_is_read_only = property_flags & 16 != 0;
         let image_transparency = property_flags & 32 != 0;
 
@@ -505,13 +617,13 @@ impl Shape {
             .read_variable_length_bitfield()
             .map_err(ShapeParseError::FieldCheckFlags)?;
 
-        let data_shape_type = {
+        let shape_type = {
             let val = stream.read_u32_le()?;
             ShapeType::from_u32(val).ok_or(ShapeParseError::BadShapeType(val))?
         };
 
-        let data_original_rect = Rect::try_parse_f64(stream)?;
-        let data_original_rotation = stream.read_f32_le()?;
+        let original_rect = Rect::try_parse_f64(stream)?;
+        let original_angle = stream.read_f32_le()?;
 
         let template_path_size = stream.read_u32_le()?;
 
@@ -519,8 +631,8 @@ impl Shape {
             Some(Template {
                 is_flipped_horizontally: template_is_flipped_horizontally,
                 is_flipped_vertically: template_is_flipped_vertically,
-                owner_rect: data_original_rect,
-                rotation: data_original_rotation,
+                owner_rect: original_rect,
+                rotation: original_angle,
                 path: Path::try_parse(stream).map_err(ShapeParseError::TemplatePath)?,
             })
         } else {
@@ -538,7 +650,7 @@ impl Shape {
             points
         };
 
-        let data_original_draw_rect = Rect::try_parse_f64(stream)?;
+        let original_drawn_rect = Rect::try_parse_f64(stream)?;
 
         let field_check_flags = if flex_offset != 0 {
             stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
@@ -551,13 +663,100 @@ impl Shape {
             .then(|| text::Common::try_parse(stream, shape_base.object_base.format_version))
             .transpose()?;
 
-        // todo: Continue from here:
-        /*
-           if ((fieldCheckFlags_ & 2) != 0) {
-               wCon_ObjectShapeText.textAreaType = ((ByteBuffer) wDocBuffer.byteBuffer).get(i6);
-               i6++;
-           }
-        */
+        let text_area_type = if field_check_flags & 2 != 0 {
+            let val = stream.read_u8()?;
+            Some(TextAreaType::from_u8(val).ok_or(ShapeParseError::BadTextAreaType(val))?)
+        } else {
+            None
+        };
+
+        let pen = Pen {
+            pen_name_id: (field_check_flags & 4 != 0)
+                .then(|| stream.read_u32_le())
+                .transpose()?,
+            default_pen_name_id: (field_check_flags & 8 != 0)
+                .then(|| stream.read_u32_le())
+                .transpose()?,
+            file_id: (field_check_flags & 16 != 0)
+                .then(|| stream.read_u32_le())
+                .transpose()?,
+        };
+
+        let fill_effect = (field_check_flags & 32 != 0)
+            .then(|| FillEffect::try_parse(stream))
+            .transpose()?;
+
+        let unk_32_1 = (field_check_flags & 64 != 0)
+            .then(|| stream.read_u32_le())
+            .transpose()?;
+
+        let unk_32_2 = (field_check_flags & 128 != 0)
+            .then(|| stream.read_u32_le())
+            .transpose()?;
+
+        let unk_16 = (field_check_flags & 256 != 0)
+            .then(|| stream.read_u16_le())
+            .transpose()?;
+
+        if unk_32_1.is_some() || unk_32_2.is_some() || unk_16.is_some() {
+            eprintln!(
+                "Warning: Read at least one unknown shape field: {:?}/{:?}/{:?}",
+                unk_32_1, unk_32_2, unk_16
+            );
+        }
+
+        let hint_text = (field_check_flags & 512 != 0)
+            .then(|| stream.read_short_u16_string())
+            .transpose()
+            .map_err(ShapeParseError::HintText)?;
+
+        let hint_text_colour = (field_check_flags & 1024 != 0)
+            .then(|| stream.read_u32_le())
+            .transpose()?
+            .map(u32::to_le_bytes);
+
+        let hint_text_font_size = (field_check_flags & 2048 != 0)
+            .then(|| stream.read_f32_le())
+            .transpose()?;
+
+        let hint_text_style = if field_check_flags & 0x400000 != 0 {
+            let val = stream.read_u8()?;
+            Some(HintTextStyle::from_u8(val).ok_or(ShapeParseError::BadHintTextStyle(val))?)
+        } else {
+            None
+        };
+
+        let ellipsis_type = if field_check_flags & 4096 != 0 {
+            let val = stream.read_u8()?;
+            Some(EllipsisType::from_u8(val).ok_or(ShapeParseError::BadEllipsisType(val))?)
+        } else {
+            None
+        };
+
+        let text_auto_fit_type = if field_check_flags & 8192 != 0 {
+            let val = stream.read_u8()?;
+            Some(TextAutoFitType::from_u8(val).ok_or(ShapeParseError::BadTextAutoFitType(val))?)
+        } else {
+            None
+        };
+
+        let ime_action_type = if field_check_flags & 16384 != 0 {
+            let val = stream.read_u8()?;
+            Some(ImeActionType::from_u8(val).ok_or(ShapeParseError::BadImeActionType(val))?)
+        } else {
+            None
+        };
+
+        let text_input_type = if field_check_flags & 32768 != 0 {
+            let val = stream.read_u8()?;
+            TextInputType::from_u8(val).ok_or(ShapeParseError::BadTextInputType(val))?
+        } else {
+            TextInputType::Text
+        };
+
+        let hint_text_vertical_offset = (field_check_flags & 0x200000 != 0)
+            .then(|| stream.read_f32_le())
+            .transpose()?;
 
         let actual_end = stream.stream_position()?;
 
@@ -569,6 +768,74 @@ impl Shape {
             .into());
         }
 
-        todo!()
+        Ok(ShapeObject {
+            base: shape_base,
+            data: Data {
+                shape_type,
+                fill_effect,
+                template,
+                border_colour: None,
+                border_width: None,
+                border_type: None,
+                original_drawn_rect,
+                original_rect,
+                original_angle,
+            },
+            pen,
+            text: Text {
+                text_common,
+                text_area_type,
+                hint_text,
+                hint_text_vertical_offset,
+                hint_text_style,
+                is_hint_text_visible,
+                is_read_only: text_is_read_only,
+                is_text_editable: text_is_editable,
+                hint_text_font_size,
+                hint_text_colour,
+                ime_action_type,
+                text_input_type,
+                ellipsis_type,
+                text_auto_fit_type,
+            },
+            image: Image {
+                transparency: image_transparency,
+
+                border_image_hash: None,
+                border_image_nine_patch_width: None,
+                original_image_hash: None,
+                crop_rect: None,
+                image_border_line_width: None,
+                border_image_id: None,
+                border_image_nine_patch_rect: None,
+                compat_image_id: None,
+                original_image_id: None,
+                original_rect: None,
+            },
+            control_points,
+            unk_32_1,
+            unk_32_2,
+            unk_16,
+        })
     }
 }
+
+impl InheritsObjectBase for ShapeObject {
+    fn try_parse<T: ByteStreamLe + Seek>(
+        stream: &mut T,
+        object_base: ObjectBase,
+        child_count: u16,
+    ) -> color_eyre::eyre::Result<ShapeObject> {
+        Ok(ShapeObject::try_parse_inner(
+            stream,
+            object_base,
+            child_count,
+        )?)
+    }
+
+    fn object_base(&self) -> &ObjectBase {
+        &self.base.object_base
+    }
+}
+
+impl ConcreteInheritsObjectBase for ShapeObject {}

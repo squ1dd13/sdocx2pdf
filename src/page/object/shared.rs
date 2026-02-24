@@ -1,3 +1,5 @@
+use std::io;
+
 use crate::{
     byte_stream::ByteStreamLe,
     page::{Point, Rect},
@@ -115,4 +117,13 @@ pub enum GradientType {
 pub struct GradientColour {
     pub colour: [u8; 4],
     pub position: f32,
+}
+
+impl GradientColour {
+    pub fn try_parse(stream: &mut impl ByteStreamLe) -> io::Result<GradientColour> {
+        Ok(GradientColour {
+            colour: stream.read_u32_le()?.to_le_bytes(),
+            position: stream.read_f32_le()?,
+        })
+    }
 }
