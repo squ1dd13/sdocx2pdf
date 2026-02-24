@@ -166,3 +166,12 @@ pub trait ByteStreamLe: ReadBytesExt {
 }
 
 impl<T: ReadBytesExt> ByteStreamLe for T {}
+
+/// An error type for use when parsing should finish at a particular offset in the stream, but
+/// ends somewhere else. This may indicate a parsing bug.
+#[derive(Error, Debug)]
+#[error("end offset {actual_end} differs from the expected {expected_end}")]
+pub struct WrongEndOffsetError {
+    pub actual_end: u64,
+    pub expected_end: u64,
+}

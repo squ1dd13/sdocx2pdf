@@ -4,8 +4,7 @@ use crate::{
     page::{
         Point, Rect,
         object::{
-            ConcreteInheritsObjectBase, DocObjectInner, InheritsObjectBase, shape_base::Base,
-            shared::Path,
+            ConcreteInheritsObjectBase, InheritsObjectBase, shape_base::ShapeBase, shared::Path,
         },
     },
 };
@@ -14,7 +13,7 @@ use std::io::{Seek, SeekFrom};
 
 #[derive(Debug)]
 pub struct LineObject {
-    shape_base: Base,
+    shape_base: ShapeBase,
     connector_type: u8,
     start_direction: u8,
     control_points: Vec<Point>,
@@ -35,7 +34,7 @@ impl InheritsObjectBase for LineObject {
         object_base: ObjectBase,
         child_count: u16,
     ) -> Result<LineObject> {
-        let shape_base = Base::try_parse(stream, object_base, child_count)?;
+        let shape_base = ShapeBase::try_parse(stream, object_base, child_count)?;
 
         let start_offset = stream.stream_position()?;
 
@@ -127,6 +126,10 @@ impl InheritsObjectBase for LineObject {
             pen_name_id,
             path,
         })
+    }
+
+    fn object_base(&self) -> &ObjectBase {
+        &self.shape_base.object_base
     }
 }
 

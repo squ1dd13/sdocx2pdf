@@ -104,7 +104,7 @@ impl DocBundle {
 }
 
 #[derive(Debug)]
-struct ObjectBase {
+pub struct ObjectBase {
     rotatable: bool,
     selectable: bool,
     movable: bool,
@@ -148,6 +148,8 @@ trait InheritsObjectBase: Sized {
         object_base: ObjectBase,
         child_count: u16,
     ) -> Result<Self>;
+
+    fn object_base(&self) -> &ObjectBase;
 }
 
 trait ConcreteInheritsObjectBase: InheritsObjectBase {}
@@ -342,117 +344,46 @@ impl ObjectBase {
         })
     }
 
-    fn hash(&self) -> [u8; 32] {
+    pub fn hash(&self) -> [u8; 32] {
         let s = format!("{}{}", self.uuid, self.modified_time.timestamp_micros());
         Sha256::digest(s.as_bytes()).into()
     }
 
-    fn try_parse_wrapped<T: ByteStreamLe + Seek, I: ConcreteInheritsObjectBase>(
+    fn try_parse_inheritor<T: ByteStreamLe + Seek, I: ConcreteInheritsObjectBase>(
         stream: &mut T,
+        child_count: u16,
     ) -> Result<I> {
-        let child_count = stream.read_u16_le()?;
-
-        // This is the size of the `ObjectBase`, the inner object, and the hash.
-        let total_size: u64 = stream.read_u32_le()?.into();
-        let expected_end = stream.stream_position()? + total_size;
-
         let base = ObjectBase::try_parse(stream)?;
-        let base_hash = base.hash();
-
-        let parsed = I::try_parse(stream, base, child_count)?;
-
-        let mut hash_read = [0_u8; 32];
-        stream.read_exact(&mut hash_read)?;
-
-        if base_hash != hash_read {
-            eprintln!("Warning: Hash mismatch");
-        } else {
-            eprintln!("Hashes match!");
-        }
-
-        let here = stream.stream_position()?;
-
-        if here != expected_end {
-            eprintln!(
-                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
-            );
-
-            stream.seek(SeekFrom::Start(expected_end))?;
-        } else {
-            eprintln!("Object ended as expected");
-        }
-
-        Ok(parsed)
+        I::try_parse(stream, base, child_count)
     }
 }
 
 #[derive(Debug)]
-pub struct OpaqueObjectInner {
+pub struct OpaqueObject {
     child_count: u16,
+    base: ObjectBase,
     inner: OpaqueBytes,
 }
 
-impl DocObjectInner for OpaqueObjectInner {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T, child_count: u16) -> Result<OpaqueObjectInner> {
-        Ok(OpaqueObjectInner {
+impl InheritsObjectBase for OpaqueObject {
+    fn try_parse<T: ByteStreamLe + Seek>(
+        stream: &mut T,
+        base: ObjectBase,
+        child_count: u16,
+    ) -> Result<OpaqueObject> {
+        Ok(OpaqueObject {
             child_count,
+            base,
             inner: OpaqueBytes::try_parse_inclusive(stream)?,
         })
     }
-}
 
-pub trait DocObjectInner: Sized + std::fmt::Debug {
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T, child_count: u16) -> Result<Self>;
-}
-
-#[derive(Debug)]
-pub struct ObjectBaseWrapper<I: DocObjectInner> {
-    base: ObjectBase,
-    inner: I,
-}
-
-impl<I: DocObjectInner> ObjectBaseWrapper<I> {
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<ObjectBaseWrapper<I>> {
-        let child_count = stream.read_u16_le()?;
-
-        // This is the size of the `ObjectBase`, the inner object, and the hash.
-        let total_size: u64 = stream.read_u32_le()?.into();
-        let expected_end = stream.stream_position()? + total_size;
-
-        let base = ObjectBase::try_parse(stream)?;
-        let inner = I::try_parse(stream, child_count)?;
-
-        let mut hash_read = [0_u8; 32];
-        stream.read_exact(&mut hash_read)?;
-
-        let hash_calculated = Sha256::digest(
-            format!("{}{}", base.uuid, base.modified_time.timestamp_micros()).as_bytes(),
-        );
-
-        if hash_calculated[..] != hash_read {
-            eprintln!("Warning: Hash mismatch");
-        } else {
-            eprintln!("Hashes match!");
-        }
-
-        let here = stream.stream_position()?;
-
-        if here != expected_end {
-            eprintln!(
-                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
-            );
-
-            stream.seek(SeekFrom::Start(expected_end))?;
-        } else {
-            eprintln!("Object ended as expected");
-        }
-
-        Ok(ObjectBaseWrapper { base, inner })
+    fn object_base(&self) -> &ObjectBase {
+        &self.base
     }
 }
 
-// fixme: `ObjectBaseWrapper<OpaqueObjectInner>` is wrong for anything that is not a direct
-// subclass of `WCon_ObjectBase`.
+impl ConcreteInheritsObjectBase for OpaqueObject {}
 
 // todo: Remove boxes once everything is of a similar size.
 
@@ -461,66 +392,73 @@ pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
     Stroke {
         is_old_type: bool,
-        object: ObjectBaseWrapper<OpaqueObjectInner>,
+        object: OpaqueObject,
     },
 
     /// `WCon_ObjectTextBoxOrImage` (variant 1) extends `WCon_ObjectShape` (`Shape`)
-    Text(ObjectBaseWrapper<OpaqueObjectInner>),
+    Text(OpaqueObject),
 
     /// `WCon_ObjectTextBoxOrImage` (variant 0) extends `WCon_ObjectShape` (`Shape`)
-    Image(ObjectBaseWrapper<OpaqueObjectInner>),
+    Image(OpaqueObject),
 
     /// `WCon_ObjectContainer`; extends `WCon_ObjectBase`
-    Container(ObjectBaseWrapper<OpaqueObjectInner>),
+    Container(OpaqueObject),
 
     /// `WCon_ObjectShape`; extends `WCon_ObjectShapeBase`, which extends `WCon_ObjectBase`
-    Shape(ObjectBaseWrapper<OpaqueObjectInner>),
+    Shape(OpaqueObject),
 
     /// `WCon_ObjectLine`; extends `WCon_ObjectShapeBase` (see `Shape`)
     Line(Box<LineObject>),
 
     /// `WCon_ObjectVoice`; extends `WCon_ObjectBase`
-    Voice(ObjectBaseWrapper<OpaqueObjectInner>),
+    Voice(OpaqueObject),
 
     /// `WCon_ObjectFormula`; extends `WCon_ObjectBase`
-    Formula(ObjectBaseWrapper<OpaqueObjectInner>),
+    Formula(OpaqueObject),
 
     /// `WCon_ObjectTable`; extends `WCon_ObjectBase`
-    Table(ObjectBaseWrapper<OpaqueObjectInner>),
+    Table(OpaqueObject),
 
     /// `WCon_ObjectWeb`; extends `WCon_ObjectBase`
-    Web(ObjectBaseWrapper<OpaqueObjectInner>),
+    Web(OpaqueObject),
 
     /// `WCon_ObjectPainting`; extends `WCon_ObjectBase`
-    Painting(ObjectBaseWrapper<OpaqueObjectInner>),
+    Painting(OpaqueObject),
 
     /// `WCon_ObjectLink`; extends `WCon_ObjectBase`
-    Link(ObjectBaseWrapper<OpaqueObjectInner>),
+    Link(OpaqueObject),
 
     /// `WCon_ObjectMath`; extends `WCon_ObjectBase`
-    Maths(ObjectBaseWrapper<OpaqueObjectInner>),
+    Maths(OpaqueObject),
 
     /// `WCon_ObjectPlot`; extends `WCon_ObjectBase`
-    Plot(ObjectBaseWrapper<OpaqueObjectInner>),
+    Plot(OpaqueObject),
 
     /// `WCon_ObjectUnknown`; extends `WCon_ObjectBase`
-    Generic(ObjectBaseWrapper<OpaqueObjectInner>),
+    Generic(OpaqueObject),
 }
 
 impl DocObject {
-    pub fn try_parse_with_type<T: ByteStreamLe + Seek>(
+    pub fn try_parse<T: ByteStreamLe + Seek>(
         stream: &mut T,
-        object_type: u8,
+        object_type: impl TryInto<u8> + Clone + std::fmt::Display,
+        child_count: u16,
     ) -> Result<DocObject> {
+        let object_type: u8 = object_type
+            .clone()
+            .try_into()
+            .map_err(|_| eyre!("Invalid object type ID {object_type}"))?;
+
         eprintln!("Object type {object_type}");
 
         if object_type == 8 {
-            return Ok(DocObject::Line(Box::new(ObjectBase::try_parse_wrapped(
+            return Ok(DocObject::Line(Box::new(ObjectBase::try_parse_inheritor(
                 stream,
+                child_count,
             )?)));
         }
 
-        let object = ObjectBaseWrapper::try_parse(stream)?;
+        let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
             1 | 15 => DocObject::Stroke {
@@ -549,8 +487,27 @@ impl DocObject {
         })
     }
 
-    pub fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<DocObject> {
-        let object_type = stream.read_u8()?;
-        Self::try_parse_with_type(stream, object_type)
+    pub fn object_base(&self) -> &ObjectBase {
+        match self {
+            DocObject::Line(line_object) => line_object.object_base(),
+
+            DocObject::Stroke {
+                is_old_type: _,
+                object,
+            }
+            | DocObject::Text(object)
+            | DocObject::Image(object)
+            | DocObject::Container(object)
+            | DocObject::Shape(object)
+            | DocObject::Voice(object)
+            | DocObject::Formula(object)
+            | DocObject::Table(object)
+            | DocObject::Web(object)
+            | DocObject::Painting(object)
+            | DocObject::Link(object)
+            | DocObject::Maths(object)
+            | DocObject::Plot(object)
+            | DocObject::Generic(object) => &object.base,
+        }
     }
 }

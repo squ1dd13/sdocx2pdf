@@ -4,7 +4,7 @@ use crate::{
     page::{
         Point,
         object::{
-            DocObjectInner, InheritsObjectBase,
+            InheritsObjectBase,
             shared::{ColourType, GradientColour, GradientType},
         },
     },
@@ -218,8 +218,8 @@ struct ConnectionPoint {
 }
 
 #[derive(Debug)]
-pub struct Base {
-    object_base: ObjectBase,
+pub struct ShapeBase {
+    pub object_base: ObjectBase,
 
     line_colour_effect: Option<LineColourEffect>,
     line_style_effect: Option<LineStyleEffect>,
@@ -230,12 +230,12 @@ pub struct Base {
     points_of_connection: Vec<Point>,
 }
 
-impl InheritsObjectBase for Base {
+impl InheritsObjectBase for ShapeBase {
     fn try_parse<T: ByteStreamLe + Seek>(
         stream: &mut T,
         object_base: ObjectBase,
         child_count: u16,
-    ) -> Result<Base> {
+    ) -> Result<ShapeBase> {
         if child_count != 0 {
             return Err(eyre!(
                 "Shape base should not have children, but {child_count} declared"
@@ -336,7 +336,7 @@ impl InheritsObjectBase for Base {
             ));
         }
 
-        Ok(Base {
+        Ok(ShapeBase {
             object_base,
             line_colour_effect,
             line_style_effect,
@@ -344,5 +344,9 @@ impl InheritsObjectBase for Base {
             connection_points,
             points_of_connection,
         })
+    }
+
+    fn object_base(&self) -> &ObjectBase {
+        &self.object_base
     }
 }

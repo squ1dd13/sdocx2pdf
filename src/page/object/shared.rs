@@ -32,7 +32,7 @@ enum PathSegment {
 
 #[derive(Error, Debug)]
 pub enum PathParseError {
-    #[error("read error")]
+    #[error("io error")]
     Io(#[from] std::io::Error),
 
     #[error("segment count does not fit in `usize`")]

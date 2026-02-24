@@ -78,6 +78,42 @@ struct Layer {
 }
 
 impl Layer {
+    fn try_parse_object<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<DocObject> {
+        let object_type = stream.read_u8()?;
+        let child_count = stream.read_u16_le()?;
+
+        // This is the size of the `ObjectBase`, the inner object, and the hash.
+        let total_size: u64 = stream.read_u32_le()?.into();
+        let expected_end = stream.stream_position()? + total_size;
+
+        let doc_object = DocObject::try_parse(stream, object_type, child_count)?;
+
+        let mut hash_read = [0_u8; 32];
+        stream.read_exact(&mut hash_read)?;
+
+        if doc_object.object_base().hash() != hash_read {
+            // fixme: This should be an error
+            eprintln!("Warning: Hash mismatch");
+        } else {
+            eprintln!("Hashes match!");
+        }
+
+        let here = stream.stream_position()?;
+
+        if here != expected_end {
+            // fixme: This should be an error
+            eprintln!(
+                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
+            );
+
+            stream.seek(SeekFrom::Start(expected_end))?;
+        } else {
+            eprintln!("Object ended as expected");
+        }
+
+        Ok(doc_object)
+    }
+
     fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Layer> {
         let data_size = stream.read_u32_le()?;
         let flex_offset: u64 = stream.read_u32_le()?.into();
@@ -130,7 +166,7 @@ impl Layer {
             let mut objects = Vec::with_capacity(object_count);
 
             for _ in 0..object_count {
-                objects.push(DocObject::try_parse(stream)?);
+                objects.push(Layer::try_parse_object(stream)?);
             }
 
             objects

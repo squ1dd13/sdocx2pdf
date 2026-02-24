@@ -1,16 +1,18 @@
 use crate::{
-    byte_stream::ReadStringError,
+    byte_stream::{ByteStreamLe, ReadBitfieldError, ReadStringError, WrongEndOffsetError},
     page::{
         Point, Rect,
         object::{
-            shape_base::Base,
+            InheritsObjectBase, ObjectBase,
+            shape_base::ShapeBase,
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
             text,
         },
     },
 };
+use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io;
+use std::io::{self, Seek, SeekFrom};
 use thiserror::Error;
 
 #[derive(Debug, FromPrimitive)]
@@ -205,7 +207,7 @@ struct FillBackgroundEffect {
 
 #[derive(Error, Debug)]
 enum FillColourEffectParseError {
-    #[error("read error")]
+    #[error("io error")]
     Io(#[from] io::Error),
 
     #[error("invalid colour type ID {0}")]
@@ -228,7 +230,7 @@ struct FillColourEffect {
 
 #[derive(Error, Debug)]
 enum FillImageEffectParseError {
-    #[error("read error")]
+    #[error("io error")]
     Io(#[from] io::Error),
 
     #[error("failed to read image hash")]
@@ -251,7 +253,7 @@ struct FillImageEffect {
 
 #[derive(Error, Debug)]
 enum FillPatternEffectParseError {
-    #[error("read error")]
+    #[error("io error")]
     Io(#[from] io::Error),
 }
 
@@ -275,39 +277,12 @@ enum BorderType {
     Image = 4,
 }
 
-#[derive(Error, Debug)]
-enum ShapeTemplateBaseParseError {
-    #[error("read error")]
-    Io(#[from] io::Error),
-
-    #[error("failed to parse path")]
-    Path(#[from] PathParseError),
-}
-
-struct ShapeTemplateBase {
+struct Template {
     is_flipped_horizontally: bool,
     is_flipped_vertically: bool,
     owner_rect: Rect,
     rotation: f32,
     path: Path,
-}
-
-#[derive(Error, Debug)]
-enum ShapeDataParseError {
-    #[error("invalid shape type ID {0}")]
-    BadShapeType(u32),
-
-    #[error("failed to parse fill colour effect")]
-    FillColourEffect(#[from] FillColourEffectParseError),
-
-    #[error("failed to parse fill image effect")]
-    FillImageEffect(#[from] FillImageEffectParseError),
-
-    #[error("failed to parse fill pattern effect")]
-    FillPatternEffect(#[from] FillPatternEffectParseError),
-
-    #[error("invalid border type ID {0}")]
-    BadBorderType(u8),
 }
 
 struct Data {
@@ -316,12 +291,13 @@ struct Data {
     fill_colour_effect: FillColourEffect,
     fill_image_effect: FillImageEffect,
     fill_pattern_effect: FillPatternEffect,
+    template: Template,
     border_colour: [u8; 4],
     border_width: f32,
     border_type: BorderType,
     original_drawn_rect: Rect,
     original_rect: Rect,
-    original_rotation: f32,
+    original_angle: f32,
 }
 
 struct Pen {
@@ -436,8 +412,50 @@ struct Image {
     original_rect: Rect,
 }
 
+#[derive(Error, Debug)]
+enum ShapeParseError {
+    #[error("io error")]
+    Io(#[from] io::Error),
+
+    #[error("failed to parse shape base")]
+    ShapeBase(color_eyre::Report),
+
+    #[error("invalid data type {0} for shape object (should be 7)")]
+    BadDataType(u16),
+
+    #[error("failed to parse property flags")]
+    PropertyFlags(ReadBitfieldError),
+
+    #[error("failed to parse field check flags")]
+    FieldCheckFlags(ReadBitfieldError),
+
+    #[error("invalid shape type ID {0}")]
+    BadShapeType(u32),
+
+    #[error("failed to parse fill colour effect")]
+    FillColourEffect(#[from] FillColourEffectParseError),
+
+    #[error("failed to parse fill image effect")]
+    FillImageEffect(#[from] FillImageEffectParseError),
+
+    #[error("failed to parse fill pattern effect")]
+    FillPatternEffect(#[from] FillPatternEffectParseError),
+
+    #[error("invalid border type ID {0}")]
+    BadBorderType(u8),
+
+    #[error("failed to parse template path")]
+    TemplatePath(PathParseError),
+
+    #[error("failed to parse common text data")]
+    TextCommon(#[from] text::CommonParseError),
+
+    #[error("parsed wrong number of bytes")]
+    BadEndOffset(#[from] WrongEndOffsetError),
+}
+
 struct Shape {
-    base: Base,
+    base: ShapeBase,
     data: Data,
     pen: Pen,
     text: Text,
@@ -445,4 +463,112 @@ struct Shape {
 
     control_points: Vec<Point>,
     span_order_data: Vec<String>,
+}
+
+// fixme: This should be `impl InheritsObjectBase` (with `ConcreteInheritsObjectBase` after), but
+// the error types are incompatible.
+impl Shape {
+    fn try_parse<T: ByteStreamLe + Seek>(
+        stream: &mut T,
+        object_base: ObjectBase,
+        child_count: u16,
+    ) -> Result<Shape, ShapeParseError> {
+        let shape_base = ShapeBase::try_parse(stream, object_base, child_count)
+            .map_err(ShapeParseError::ShapeBase)?;
+
+        let start_offset = stream.stream_position()?;
+
+        let expected_end = {
+            let size: u64 = stream.read_u32_le()?.into();
+            start_offset + size
+        };
+
+        match stream.read_u16_le()? {
+            7 => (),
+            bad => return Err(ShapeParseError::BadDataType(bad)),
+        }
+
+        let flex_offset: u64 = stream.read_u32_le()?.into();
+
+        let property_flags = stream
+            .read_variable_length_bitfield()
+            .map_err(ShapeParseError::PropertyFlags)?;
+
+        let template_is_flipped_horizontally = property_flags & 1 != 0;
+        let template_is_flipped_vertically = property_flags & 2 != 0;
+        let text_is_editable = property_flags & 4 != 0;
+        let text_is_hint_text_visible = property_flags & 8 != 0;
+        let text_is_read_only = property_flags & 16 != 0;
+        let image_transparency = property_flags & 32 != 0;
+
+        let stated_field_check_flags = stream
+            .read_variable_length_bitfield()
+            .map_err(ShapeParseError::FieldCheckFlags)?;
+
+        let data_shape_type = {
+            let val = stream.read_u32_le()?;
+            ShapeType::from_u32(val).ok_or(ShapeParseError::BadShapeType(val))?
+        };
+
+        let data_original_rect = Rect::try_parse_f64(stream)?;
+        let data_original_rotation = stream.read_f32_le()?;
+
+        let template_path_size = stream.read_u32_le()?;
+
+        let template = if template_path_size > 0 {
+            Some(Template {
+                is_flipped_horizontally: template_is_flipped_horizontally,
+                is_flipped_vertically: template_is_flipped_vertically,
+                owner_rect: data_original_rect,
+                rotation: data_original_rotation,
+                path: Path::try_parse(stream).map_err(ShapeParseError::TemplatePath)?,
+            })
+        } else {
+            None
+        };
+
+        let control_points = {
+            let count: usize = stream.read_u8()?.into();
+            let mut points = Vec::with_capacity(count);
+
+            for _ in 0..count {
+                points.push(Point::try_parse_f32(stream)?);
+            }
+
+            points
+        };
+
+        let data_original_draw_rect = Rect::try_parse_f64(stream)?;
+
+        let field_check_flags = if flex_offset != 0 {
+            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
+            stated_field_check_flags
+        } else {
+            0
+        };
+
+        let text_common = (field_check_flags & 1 != 0)
+            .then(|| text::Common::try_parse(stream, shape_base.object_base.format_version))
+            .transpose()?;
+
+        // todo: Continue from here:
+        /*
+           if ((fieldCheckFlags_ & 2) != 0) {
+               wCon_ObjectShapeText.textAreaType = ((ByteBuffer) wDocBuffer.byteBuffer).get(i6);
+               i6++;
+           }
+        */
+
+        let actual_end = stream.stream_position()?;
+
+        if actual_end != expected_end {
+            return Err(WrongEndOffsetError {
+                actual_end,
+                expected_end,
+            }
+            .into());
+        }
+
+        todo!()
+    }
 }
