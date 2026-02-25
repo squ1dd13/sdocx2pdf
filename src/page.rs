@@ -6,6 +6,7 @@ use crate::{
         object::DocObject,
     },
 };
+use byteorder::LittleEndian;
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use indexmap::IndexMap;
@@ -13,7 +14,7 @@ use sha2::Digest;
 use std::io::{self, Seek, SeekFrom};
 
 mod header;
-mod object;
+pub mod object;
 
 #[derive(Debug)]
 struct Point {
@@ -75,7 +76,7 @@ impl Rect {
 }
 
 #[derive(Debug)]
-struct Layer {
+pub struct Layer {
     visible: bool,
     lock_state: bool,
     event_forwardable: bool,
@@ -90,7 +91,7 @@ struct Layer {
     thumbnail_media_id: Option<u32>,
     shadow_effect: Option<OpaqueBytes>,
 
-    objects: Vec<DocObject>,
+    pub objects: Vec<DocObject>,
 
     hash: [u8; 32],
 }
@@ -244,7 +245,7 @@ pub struct Page {
 
     hash: [u8; 32],
 
-    layers: Vec<Layer>,
+    pub layers: Vec<Layer>,
 }
 
 impl Page {

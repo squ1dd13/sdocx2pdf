@@ -3,7 +3,7 @@ use crate::{
     byte_stream::ByteStreamLe,
     page::{
         Point, Rect,
-        object::{line::LineObject, shape::ShapeObject},
+        object::{line::LineObject, shape::ShapeObject, stroke::StrokeObject},
     },
 };
 use chrono::{DateTime, Utc};
@@ -16,6 +16,7 @@ mod line;
 mod shape;
 mod shape_base;
 mod shared;
+mod stroke;
 mod text;
 
 #[derive(Debug, Default)]
@@ -393,10 +394,7 @@ impl ConcreteInheritsObjectBase for OpaqueObject {}
 #[derive(Debug)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
-    Stroke {
-        is_old_type: bool,
-        object: OpaqueObject,
-    },
+    Stroke(Box<StrokeObject>),
 
     /// `WCon_ObjectTextBoxOrImage` (variant 1) extends `WCon_ObjectShape` (`Shape`)
     Text(OpaqueObject),
@@ -468,14 +466,19 @@ impl DocObject {
             )?)));
         }
 
+        if object_type == 1 {
+            return Ok(DocObject::Stroke(Box::new(
+                ObjectBase::try_parse_inheritor(stream, child_count)?,
+            )));
+        }
+
+        if object_type == 15 {
+            return Err(eyre!("parsing not implemented for old strokes"));
+        }
+
         let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
-            1 | 15 => DocObject::Stroke {
-                is_old_type: object_type == 15,
-                object,
-            },
-
             2 => DocObject::Text(object),
             3 => DocObject::Image(object),
             4 => DocObject::Container(object),
@@ -500,12 +503,9 @@ impl DocObject {
         match self {
             DocObject::Line(line_object) => line_object.object_base(),
             DocObject::Shape(shape_object) => shape_object.object_base(),
+            DocObject::Stroke(stroke_object) => stroke_object.object_base(),
 
-            DocObject::Stroke {
-                is_old_type: _,
-                object,
-            }
-            | DocObject::Text(object)
+            DocObject::Text(object)
             | DocObject::Image(object)
             | DocObject::Container(object)
             | DocObject::Voice(object)

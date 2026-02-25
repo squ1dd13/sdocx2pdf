@@ -41,7 +41,9 @@
     clippy::used_underscore_binding,
     clippy::useless_let_if_seq,
     clippy::wildcard_dependencies,
-    clippy::wildcard_imports
+    clippy::wildcard_imports,
+    clippy::unnested_or_patterns,
+    clippy::unneeded_field_pattern
 )]
 
 use crate::{
@@ -56,7 +58,7 @@ use color_eyre::{
     Result,
     eyre::{Context, eyre},
 };
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 mod byte_stream;
 mod end_tag;
@@ -178,7 +180,6 @@ fn demo_all() -> Result<()> {
 
 // .ssf is "snap saved file"
 // https://github.com/fschutt/printpdf
-// Use e.g. SpenObjectBase to get names for constants and more context for the WCon classes
 
 fn main() -> Result<()> {
     color_eyre::install()?;
