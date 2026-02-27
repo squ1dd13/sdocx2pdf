@@ -369,7 +369,7 @@ pub enum BorderType {
     Image = 4,
 }
 
-impl_try_from_for_optional_from!(BorderType, u8, from_u8, pub InvalidBorderTypeError);
+impl_try_from_for_optional_from!(BorderType, u16, from_u16, pub InvalidBorderTypeError);
 
 #[derive(Debug)]
 struct Template {
@@ -639,7 +639,7 @@ impl ShapeObject {
         });
 
         property_flags
-            .ensure_all_checked()
+            .ensure_none_set_unchecked()
             .map_err(ShapeParseError::UnhandledProperty)?;
 
         let stated_field_check_flags =
@@ -717,7 +717,7 @@ impl ShapeObject {
         });
 
         field_flags
-            .ensure_all_checked()
+            .ensure_none_set_unchecked()
             .map_err(ShapeParseError::UnhandledField)?;
 
         if unk_32_1.is_some() || unk_32_2.is_some() || unk_16.is_some() {

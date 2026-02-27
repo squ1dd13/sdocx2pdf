@@ -105,7 +105,7 @@ impl CheckedBitfield {
     }
 
     /// Returns an `UnhandledBitsError` containing the unhandled bits if there are any.
-    pub const fn ensure_all_checked(self) -> Result<(), UnhandledBitsError> {
+    pub const fn ensure_none_set_unchecked(self) -> Result<(), UnhandledBitsError> {
         // Match on the bits that are set in `bits` but not in `checked`.
         match self.bits & !self.checked {
             0 => Ok(()),

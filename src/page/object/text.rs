@@ -4,12 +4,14 @@ use num::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
+    CheckedBitfield, UnhandledBitsError,
     byte_stream::{ByteStreamLe, ReadBitfieldError},
     page::object::{
         ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,
-        shape::{BorderType, ShapeObject},
+        shape::{BorderType, InvalidBorderTypeError, ShapeObject},
         shape_base::ShapeBase,
     },
+    unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
@@ -23,11 +25,17 @@ pub enum TextObjectParseError {
     #[error("failed to parse property flags")]
     PropertyFlags(#[source] ReadBitfieldError),
 
+    #[error("one or more property bits were not handled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
+
     #[error("failed to parse field check flags")]
     FieldCheckFlags(#[source] ReadBitfieldError),
 
-    #[error("invalid border type {0}")]
-    BadBorderType(u16),
+    #[error("one or more field check flags were not handled")]
+    UnhandledField(#[source] UnhandledBitsError),
+
+    #[error(transparent)]
+    BadBorderType(#[from] InvalidBorderTypeError),
 
     #[error("{0} byte(s) remain after parsing")]
     BytesRemain(u64),
@@ -62,33 +70,35 @@ impl TextObject {
 
         let flex_offset: u64 = stream.read_u32_le()?.into();
 
-        let _property_flags = stream
-            .read_variable_length_bitfield()
-            .map_err(TextObjectParseError::PropertyFlags)?;
+        // There is a property flags field, but it should just be zero.
+        CheckedBitfield::try_parse(&mut stream)
+            .map_err(TextObjectParseError::PropertyFlags)?
+            .ensure_none_set_unchecked()
+            .map_err(TextObjectParseError::UnhandledProperty)?;
 
-        let field_check_flags = stream
-            .read_variable_length_bitfield()
+        let stated_field_check_flags = CheckedBitfield::try_parse(&mut stream)
             .map_err(TextObjectParseError::FieldCheckFlags)?;
 
-        if flex_offset != 0 {
+        let mut field_check_flags = if flex_offset != 0 {
             stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
+            stated_field_check_flags
+        } else {
+            CheckedBitfield::default()
+        };
 
-            if field_check_flags & 2 != 0 {
-                shape.data.border_colour = Some(stream.read_u32_le()?.to_le_bytes());
-            }
+        unpack_field_flags!(field_check_flags, {
+            1 => border_colour: stream.read_4_bytes()?;
+            2 => border_width: stream.read_f32_le()?;
+            3 => border_type: BorderType::try_from(stream.read_u16_le()?)?;
+        });
 
-            if field_check_flags & 4 != 0 {
-                shape.data.border_width = Some(stream.read_f32_le()?);
-            }
+        shape.data.border_colour = border_colour;
+        shape.data.border_width = border_width;
+        shape.data.border_type = border_type;
 
-            if field_check_flags & 8 != 0 {
-                let val = stream.read_u16_le()?;
-
-                shape.data.border_type = Some(
-                    BorderType::from_u16(val).ok_or(TextObjectParseError::BadBorderType(val))?,
-                );
-            }
-        }
+        field_check_flags
+            .ensure_none_set_unchecked()
+            .map_err(TextObjectParseError::UnhandledField)?;
 
         if let remaining @ 1.. = stream.limit() {
             return Err(TextObjectParseError::BytesRemain(remaining));
