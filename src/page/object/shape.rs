@@ -1,6 +1,7 @@
 use crate::{
-    CheckedBitfield,
+    CheckedBitfield, UnhandledBitsError,
     byte_stream::{ByteStreamLe, ReadBitfieldError, ReadStringError, WrongEndOffsetError},
+    impl_try_from_for_optional_from, option_on_bit,
     page::{
         Point, Rect,
         object::{
@@ -10,6 +11,7 @@ use crate::{
             text_core,
         },
     },
+    unpack_bool_flags, unpack_field_flags,
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -205,6 +207,8 @@ enum ShapeType {
     Curve = 90,
 }
 
+impl_try_from_for_optional_from!(ShapeType, u32, from_u32, pub InvalidShapeTypeError);
+
 #[derive(Error, Debug)]
 pub enum FillColourEffectParseError {
     #[error("io error")]
@@ -365,6 +369,8 @@ pub enum BorderType {
     Image = 4,
 }
 
+impl_try_from_for_optional_from!(BorderType, u8, from_u8, pub InvalidBorderTypeError);
+
 #[derive(Debug)]
 struct Template {
     is_flipped_horizontally: bool,
@@ -404,6 +410,8 @@ enum TextAreaType {
     Path = 2,
 }
 
+impl_try_from_for_optional_from!(TextAreaType, u8, from_u8, pub InvalidTextAreaTypeError);
+
 #[derive(Debug, FromPrimitive)]
 enum HintTextStyle {
     /// `HINT_TEXT_STYLE_NONE` = 0;
@@ -417,6 +425,8 @@ enum HintTextStyle {
     /// `HINT_TEXT_STYLE_MASK` = 7;
     Mask = 7,
 }
+
+impl_try_from_for_optional_from!(HintTextStyle, u8, from_u8, pub InvalidHintTextStyleError);
 
 #[derive(Debug, FromPrimitive)]
 enum ImeActionType {
@@ -438,6 +448,8 @@ enum ImeActionType {
     Previous = 7,
 }
 
+impl_try_from_for_optional_from!(ImeActionType, u8, from_u8, pub InvalidImeActionTypeError);
+
 #[derive(Debug, FromPrimitive)]
 enum TextInputType {
     /// `INPUT_TYPE_NONE`
@@ -452,6 +464,8 @@ enum TextInputType {
     Datetime = 4,
 }
 
+impl_try_from_for_optional_from!(TextInputType, u8, from_u8, pub InvalidTextInputTypeError);
+
 #[derive(Debug, FromPrimitive)]
 enum EllipsisType {
     /// `ELLIPSIS_TYPE_NONE`
@@ -461,6 +475,8 @@ enum EllipsisType {
     /// `ELLIPSIS_TYPE_TRIANGLE`
     Triangle = 2,
 }
+
+impl_try_from_for_optional_from!(EllipsisType, u8, from_u8, pub InvalidEllipsisTypeError);
 
 #[derive(Debug, FromPrimitive)]
 enum TextAutoFitType {
@@ -473,6 +489,8 @@ enum TextAutoFitType {
     /// `AUTO_FIT_OPTION_BOTH`
     Both = 3,
 }
+
+impl_try_from_for_optional_from!(TextAutoFitType, u8, from_u8, pub InvalidTextAutoFitTypeError);
 
 #[derive(Debug)]
 struct Text {
@@ -524,17 +542,17 @@ pub enum ShapeParseError {
     #[error("failed to parse property flags")]
     PropertyFlags(#[source] ReadBitfieldError),
 
-    #[error("one or more property bits was not handled")]
-    UnhandledProperty(CheckedBitfield),
+    #[error("one or more property bits were not handled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
 
     #[error("failed to parse field check flags: {0:?}")]
     FieldCheckFlags(#[source] ReadBitfieldError),
 
-    #[error("one or more field check flags was unhandled: {0:?}")]
-    UnhandledField(CheckedBitfield),
+    #[error("one or more field check flags were not handled")]
+    UnhandledField(#[source] UnhandledBitsError),
 
-    #[error("invalid shape type ID {0}")]
-    BadShapeType(u32),
+    #[error(transparent)]
+    BadShapeType(#[from] InvalidShapeTypeError),
 
     #[error("failed to parse template path")]
     TemplatePath(#[source] PathParseError),
@@ -542,8 +560,8 @@ pub enum ShapeParseError {
     #[error("failed to parse common text data")]
     TextCommon(#[from] text_core::CommonParseError),
 
-    #[error("invalid text area type {0}")]
-    BadTextAreaType(u8),
+    #[error(transparent)]
+    BadTextAreaType(#[from] InvalidTextAreaTypeError),
 
     #[error("failed to parse fill effect")]
     FillEffect(#[from] FillEffectParseError),
@@ -551,22 +569,22 @@ pub enum ShapeParseError {
     #[error("failed to read hint text")]
     HintText(#[source] ReadStringError),
 
-    #[error("invalid hint text style {0}")]
-    BadHintTextStyle(u8),
+    #[error(transparent)]
+    BadHintTextStyle(#[from] InvalidHintTextStyleError),
 
-    #[error("invalid ellipsis type {0}")]
-    BadEllipsisType(u8),
+    #[error(transparent)]
+    BadEllipsisType(#[from] InvalidEllipsisTypeError),
 
-    #[error("invalid text auto-fit type {0}")]
-    BadTextAutoFitType(u8),
+    #[error(transparent)]
+    BadTextAutoFitType(#[from] InvalidTextAutoFitTypeError),
 
-    #[error("invalid ime action type {0}")]
-    BadImeActionType(u8),
+    #[error(transparent)]
+    BadImeActionType(#[from] InvalidImeActionTypeError),
 
-    #[error("invalid text input type {0}")]
-    BadTextInputType(u8),
+    #[error(transparent)]
+    BadTextInputType(#[from] InvalidTextInputTypeError),
 
-    #[error("parsed wrong number of bytes")]
+    #[error(transparent)]
     BadEndOffset(#[from] WrongEndOffsetError),
 }
 
@@ -611,31 +629,28 @@ impl ShapeObject {
         let mut property_flags =
             CheckedBitfield::try_parse(stream).map_err(ShapeParseError::PropertyFlags)?;
 
-        let template_is_flipped_horizontally = property_flags.check_bit(0);
-        let template_is_flipped_vertically = property_flags.check_bit(1);
-        let text_is_editable = property_flags.check_bit(2);
-        let is_hint_text_visible = property_flags.check_bit(3);
-        let text_is_read_only = property_flags.check_bit(4);
-        let image_transparency = property_flags.check_bit(5);
+        unpack_bool_flags!(property_flags, {
+            0 => template_is_flipped_horizontally;
+            1 => template_is_flipped_vertically;
+            2 => text_is_editable;
+            3 => is_hint_text_visible;
+            4 => text_is_read_only;
+            5 => image_transparency;
+        });
 
-        if property_flags.any_set_and_unchecked() {
-            return Err(ShapeParseError::UnhandledProperty(property_flags));
-        }
+        property_flags
+            .ensure_all_checked()
+            .map_err(ShapeParseError::UnhandledProperty)?;
 
         let stated_field_check_flags =
             CheckedBitfield::try_parse(stream).map_err(ShapeParseError::FieldCheckFlags)?;
 
-        let shape_type = {
-            let val = stream.read_u32_le()?;
-            ShapeType::from_u32(val).ok_or(ShapeParseError::BadShapeType(val))?
-        };
-
+        let shape_type: ShapeType = stream.read_u32_le()?.try_into()?;
         let original_rect = Rect::try_parse_f64(stream)?;
         let original_angle = stream.read_f32_le()?;
 
-        let template_path_size = stream.read_u32_le()?;
-
-        let template = if template_path_size > 0 {
+        // Only read the template if the template size is >0.
+        let template = if let 1.. = stream.read_u32_le()? {
             Some(Template {
                 is_flipped_horizontally: template_is_flipped_horizontally,
                 is_flipped_vertically: template_is_flipped_vertically,
@@ -660,137 +675,56 @@ impl ShapeObject {
 
         let original_drawn_rect = Rect::try_parse_f64(stream)?;
 
-        let mut field_check_flags = if flex_offset != 0 {
+        let mut field_flags = if flex_offset != 0 {
             stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
             stated_field_check_flags
         } else {
             CheckedBitfield::default()
         };
 
-        let text_common = field_check_flags
-            .check_bit(0)
-            .then(|| text_core::Common::try_parse(stream, shape_base.object_base.format_version))
-            .transpose()?;
+        unpack_field_flags!(field_flags, {
+            0 => text_common: text_core::Common::try_parse(
+                stream,
+                shape_base.object_base.format_version,
+            )?;
 
-        let text_area_type = if field_check_flags.check_bit(1) {
-            let val = stream.read_u8()?;
-            Some(TextAreaType::from_u8(val).ok_or(ShapeParseError::BadTextAreaType(val))?)
-        } else {
-            None
-        };
+            1 => text_area_type: TextAreaType::try_from(stream.read_u8()?)?;
 
-        let pen = Pen {
-            pen_name_id: field_check_flags
-                .check_bit(2)
-                .then(|| stream.read_u32_le())
-                .transpose()?,
-            default_pen_name_id: field_check_flags
-                .check_bit(3)
-                .then(|| stream.read_u32_le())
-                .transpose()?,
-            file_id: field_check_flags
-                .check_bit(4)
-                .then(|| stream.read_u32_le())
-                .transpose()?,
-        };
+            2 => pen_name_id: stream.read_u32_le()?;
+            3 => default_pen_name_id: stream.read_u32_le()?;
+            4 => file_id: stream.read_u32_le()?;
 
-        let fill_effect = field_check_flags
-            .check_bit(5)
-            .then(|| FillEffect::try_parse(stream))
-            .transpose()?;
+            5 => fill_effect: FillEffect::try_parse(stream)?;
 
-        let unk_32_1 = field_check_flags
-            .check_bit(6)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
+            6 => unk_32_1: stream.read_u32_le()?;
+            7 => unk_32_2: stream.read_u32_le()?;
+            8 => unk_16: stream.read_u16_le()?;
 
-        let unk_32_2 = field_check_flags
-            .check_bit(7)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
+            9 => hint_text: stream.read_short_u16_string().map_err(ShapeParseError::HintText)?;
+            10 => hint_text_colour: stream.read_4_bytes()?;
+            11 => hint_text_font_size: stream.read_f32_le()?;
+            22 => hint_text_style: HintTextStyle::try_from(stream.read_u8()?)?;
 
-        let unk_16 = field_check_flags
-            .check_bit(8)
-            .then(|| stream.read_u16_le())
-            .transpose()?;
+            12 => ellipsis_type: EllipsisType::try_from(stream.read_u8()?)?;
+            13 => text_auto_fit_type: TextAutoFitType::try_from(stream.read_u8()?)?;
+            14 => ime_action_type: ImeActionType::try_from(stream.read_u8()?)?;
+            15 => text_input_type:
+                TextInputType::try_from(stream.read_u8()?)?, else TextInputType::Text;
+
+            21 => hint_text_vertical_offset: stream.read_f32_le()?;
+            23 => lined_paper_thickness: stream.read_f32_le()?;
+            24 => lined_paper_colour: stream.read_4_bytes()?;
+        });
+
+        field_flags
+            .ensure_all_checked()
+            .map_err(ShapeParseError::UnhandledField)?;
 
         if unk_32_1.is_some() || unk_32_2.is_some() || unk_16.is_some() {
             eprintln!(
                 "Warning: Read at least one unknown shape field: {:?}/{:?}/{:?}",
                 unk_32_1, unk_32_2, unk_16
             );
-        }
-
-        let hint_text = field_check_flags
-            .check_bit(9)
-            .then(|| stream.read_short_u16_string())
-            .transpose()
-            .map_err(ShapeParseError::HintText)?;
-
-        let hint_text_colour = field_check_flags
-            .check_bit(10)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map(u32::to_le_bytes);
-
-        let hint_text_font_size = field_check_flags
-            .check_bit(11)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let hint_text_style = if field_check_flags.check_bit(22) {
-            let val = stream.read_u8()?;
-            Some(HintTextStyle::from_u8(val).ok_or(ShapeParseError::BadHintTextStyle(val))?)
-        } else {
-            None
-        };
-
-        let ellipsis_type = if field_check_flags.check_bit(12) {
-            let val = stream.read_u8()?;
-            Some(EllipsisType::from_u8(val).ok_or(ShapeParseError::BadEllipsisType(val))?)
-        } else {
-            None
-        };
-
-        let text_auto_fit_type = if field_check_flags.check_bit(13) {
-            let val = stream.read_u8()?;
-            Some(TextAutoFitType::from_u8(val).ok_or(ShapeParseError::BadTextAutoFitType(val))?)
-        } else {
-            None
-        };
-
-        let ime_action_type = if field_check_flags.check_bit(14) {
-            let val = stream.read_u8()?;
-            Some(ImeActionType::from_u8(val).ok_or(ShapeParseError::BadImeActionType(val))?)
-        } else {
-            None
-        };
-
-        let text_input_type = if field_check_flags.check_bit(15) {
-            let val = stream.read_u8()?;
-            TextInputType::from_u8(val).ok_or(ShapeParseError::BadTextInputType(val))?
-        } else {
-            TextInputType::Text
-        };
-
-        let hint_text_vertical_offset = field_check_flags
-            .check_bit(21)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let lined_paper_thickness = field_check_flags
-            .check_bit(23)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let lined_paper_colour = field_check_flags
-            .check_bit(24)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map(u32::to_le_bytes);
-
-        if field_check_flags.any_set_and_unchecked() {
-            return Err(ShapeParseError::UnhandledField(field_check_flags));
         }
 
         let actual_end = stream.stream_position()?;
@@ -816,7 +750,11 @@ impl ShapeObject {
                 original_rect,
                 original_angle,
             },
-            pen,
+            pen: Pen {
+                pen_name_id,
+                default_pen_name_id,
+                file_id,
+            },
             text: Text {
                 text_common,
                 text_area_type,

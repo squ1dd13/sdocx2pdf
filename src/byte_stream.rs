@@ -128,6 +128,10 @@ pub trait ByteStreamLe: ReadBytesExt {
         self.read_u32::<LittleEndian>()
     }
 
+    fn read_4_bytes(&mut self) -> io::Result<[u8; 4]> {
+        self.read_u32_le().map(u32::to_le_bytes)
+    }
+
     fn read_u48_le(&mut self) -> io::Result<u64> {
         self.read_u48::<LittleEndian>()
     }
