@@ -1,5 +1,5 @@
 use crate::{
-    CheckedBitfield, UnhandledBitsError,
+    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{ByteStreamLe, ReadBitfieldError, ReadStringError, WrongEndOffsetError},
     impl_try_from_for_optional_from, option_on_bit,
     page::{

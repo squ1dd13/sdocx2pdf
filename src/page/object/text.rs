@@ -4,7 +4,7 @@ use num::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    CheckedBitfield, UnhandledBitsError,
+    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{ByteStreamLe, ReadBitfieldError},
     page::object::{
         ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,

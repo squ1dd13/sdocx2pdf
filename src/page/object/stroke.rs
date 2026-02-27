@@ -6,11 +6,14 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
+    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{ByteStreamLe, ReadBitfieldError, WrongEndOffsetError},
+    impl_try_from_for_optional_from,
     page::{
         Point,
         object::{ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase},
     },
+    unpack_bool_flags, unpack_field_flags,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -252,6 +255,8 @@ enum ToolType {
     Eraser = 4,
 }
 
+impl_try_from_for_optional_from!(ToolType, u16, from_u16, pub InvalidToolTypeError);
+
 #[derive(Debug, FromPrimitive)]
 enum DashType {
     /// `CONTINUOUS_LINE`
@@ -286,6 +291,8 @@ enum DashType {
     DoubleDashedTripleDotted = 14,
 }
 
+impl_try_from_for_optional_from!(DashType, u16, from_u16, pub InvalidDashTypeError);
+
 // `SPen::ObjectStroke::SetStrokeType` errors if the stroke type set is >= 3. Variant names
 // are unknown as of right now.
 #[derive(Debug, FromPrimitive)]
@@ -294,6 +301,8 @@ enum StrokeType {
     One = 1,
     Two = 2,
 }
+
+impl_try_from_for_optional_from!(StrokeType, u16, from_u16, pub InvalidStrokeTypeError);
 
 #[derive(Error, Debug)]
 pub enum StrokeParseError {
@@ -306,17 +315,20 @@ pub enum StrokeParseError {
     #[error("failed to parse property flags")]
     PropertyFlags(#[source] ReadBitfieldError),
 
+    #[error("one or more property bits were not handled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
+
     #[error("failed to parse field check flags")]
     FieldCheckFlags(#[source] ReadBitfieldError),
 
-    #[error("invalid tool type {0}")]
-    BadToolType(u16),
+    #[error(transparent)]
+    BadToolType(#[from] InvalidToolTypeError),
 
-    #[error("invalid dash type {0}")]
-    BadDashType(u16),
+    #[error(transparent)]
+    BadDashType(#[from] InvalidDashTypeError),
 
-    #[error("invalid stroke type {0}")]
-    BadStrokeType(u16),
+    #[error(transparent)]
+    BadStrokeType(#[from] InvalidStrokeTypeError),
 
     #[error("parsed wrong number of bytes")]
     BadEndOffset(#[from] WrongEndOffsetError),
@@ -331,11 +343,11 @@ pub struct StrokeObject {
     is_tilt_data_present: bool,
     is_eraser_enabled: bool,
     is_fixed_width_enabled: bool,
-    flag_millisecond_mode: bool,
+    is_millisecond_mode: bool,
     is_top_layer_pen: bool,
-    flag_alpha_lock: bool,
-    flag_binary_added: bool,
-    flag_generated: bool,
+    is_alpha_locked: bool,
+    is_binary_added: bool,
+    is_generated: bool,
 
     events: Vec<Event>,
 
@@ -379,26 +391,29 @@ impl StrokeObject {
 
         let flex_offset: u64 = stream.read_u32_le()?.into();
 
-        let property_flags = stream
-            .read_variable_length_bitfield()
-            .map_err(StrokeParseError::FieldCheckFlags)?;
+        let mut property_flags =
+            CheckedBitfield::try_parse(stream).map_err(StrokeParseError::FieldCheckFlags)?;
 
-        let is_curve_enabled = property_flags & 1 != 0;
-        let is_replay_only_enabled = property_flags & 2 != 0;
-        let is_tilt_data_present = property_flags & 4 != 0;
-        let is_eraser_enabled = property_flags & 8 != 0;
-        let is_fixed_width_enabled = property_flags & 16 != 0;
-        let flag_millisecond_mode = property_flags & 32 != 0;
-        let is_top_layer_pen = property_flags & 64 != 0;
-        let flag_alpha_lock = property_flags & 128 != 0;
+        unpack_bool_flags!(property_flags, {
+            0 => is_curve_enabled;
+            1 => is_replay_only_enabled;
+            2 => is_tilt_data_present;
+            3 => is_eraser_enabled;
+            4 => is_fixed_width_enabled;
+            5 => is_millisecond_mode;
+            6 => is_top_layer_pen;
+            7 => is_alpha_locked;
+            8 => !is_binary_added;
+            // missing 9
+            10 => !is_generated;
+        });
 
-        // Inverted
-        let flag_binary_added = property_flags & 256 == 0;
-        let flag_generated = property_flags & 1024 == 0;
+        property_flags
+            .ensure_none_set_unchecked()
+            .map_err(StrokeParseError::UnhandledProperty)?;
 
-        let stated_field_check_flags = stream
-            .read_variable_length_bitfield()
-            .map_err(StrokeParseError::FieldCheckFlags)?;
+        let stated_field_check_flags =
+            CheckedBitfield::try_parse(stream).map_err(StrokeParseError::FieldCheckFlags)?;
 
         let event_count: usize = stream.read_u16_le()?.into();
 
@@ -408,16 +423,13 @@ impl StrokeObject {
             Event::parse_uncompressed_events(stream, event_count, is_tilt_data_present)?
         };
 
-        let tool_type = {
-            let val = stream.read_u16_le()?;
-            ToolType::from_u16(val).ok_or(StrokeParseError::BadToolType(val))?
-        };
+        let tool_type = ToolType::try_from(stream.read_u16_le()?)?;
 
-        let field_check_flags = if flex_offset != 0 {
+        let mut field_check_flags = if flex_offset != 0 {
             stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
             stated_field_check_flags
         } else {
-            0
+            CheckedBitfield::default()
         };
 
         // What follows is equivalent to
@@ -431,72 +443,29 @@ impl StrokeObject {
         // string IDs are used. Depending on when `SPen::ObjectStroke::GetBinaryByCoedit` is
         // actually used, this may need revisiting in the future.
 
-        let advanced_pen_settings_str_id = (field_check_flags & 2 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
+        unpack_field_flags!(field_check_flags, {
+            // missing 0
+            1 => advanced_pen_settings_str_id: stream.read_u32_le()?;
+            2 => colour: stream.read_4_bytes()?;
+            3 => pen_size: stream.read_f32_le()?;
+            4 => unk: stream.read_u32_le()?;
+            // missing 5 and 6
+            7 => pen_name_str_id: stream.read_u32_le()?;
+            8 => fixed_width: stream.read_f32_le()?;
+            9 => size_level: stream.read_u32_le()?;
+            10 => particle_density: stream.read_u32_le()?;
+            11 => rendering_level: stream.read_u32_le()?;
+            12 => original_width: stream.read_u32_le()?;
+            13 => initial_tolerance: stream.read_f32_le()?;
+            14 => dash_type: DashType::try_from(stream.read_u16_le()?)?;
+            15 => dash_offset: stream.read_f32_le()?;
+            16 => stroke_type: StrokeType::try_from(stream.read_u16_le()?)?;
+            17 => pen_repeat_distance: stream.read_f32_le()?, else 0.5;
+        });
 
-        let colour = (field_check_flags & 4 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map(u32::to_le_bytes);
-
-        let pen_size = (field_check_flags & 8 != 0)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let unk = (field_check_flags & 16 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .inspect(|val| eprintln!("Warning: Read unknown stroke field (value {val})"));
-
-        let pen_name_str_id = (field_check_flags & 0x80 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let fixed_width = (field_check_flags & 0x100 != 0)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let size_level = (field_check_flags & 0x200 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let particle_density = (field_check_flags & 0x400 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let rendering_level = (field_check_flags & 0x800 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let original_width = (field_check_flags & 0x1000 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let initial_tolerance = (field_check_flags & 0x2000 != 0)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let dash_type = (field_check_flags & 0x4000 != 0)
-            .then(|| stream.read_u16_le())
-            .transpose()?
-            .map(|v| DashType::from_u16(v).ok_or(StrokeParseError::BadDashType(v)))
-            .transpose()?;
-
-        let dash_offset = (field_check_flags & 0x8000 != 0)
-            .then(|| stream.read_f32_le())
-            .transpose()?;
-
-        let stroke_type = (field_check_flags & 0x10000 != 0)
-            .then(|| stream.read_u16_le())
-            .transpose()?
-            .map(|v| StrokeType::from_u16(v).ok_or(StrokeParseError::BadStrokeType(v)))
-            .transpose()?;
-
-        let pen_repeat_distance = (field_check_flags & 0x20000 != 0)
-            .then(|| stream.read_f32_le())
-            .transpose()?
-            .unwrap_or(0.5);
+        if let Some(unk) = unk {
+            eprintln!("Warning: Read unknown stroke field (value {unk})");
+        };
 
         let actual_end = stream.stream_position()?;
 
@@ -515,11 +484,11 @@ impl StrokeObject {
             is_tilt_data_present,
             is_eraser_enabled,
             is_fixed_width_enabled,
-            flag_millisecond_mode,
+            is_millisecond_mode,
             is_top_layer_pen,
-            flag_alpha_lock,
-            flag_binary_added,
-            flag_generated,
+            is_alpha_locked,
+            is_binary_added,
+            is_generated,
             events,
             tool_type,
             advanced_pen_settings_str_id,
