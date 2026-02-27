@@ -38,7 +38,7 @@ pub enum PathParseError {
     Io(#[from] std::io::Error),
 
     #[error("segment count does not fit in `usize`")]
-    TooManySegments(std::num::TryFromIntError),
+    TooManySegments(#[source] std::num::TryFromIntError),
 
     #[error("invalid segment type ID {0}")]
     BadSegmentType(u8),
@@ -99,6 +99,8 @@ pub enum ColourType {
     Solid = 0,
     /// `COLOR_GRADIENT`
     Gradient = 1,
+    /// `COLOR_NONE`
+    None = 2,
 }
 
 #[derive(Debug, FromPrimitive)]

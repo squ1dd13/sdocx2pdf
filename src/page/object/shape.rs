@@ -6,7 +6,7 @@ use crate::{
             ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,
             shape_base::ShapeBase,
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
-            text,
+            text_core,
         },
     },
 };
@@ -205,7 +205,7 @@ enum ShapeType {
 }
 
 #[derive(Error, Debug)]
-enum FillColourEffectParseError {
+pub enum FillColourEffectParseError {
     #[error("io error")]
     Io(#[from] io::Error),
 
@@ -299,7 +299,7 @@ impl FillImageEffect {
 }
 
 #[derive(Error, Debug)]
-enum FillEffectParseError {
+pub enum FillEffectParseError {
     #[error("io error")]
     Io(#[from] io::Error),
 
@@ -351,7 +351,7 @@ impl FillEffect {
 }
 
 #[derive(Debug, FromPrimitive)]
-enum BorderType {
+pub enum BorderType {
     /// `BORDER_TYPE_NONE`
     None = 0,
     /// `BORDER_TYPE_SQUARE`
@@ -374,13 +374,13 @@ struct Template {
 }
 
 #[derive(Debug)]
-struct Data {
+pub struct Data {
     shape_type: ShapeType,
     fill_effect: Option<FillEffect>,
     template: Option<Template>,
-    border_colour: Option<[u8; 4]>,
-    border_width: Option<f32>,
-    border_type: Option<BorderType>,
+    pub border_colour: Option<[u8; 4]>,
+    pub border_width: Option<f32>,
+    pub border_type: Option<BorderType>,
     original_drawn_rect: Rect,
     original_rect: Rect,
     original_angle: f32,
@@ -475,7 +475,7 @@ enum TextAutoFitType {
 
 #[derive(Debug)]
 struct Text {
-    text_common: Option<text::Common>,
+    text_common: Option<text_core::Common>,
     text_area_type: Option<TextAreaType>,
     hint_text: Option<String>,
     hint_text_vertical_offset: Option<f32>,
@@ -508,33 +508,30 @@ struct Image {
 }
 
 #[derive(Error, Debug)]
-enum ShapeParseError {
+pub enum ShapeParseError {
     #[error("io error")]
     Io(#[from] io::Error),
 
     #[error("failed to parse shape base")]
-    ShapeBase(color_eyre::Report),
+    ShapeBase(#[source] color_eyre::Report),
 
     #[error("invalid data type {0} for shape object (should be 7)")]
     BadDataType(u16),
 
     #[error("failed to parse property flags")]
-    PropertyFlags(ReadBitfieldError),
+    PropertyFlags(#[source] ReadBitfieldError),
 
     #[error("failed to parse field check flags")]
-    FieldCheckFlags(ReadBitfieldError),
+    FieldCheckFlags(#[source] ReadBitfieldError),
 
     #[error("invalid shape type ID {0}")]
     BadShapeType(u32),
 
-    #[error("invalid border type ID {0}")]
-    BadBorderType(u8),
-
     #[error("failed to parse template path")]
-    TemplatePath(PathParseError),
+    TemplatePath(#[source] PathParseError),
 
     #[error("failed to parse common text data")]
-    TextCommon(#[from] text::CommonParseError),
+    TextCommon(#[from] text_core::CommonParseError),
 
     #[error("invalid text area type {0}")]
     BadTextAreaType(u8),
@@ -543,7 +540,7 @@ enum ShapeParseError {
     FillEffect(#[from] FillEffectParseError),
 
     #[error("failed to read hint text")]
-    HintText(ReadStringError),
+    HintText(#[source] ReadStringError),
 
     #[error("invalid hint text style {0}")]
     BadHintTextStyle(u8),
@@ -567,7 +564,7 @@ enum ShapeParseError {
 #[derive(Debug)]
 pub struct ShapeObject {
     base: ShapeBase,
-    data: Data,
+    pub data: Data,
     pen: Pen,
     text: Text,
     image: Image,
@@ -580,7 +577,7 @@ pub struct ShapeObject {
 }
 
 impl ShapeObject {
-    fn try_parse_inner<T: ByteStreamLe + Seek>(
+    pub fn try_parse_inner<T: ByteStreamLe + Seek>(
         stream: &mut T,
         object_base: ObjectBase,
         child_count: u16,
@@ -660,7 +657,7 @@ impl ShapeObject {
         };
 
         let text_common = (field_check_flags & 1 != 0)
-            .then(|| text::Common::try_parse(stream, shape_base.object_base.format_version))
+            .then(|| text_core::Common::try_parse(stream, shape_base.object_base.format_version))
             .transpose()?;
 
         let text_area_type = if field_check_flags & 2 != 0 {

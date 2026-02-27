@@ -304,10 +304,10 @@ pub enum StrokeParseError {
     BadDataType(u16),
 
     #[error("failed to parse property flags")]
-    PropertyFlags(ReadBitfieldError),
+    PropertyFlags(#[source] ReadBitfieldError),
 
     #[error("failed to parse field check flags")]
-    FieldCheckFlags(ReadBitfieldError),
+    FieldCheckFlags(#[source] ReadBitfieldError),
 
     #[error("invalid tool type {0}")]
     BadToolType(u16),

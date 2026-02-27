@@ -3,7 +3,7 @@ use crate::{
     byte_stream::ByteStreamLe,
     page::{
         Point, Rect,
-        object::{line::LineObject, shape::ShapeObject, stroke::StrokeObject},
+        object::{line::LineObject, shape::ShapeObject, stroke::StrokeObject, text::TextObject},
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,6 +18,7 @@ mod shape_base;
 mod shared;
 mod stroke;
 mod text;
+mod text_core;
 
 #[derive(Debug, Default)]
 struct DocBundle {
@@ -397,7 +398,7 @@ pub enum DocObject {
     Stroke(Box<StrokeObject>),
 
     /// `WCon_ObjectTextBoxOrImage` (variant 1) extends `WCon_ObjectShape` (`Shape`)
-    Text(OpaqueObject),
+    Text(Box<TextObject>),
 
     /// `WCon_ObjectTextBoxOrImage` (variant 0) extends `WCon_ObjectShape` (`Shape`)
     Image(OpaqueObject),
@@ -472,6 +473,13 @@ impl DocObject {
             )));
         }
 
+        if object_type == 2 {
+            return Ok(DocObject::Text(Box::new(ObjectBase::try_parse_inheritor(
+                stream,
+                child_count,
+            )?)));
+        }
+
         if object_type == 15 {
             return Err(eyre!("parsing not implemented for old strokes"));
         }
@@ -479,7 +487,6 @@ impl DocObject {
         let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
-            2 => DocObject::Text(object),
             3 => DocObject::Image(object),
             4 => DocObject::Container(object),
             10 => DocObject::Voice(object),
@@ -504,9 +511,9 @@ impl DocObject {
             DocObject::Line(line_object) => line_object.object_base(),
             DocObject::Shape(shape_object) => shape_object.object_base(),
             DocObject::Stroke(stroke_object) => stroke_object.object_base(),
+            DocObject::Text(text_object) => text_object.object_base(),
 
-            DocObject::Text(object)
-            | DocObject::Image(object)
+            DocObject::Image(object)
             | DocObject::Container(object)
             | DocObject::Voice(object)
             | DocObject::Formula(object)

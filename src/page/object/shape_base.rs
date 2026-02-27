@@ -274,6 +274,7 @@ impl InheritsObjectBase for ShapeBase {
             points
         };
 
+        // Includes size of the count, so will be 4 even if there are no points.
         let _connection_points_total_size = stream.read_u32_le()?;
 
         let connection_points = {

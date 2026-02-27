@@ -43,11 +43,7 @@ impl PenInfo {
         Ok(PenInfo {
             name: stream.read_short_u16_string()?,
             size: stream.read_f32_le()?,
-            colour_rgba: {
-                let mut rgba = [0_u8; 4];
-                stream.read_exact(&mut rgba);
-                rgba
-            },
+            colour_rgba: stream.read_u32_le()?.to_le_bytes(),
             is_curvable: stream.read_u32_le()? != 0,
             advanced_settings: stream.read_short_u16_string()?,
             is_eraser_enabled: stream.read_u32_le()? != 0,

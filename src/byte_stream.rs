@@ -6,13 +6,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum ReadStringError {
     #[error("failed to read size field")]
-    SizeIo(io::Error),
+    SizeIo(#[source] io::Error),
 
     #[error("failed to read character data")]
-    BytesIo(io::Error),
+    BytesIo(#[source] io::Error),
 
     #[error("size does not fit in `usize`")]
-    SizeConversion(std::num::TryFromIntError),
+    SizeConversion(#[source] std::num::TryFromIntError),
 
     #[error("invalid utf-16")]
     Utf16Decode(#[from] std::string::FromUtf16Error),
@@ -33,13 +33,13 @@ pub enum ReadTimestampError {
 #[derive(Error, Debug)]
 pub enum ReadBitfieldError {
     #[error("failed to read size field")]
-    SizeIo(io::Error),
+    SizeIo(#[source] io::Error),
 
     #[error("invalid bitfield size {0} (must be <= 4)")]
     SizeOutOfRange(u8),
 
     #[error("failed to read bitfield bytes")]
-    BitsIo(io::Error),
+    BitsIo(#[source] io::Error),
 }
 
 /// Extends `ReadBytesExt` with methods for parsing sdoc binary files (which are little-endian).
