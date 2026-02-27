@@ -33,7 +33,7 @@ impl DocBundle {
     /// it finds one.
     ///
     /// This is useful because the keys for these maps tend to end with a nul for some reason.
-    /// (This seems intentional (?) in the JVM code; we see things
+    /// (This seems intentional (?): in the JVM code, we see things
     /// like `"SPEN_SDK_KEY_SYSTEM_RESERVED_EXTRA_DATA\u0000"`.)
     fn read_short_u8_string_without_nul(stream: &mut impl ByteStreamLe) -> Result<String> {
         let mut s = stream.read_short_u8_string()?;
@@ -487,17 +487,50 @@ impl DocObject {
         let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
-            3 => DocObject::Image(object),
-            4 => DocObject::Container(object),
-            10 => DocObject::Voice(object),
-            11 => DocObject::Formula(object),
-            13 => DocObject::Web(object),
-            14 => DocObject::Painting(object),
-            17 => DocObject::Link(object),
-            19 => DocObject::Generic(object),
-            20 => DocObject::Plot(object),
-            21 => DocObject::Maths(object),
-            22 => DocObject::Table(object),
+            3 => DocObject::Image({
+                eprintln!("Warning: Images are not yet supported");
+                object
+            }),
+            4 => DocObject::Container({
+                eprintln!("Warning: Containers are not yet supported");
+                object
+            }),
+            10 => DocObject::Voice({
+                eprintln!("Warning: Voice objects are not yet supported");
+                object
+            }),
+            11 => DocObject::Formula({
+                eprintln!("Warning: Formulas are not yet supported");
+                object
+            }),
+            13 => DocObject::Web({
+                eprintln!("Warning: Web objects are not yet supported");
+                object
+            }),
+            14 => DocObject::Painting({
+                eprintln!("Warning: Paintings are not yet supported");
+                object
+            }),
+            17 => DocObject::Link({
+                eprintln!("Warning: Links are not yet supported");
+                object
+            }),
+            19 => DocObject::Generic({
+                eprintln!("Warning: Generic objects are not yet supported");
+                object
+            }),
+            20 => DocObject::Plot({
+                eprintln!("Warning: Plots are not yet supported");
+                object
+            }),
+            21 => DocObject::Maths({
+                eprintln!("Warning: Maths objects are not yet supported");
+                object
+            }),
+            22 => DocObject::Table({
+                eprintln!("Warning: Tables are not yet supported");
+                object
+            }),
 
             unknown => return Err(eyre!("Unrecognised object type {unknown}")),
             // There is also an object type 100, for `WDocObjectStrokeGroup`.

@@ -19,9 +19,6 @@
     clippy::float_equality_without_abs,
     keyword_idents,
     clippy::missing_const_for_fn,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::mod_module_files,
     non_ascii_idents,
@@ -47,7 +44,7 @@
 )]
 
 use crate::{
-    byte_stream::ByteStreamLe,
+    byte_stream::{ByteStreamLe, ReadBitfieldError},
     end_tag::{ModelEndTag, NoteSdkType},
     media_info::MediaInfo,
     note_doc::NoteDoc,
@@ -66,6 +63,42 @@ mod media_info;
 mod note_doc;
 mod page;
 mod page_id_info;
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct CheckedBitfield {
+    /// The underlying bitfield.
+    bits: u32,
+
+    /// Stores which bits of `bits` have been queried.
+    checked: u32,
+}
+
+impl CheckedBitfield {
+    pub fn try_parse(stream: &mut impl ByteStreamLe) -> Result<CheckedBitfield, ReadBitfieldError> {
+        Ok(CheckedBitfield {
+            bits: stream.read_variable_length_bitfield()?,
+            checked: 0,
+        })
+    }
+
+    /// Returns `true` iff the `index`th bit is set, where 0 is the index of the least significant
+    /// bit. Stores that this bit has been checked.
+    pub const fn check_bit(&mut self, index: u8) -> bool {
+        let mask = 1 << index;
+        self.checked |= mask;
+        self.bits & mask != 0
+    }
+
+    /// Returns `true` iff any bits are set.
+    pub const fn any_set(self) -> bool {
+        self.bits != 0
+    }
+
+    /// Returns `true` iff there is at least one bit that is set but which has not been checked.
+    pub const fn any_set_and_unchecked(self) -> bool {
+        self.bits & !self.checked != 0
+    }
+}
 
 /// Holds a generic vector of bytes.
 ///
@@ -126,20 +159,20 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
     let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
-    println!("{}: {media_info:#?}", media_info_path.display());
+    // println!("{}: {media_info:#?}", media_info_path.display());
 
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
     let end_tag =
         ModelEndTag::try_parse(&mut std::fs::File::open(&end_tag_path)?, NoteSdkType::SPen)?;
-    println!("{}: {end_tag:#?}", end_tag_path.display());
+    // println!("{}: {end_tag:#?}", end_tag_path.display());
 
     let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
     let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
-    println!("{}: {note_note:#?}", note_note_path.display());
+    // println!("{}: {note_note:#?}", note_note_path.display());
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
-    println!("{}: {page_id_info:?}", page_id_info_path.display());
+    // println!("{}: {page_id_info:?}", page_id_info_path.display());
 
     for page_info in &page_id_info.pages {
         let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
@@ -150,7 +183,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
                 .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?,
         )?;
 
-        println!("{}: {page:#?}", page_path.display());
+        // println!("{}: {page:#?}", page_path.display());
     }
 
     Ok(())
