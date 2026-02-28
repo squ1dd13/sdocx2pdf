@@ -125,12 +125,12 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
     let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
-    println!("{}: {media_info:#?}", media_info_path.display());
+    // println!("{}: {media_info:#?}", media_info_path.display());
 
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
     let end_tag =
         ModelEndTag::try_parse(&mut std::fs::File::open(&end_tag_path)?, NoteSdkType::SPen)?;
-    println!("{}: {end_tag:#?}", end_tag_path.display());
+    // println!("{}: {end_tag:#?}", end_tag_path.display());
 
     let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
     let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
@@ -138,7 +138,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
-    println!("{}: {page_id_info:?}", page_id_info_path.display());
+    // println!("{}: {page_id_info:?}", page_id_info_path.display());
 
     for page_info in &page_id_info.pages {
         let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
@@ -149,7 +149,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
                 .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?,
         )?;
 
-        println!("{}: {page:#?}", page_path.display());
+        // println!("{}: {page:#?}", page_path.display());
     }
 
     Ok(())
@@ -157,19 +157,19 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
 fn demo_all() -> Result<()> {
     let extracted_sdocx_paths = [
-        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
-        // "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
-        // "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
-        // "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
-        // "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
-        // "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
-        // "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
-        // "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
-        // "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052",
-        // "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513",
-        // "/home/alex/projects/re/sdocx/sample_docs/Shape text_260224_122639",
-        // "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540",
-        // "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854",
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
+        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
+        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
+        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
+        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
+        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
+        "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052",
+        "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513",
+        "/home/alex/projects/re/sdocx/sample_docs/Shape text_260224_122639",
+        "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540",
+        "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854",
         "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
     ];
 

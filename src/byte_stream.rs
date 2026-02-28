@@ -1,5 +1,6 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
+use io::Read;
 use std::io;
 use thiserror::Error;
 
@@ -42,8 +43,42 @@ pub enum ReadBitfieldError {
     BitsIo(#[source] io::Error),
 }
 
+#[derive(Error, Debug)]
+pub enum TakeInclusiveLengthPrefixedError {
+    #[error("failed to read size field")]
+    Io(#[from] io::Error),
+
+    #[error("size {0} cannot be inclusive as the size field itself is 4 bytes")]
+    SizeTooSmall(u32),
+}
+
 /// Extends `ReadBytesExt` with methods for parsing sdoc binary files (which are little-endian).
 pub trait ByteStreamLe: ReadBytesExt {
+    /// Reads `size: u32` from `self`, and then returns a wrapper that can read at most `size - 4`
+    /// bytes from `self`.
+    ///
+    /// This method is intended for obtaining a stream for reading data that declares its own size
+    /// while including the size of the `u32` used to encode that size. As such, it returns an
+    /// error if `size < 4`.
+    fn take_inclusive_length_prefixed(
+        &mut self,
+    ) -> Result<io::Take<&mut Self>, TakeInclusiveLengthPrefixedError> {
+        let size_including_itself = self.read_u32_le()?;
+
+        let data_size = size_including_itself.checked_sub(4).ok_or(
+            TakeInclusiveLengthPrefixedError::SizeTooSmall(size_including_itself),
+        )?;
+
+        Ok(self.take(data_size.into()))
+    }
+
+    /// Reads `size: u32` from `self` and then a wrapper that can read at most `size` bytes from
+    /// `self`.
+    fn take_exclusive_length_prefixed(&mut self) -> io::Result<io::Take<&mut Self>> {
+        let size: u64 = self.read_u32_le()?.into();
+        Ok(self.take(size))
+    }
+
     /// Reads exactly `n` bytes into a `Vec`, and returns it.
     fn read_u8_buf(&mut self, n: usize) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0_u8; n];
@@ -178,4 +213,23 @@ impl<T: ReadBytesExt> ByteStreamLe for T {}
 pub struct WrongEndOffsetError {
     pub actual_end: u64,
     pub expected_end: u64,
+}
+
+#[derive(Error, Debug)]
+#[error("{remaining} bytes remain after parsing")]
+pub struct UnfinishedParsingError {
+    remaining: u64,
+}
+
+pub trait ExactSizedStream {
+    fn ensure_eof(&self) -> Result<(), UnfinishedParsingError>;
+}
+
+impl<T> ExactSizedStream for io::Take<T> {
+    fn ensure_eof(&self) -> Result<(), UnfinishedParsingError> {
+        match self.limit() {
+            0 => Ok(()),
+            remaining => Err(UnfinishedParsingError { remaining }),
+        }
+    }
 }

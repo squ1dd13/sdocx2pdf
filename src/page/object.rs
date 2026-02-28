@@ -21,7 +21,7 @@ mod shape;
 mod shape_base;
 mod shared;
 mod stroke;
-mod text;
+pub mod text;
 mod text_core;
 
 #[derive(Debug, Default)]

@@ -1,10 +1,19 @@
-use crate::{AppVersion, OpaqueBytes, byte_stream::ByteStreamLe};
+use crate::{
+    AppVersion, OpaqueBytes,
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadStringError, TakeInclusiveLengthPrefixedError,
+        UnfinishedParsingError,
+    },
+    page::object::text::TextObject,
+};
 use chrono::{DateTime, Utc};
-use color_eyre::Result;
+use color_eyre::{Result, eyre::eyre};
+use sha2::Digest;
 use std::{
     collections::HashMap,
-    io::{Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
+use thiserror::Error;
 
 #[derive(Debug)]
 struct AuthorInfo {
@@ -13,7 +22,7 @@ struct AuthorInfo {
 }
 
 impl AuthorInfo {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<AuthorInfo> {
+    fn try_parse(mut stream: impl ByteStreamLe) -> Result<AuthorInfo> {
         Ok(AuthorInfo {
             strings: [
                 stream.read_short_u16_string()?,
@@ -25,36 +34,114 @@ impl AuthorInfo {
     }
 }
 
+#[derive(Error, Debug)]
+enum PenInfoParseError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    #[error(transparent)]
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
+
+    #[error("failed to read name")]
+    ReadName(#[source] ReadStringError),
+
+    #[error("failed to read advanced settings")]
+    ReadAdvancedSettings(#[source] ReadStringError),
+
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
+}
+
 #[derive(Debug)]
 struct PenInfo {
     name: String,
     size: f32,
-    colour_rgba: [u8; 4],
-    is_curvable: bool,
-    advanced_settings: String,
-    is_eraser_enabled: bool,
+    colour: [u8; 4],
+
     size_level: u32,
+
+    advanced_settings: String,
+
+    is_curvable: bool,
+    is_eraser_enabled: bool,
+    is_fixed_width: Option<bool>,
+
     particle_density: u32,
+    particle_size: Option<f32>,
+
     ui_colour_hsv: [f32; 3],
+    ui_colour_info: u32,
 }
 
 impl PenInfo {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<PenInfo> {
+    fn try_parse_simple(mut stream: impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
         Ok(PenInfo {
-            name: stream.read_short_u16_string()?,
+            name: stream
+                .read_short_u16_string()
+                .map_err(PenInfoParseError::ReadName)?,
+
             size: stream.read_f32_le()?,
-            colour_rgba: stream.read_u32_le()?.to_le_bytes(),
+            colour: stream.read_4_bytes()?,
+
             is_curvable: stream.read_u32_le()? != 0,
-            advanced_settings: stream.read_short_u16_string()?,
+
+            advanced_settings: stream
+                .read_short_u16_string()
+                .map_err(PenInfoParseError::ReadAdvancedSettings)?,
+
             is_eraser_enabled: stream.read_u32_le()? != 0,
             size_level: stream.read_u32_le()?,
             particle_density: stream.read_u32_le()?,
+
             ui_colour_hsv: [
                 stream.read_f32_le()?,
                 stream.read_f32_le()?,
                 stream.read_f32_le()?,
             ],
+            ui_colour_info: stream.read_u32_le()?,
+
+            is_fixed_width: None,
+            particle_size: None,
         })
+    }
+
+    fn try_parse_full(mut stream: impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
+        let mut stream = stream.take_inclusive_length_prefixed()?;
+
+        let pen_info = PenInfo {
+            name: stream
+                .read_short_u16_string()
+                .map_err(PenInfoParseError::ReadName)?,
+
+            size: stream.read_f32_le()?,
+            colour: stream.read_4_bytes()?,
+
+            is_curvable: stream.read_u32_le()? != 0,
+
+            advanced_settings: stream
+                .read_short_u16_string()
+                .map_err(PenInfoParseError::ReadAdvancedSettings)?,
+
+            is_eraser_enabled: stream.read_u32_le()? != 0,
+
+            size_level: stream.read_u32_le()?,
+
+            particle_density: stream.read_u32_le()?,
+            particle_size: Some(stream.read_f32_le()?),
+
+            is_fixed_width: Some(stream.read_u32_le()? != 0),
+
+            ui_colour_hsv: [
+                stream.read_f32_le()?,
+                stream.read_f32_le()?,
+                stream.read_f32_le()?,
+            ],
+            ui_colour_info: stream.read_u32_le()?,
+        };
+
+        stream.ensure_eof()?;
+
+        Ok(pen_info)
     }
 }
 
@@ -69,7 +156,7 @@ struct VoiceRecordingInfo {
 }
 
 impl VoiceRecordingInfo {
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<VoiceRecordingInfo> {
+    fn try_parse(mut stream: (impl ByteStreamLe + Seek)) -> Result<VoiceRecordingInfo> {
         let data_end_offset = {
             let data_size: u64 = stream.read_u32_le()?.into();
             let data_start_offset = stream.stream_position()?;
@@ -130,8 +217,8 @@ pub struct NoteDoc {
     page_horizontal_padding: u32,
     page_vertical_padding: u32,
     min_format_version: u32,
-    title_text: OpaqueBytes,
-    body_text: OpaqueBytes,
+    title_text: TextObject,
+    body_text: TextObject,
     metadata: NoteDocMetadata,
     template_uri: Option<String>,
     last_edited_page_index: Option<u32>,
@@ -150,15 +237,14 @@ pub struct NoteDoc {
     text_summarisation: Option<String>,
     stroke_group_size: Option<u32>,
     app_custom_data: Option<String>,
-    sha256: [u8; 32],
 }
 
 impl NoteDoc {
-    pub fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<NoteDoc> {
-        let flexible_data_area_offset = {
-            let start_offset = stream.stream_position()?;
-            let flexible_data_area_jump: u64 = stream.read_u32_le()?.into();
+    pub fn try_parse(mut stream: (impl ByteStreamLe + Seek)) -> Result<NoteDoc> {
+        let start_offset = stream.stream_position()?;
 
+        let flexible_data_area_offset = {
+            let flexible_data_area_jump: u64 = stream.read_u32_le()?.into();
             start_offset + flexible_data_area_jump
         };
 
@@ -176,8 +262,23 @@ impl NoteDoc {
         let page_vertical_padding = stream.read_u32_le()?;
         let min_format_version = stream.read_u32_le()?;
 
-        let title_text = OpaqueBytes::try_parse_exclusive(stream)?;
-        let body_text = OpaqueBytes::try_parse_exclusive(stream)?;
+        let title_text = {
+            let mut stream = stream.take_exclusive_length_prefixed()?;
+
+            let text = TextObject::try_parse_standalone(&mut stream)?;
+            stream.ensure_eof()?;
+
+            text
+        };
+
+        let body_text = {
+            let mut stream = stream.take_exclusive_length_prefixed()?;
+
+            let text = TextObject::try_parse_standalone(&mut stream)?;
+            stream.ensure_eof()?;
+
+            text
+        };
 
         stream.seek(SeekFrom::Start(flexible_data_area_offset))?;
 
@@ -189,13 +290,13 @@ impl NoteDoc {
             },
 
             app_version: if field_check_flags & 2 != 0 {
-                Some(AppVersion::try_parse(stream)?)
+                Some(AppVersion::try_parse(&mut stream)?)
             } else {
                 None
             },
 
             author_info: if field_check_flags & 4 != 0 {
-                Some(AuthorInfo::try_parse(stream)?)
+                Some(AuthorInfo::try_parse(&mut stream)?)
             } else {
                 None
             },
@@ -255,7 +356,7 @@ impl NoteDoc {
         };
 
         let compatible_last_pen_info = if field_check_flags & 0x1000 != 0 {
-            Some(PenInfo::try_parse(stream)?)
+            Some(PenInfo::try_parse_simple(&mut stream)?)
         } else {
             None
         };
@@ -265,7 +366,7 @@ impl NoteDoc {
 
             Some(
                 (0..voice_data_count)
-                    .map(|_| VoiceRecordingInfo::try_parse(stream))
+                    .map(|_| VoiceRecordingInfo::try_parse(&mut stream))
                     .collect::<Result<_, _>>()?,
             )
         } else {
@@ -287,18 +388,7 @@ impl NoteDoc {
         };
 
         let last_pen_info = if field_check_flags & 0x8000 != 0 {
-            let pen_info_end_offset = {
-                let pen_info_start_offset = stream.stream_position()?;
-                let pen_info_data_size: u64 = stream.read_u32_le()?.into();
-
-                pen_info_start_offset + pen_info_data_size
-            };
-
-            let pen_info = PenInfo::try_parse(stream)?;
-
-            stream.seek(SeekFrom::Start(pen_info_end_offset))?;
-
-            Some(pen_info)
+            Some(PenInfo::try_parse_full(&mut stream)?)
         } else {
             None
         };
@@ -345,8 +435,34 @@ impl NoteDoc {
             None
         };
 
-        let mut sha256 = [0_u8; 32];
-        stream.read_exact(&mut sha256)?;
+        let calculated_hash = {
+            // Calculate the number of bytes we have read in total.
+            let data_size = {
+                let data_end_pos = stream.stream_position()?;
+                data_end_pos - start_offset
+            };
+
+            stream.seek(SeekFrom::Start(start_offset))?;
+
+            let mut hasher = sha2::Sha256::new();
+
+            // Copy exactly `data_size` bytes from the stream into the hasher. Note that this
+            // brings the position in the stream back to where it was before the `seek` above.
+            io::copy(&mut (&mut stream).take(data_size), &mut hasher);
+
+            hasher.finalize()
+        };
+
+        // Now read the corresponding hash from the stream.
+        let hash_in_stream = {
+            let mut v = [0_u8; 32];
+            stream.read_exact(&mut v);
+            v
+        };
+
+        if calculated_hash[..] != hash_in_stream {
+            return Err(eyre!("hash mismatch"));
+        }
 
         Ok(NoteDoc {
             property_flags,
@@ -381,7 +497,6 @@ impl NoteDoc {
             text_summarisation,
             stroke_group_size,
             app_custom_data,
-            sha256,
         })
     }
 }

@@ -106,19 +106,25 @@ impl TextObject {
 
         Ok(TextObject { shape })
     }
+
+    pub fn try_parse_standalone(
+        stream: &mut (impl ByteStreamLe + Seek),
+    ) -> color_eyre::Result<TextObject> {
+        ObjectBase::try_parse_inheritor(stream, 0)
+    }
 }
 
 impl InheritsObjectBase for TextObject {
-    fn try_parse<T: crate::byte_stream::ByteStreamLe + std::io::Seek>(
+    fn try_parse<T: ByteStreamLe + Seek>(
         stream: &mut T,
-        object_base: super::ObjectBase,
+        object_base: ObjectBase,
         child_count: u16,
     ) -> color_eyre::eyre::Result<TextObject> {
-        let shape = ShapeObject::try_parse(stream, object_base, child_count)?;
+        let shape = ShapeObject::try_parse_inner(stream, object_base, child_count, false)?;
         Ok(TextObject::try_parse(stream, shape)?)
     }
 
-    fn object_base(&self) -> &super::ObjectBase {
+    fn object_base(&self) -> &ObjectBase {
         self.shape.object_base()
     }
 }

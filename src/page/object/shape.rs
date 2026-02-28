@@ -388,7 +388,7 @@ pub struct Data {
     pub border_colour: Option<[u8; 4]>,
     pub border_width: Option<f32>,
     pub border_type: Option<BorderType>,
-    original_drawn_rect: Rect,
+    original_drawn_rect: Option<Rect>,
     pub original_rect: Rect,
     pub original_angle: f32,
 }
@@ -608,6 +608,7 @@ impl ShapeObject {
         stream: &mut T,
         object_base: ObjectBase,
         child_count: u16,
+        is_shape_only: bool,
     ) -> Result<ShapeObject, ShapeParseError> {
         let shape_base = ShapeBase::try_parse(stream, object_base, child_count)
             .map_err(ShapeParseError::ShapeBase)?;
@@ -673,7 +674,11 @@ impl ShapeObject {
             points
         };
 
-        let original_drawn_rect = Rect::try_parse_f64(stream)?;
+        // WCon_ObjectShape only reads this if `this.type == 7`, which happens iff it is not a
+        // subclass like a text box or image.
+        let original_drawn_rect = is_shape_only
+            .then(|| Rect::try_parse_f64(stream))
+            .transpose()?;
 
         let mut field_flags = if flex_offset != 0 {
             stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
@@ -805,6 +810,7 @@ impl InheritsObjectBase for ShapeObject {
             stream,
             object_base,
             child_count,
+            true,
         )?)
     }
 

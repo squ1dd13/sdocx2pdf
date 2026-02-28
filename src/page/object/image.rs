@@ -137,7 +137,7 @@ impl InheritsObjectBase for ImageObject {
         object_base: super::ObjectBase,
         child_count: u16,
     ) -> color_eyre::eyre::Result<ImageObject> {
-        let shape = ShapeObject::try_parse(stream, object_base, child_count)?;
+        let shape = ShapeObject::try_parse_inner(stream, object_base, child_count, false)?;
         Ok(ImageObject::try_parse(stream, shape)?)
     }
 
