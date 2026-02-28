@@ -389,8 +389,8 @@ pub struct Data {
     pub border_width: Option<f32>,
     pub border_type: Option<BorderType>,
     original_drawn_rect: Rect,
-    original_rect: Rect,
-    original_angle: f32,
+    pub original_rect: Rect,
+    pub original_angle: f32,
 }
 
 #[derive(Debug)]
@@ -513,19 +513,19 @@ struct Text {
 }
 
 #[derive(Debug)]
-struct Image {
+pub struct Image {
     transparency: bool,
 
     border_image_hash: Option<String>,
-    border_image_nine_patch_width: Option<u32>,
+    pub border_image_nine_patch_width: Option<u32>,
     original_image_hash: Option<String>,
-    crop_rect: Option<Rect>,
-    image_border_line_width: Option<Rect>,
-    border_image_id: Option<u32>,
-    border_image_nine_patch_rect: Option<Rect>,
+    pub crop_rect: Option<Rect>,
+    pub border_line_width: Option<Rect>,
+    pub border_image_bind_id: Option<u32>,
+    pub border_image_nine_patch_rect: Option<Rect>,
     compat_image_id: Option<u32>,
-    original_image_id: Option<u32>,
-    original_rect: Option<Rect>,
+    pub original_image_id: Option<u32>,
+    pub original_rect: Option<Rect>,
 }
 
 #[derive(Error, Debug)]
@@ -594,7 +594,7 @@ pub struct ShapeObject {
     pub data: Data,
     pen: Pen,
     text: Text,
-    image: Image,
+    pub image: Image,
 
     control_points: Vec<Point>,
 
@@ -780,8 +780,8 @@ impl ShapeObject {
                 border_image_nine_patch_width: None,
                 original_image_hash: None,
                 crop_rect: None,
-                image_border_line_width: None,
-                border_image_id: None,
+                border_line_width: None,
+                border_image_bind_id: None,
                 border_image_nine_patch_rect: None,
                 compat_image_id: None,
                 original_image_id: None,

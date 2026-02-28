@@ -38,8 +38,8 @@ impl Point {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Rect {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rect {
     left: f64,
     top: f64,
     right: f64,

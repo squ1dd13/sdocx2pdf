@@ -3,7 +3,10 @@ use crate::{
     byte_stream::ByteStreamLe,
     page::{
         Point, Rect,
-        object::{line::LineObject, shape::ShapeObject, stroke::StrokeObject, text::TextObject},
+        object::{
+            image::ImageObject, line::LineObject, shape::ShapeObject, stroke::StrokeObject,
+            text::TextObject,
+        },
     },
 };
 use chrono::{DateTime, Utc};
@@ -12,6 +15,7 @@ use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
 use std::io::{Seek, SeekFrom};
 
+mod image;
 mod line;
 mod shape;
 mod shape_base;
@@ -401,7 +405,7 @@ pub enum DocObject {
     Text(Box<TextObject>),
 
     /// `WCon_ObjectTextBoxOrImage` (variant 0) extends `WCon_ObjectShape` (`Shape`)
-    Image(OpaqueObject),
+    Image(Box<ImageObject>),
 
     /// `WCon_ObjectContainer`; extends `WCon_ObjectBase`
     Container(OpaqueObject),
@@ -480,6 +484,13 @@ impl DocObject {
             )?)));
         }
 
+        if object_type == 3 {
+            return Ok(DocObject::Image(Box::new(ObjectBase::try_parse_inheritor(
+                stream,
+                child_count,
+            )?)));
+        }
+
         if object_type == 15 {
             return Err(eyre!("parsing not implemented for old strokes"));
         }
@@ -487,10 +498,6 @@ impl DocObject {
         let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
 
         Ok(match object_type {
-            3 => DocObject::Image({
-                eprintln!("Warning: Images are not yet supported");
-                object
-            }),
             4 => DocObject::Container({
                 eprintln!("Warning: Containers are not yet supported");
                 object
@@ -545,9 +552,9 @@ impl DocObject {
             DocObject::Shape(shape_object) => shape_object.object_base(),
             DocObject::Stroke(stroke_object) => stroke_object.object_base(),
             DocObject::Text(text_object) => text_object.object_base(),
+            DocObject::Image(image_object) => image_object.object_base(),
 
-            DocObject::Image(object)
-            | DocObject::Container(object)
+            DocObject::Container(object)
             | DocObject::Voice(object)
             | DocObject::Formula(object)
             | DocObject::Table(object)
