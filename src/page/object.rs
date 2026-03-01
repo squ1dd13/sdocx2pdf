@@ -5,7 +5,7 @@ use crate::{
         Point, Rect,
         object::{
             image::ImageObject, line::LineObject, shape::ShapeObject, stroke::StrokeObject,
-            text::TextObject,
+            text::TextObject, voice::VoiceObject,
         },
     },
 };
@@ -23,6 +23,7 @@ mod shared;
 mod stroke;
 pub mod text;
 mod text_core;
+mod voice;
 
 #[derive(Debug, Default)]
 struct DocBundle {
@@ -417,7 +418,7 @@ pub enum DocObject {
     Line(Box<LineObject>),
 
     /// `WCon_ObjectVoice`; extends `WCon_ObjectBase`
-    Voice(OpaqueObject),
+    Voice(Box<VoiceObject>),
 
     /// `WCon_ObjectFormula`; extends `WCon_ObjectBase`
     Formula(OpaqueObject),
@@ -491,6 +492,13 @@ impl DocObject {
             )?)));
         }
 
+        if object_type == 10 {
+            return Ok(DocObject::Voice(Box::new(ObjectBase::try_parse_inheritor(
+                stream,
+                child_count,
+            )?)));
+        }
+
         if object_type == 15 {
             return Err(eyre!("parsing not implemented for old strokes"));
         }
@@ -500,10 +508,6 @@ impl DocObject {
         Ok(match object_type {
             4 => DocObject::Container({
                 eprintln!("Warning: Containers are not yet supported");
-                object
-            }),
-            10 => DocObject::Voice({
-                eprintln!("Warning: Voice objects are not yet supported");
                 object
             }),
             11 => DocObject::Formula({
@@ -553,9 +557,9 @@ impl DocObject {
             DocObject::Stroke(stroke_object) => stroke_object.object_base(),
             DocObject::Text(text_object) => text_object.object_base(),
             DocObject::Image(image_object) => image_object.object_base(),
+            DocObject::Voice(voice_object) => voice_object.object_base(),
 
             DocObject::Container(object)
-            | DocObject::Voice(object)
             | DocObject::Formula(object)
             | DocObject::Table(object)
             | DocObject::Web(object)

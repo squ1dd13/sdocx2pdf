@@ -28,6 +28,11 @@ impl CheckedBitfield {
         })
     }
 
+    pub const fn clear(&mut self) {
+        self.bits = 0;
+        self.checked = 0;
+    }
+
     /// Returns `true` iff the `index`th bit is set, where 0 is the index of the least significant
     /// bit. Stores that this bit has been checked.
     pub const fn check_bit(&mut self, index: u8) -> bool {
@@ -90,6 +95,17 @@ macro_rules! unpack_bool_flags {
         $(
             $crate::unpack_bool_flag!($bf, $i => $tx $($ty)?);
         )*
+    };
+}
+
+#[macro_export]
+macro_rules! read_flags {
+    ($stream:expr, $bf_name:ident, $parse_err:expr, $unhandled_err:expr, { $($do:tt)* }) => {
+        let mut $bf_name = CheckedBitfield::try_parse($stream).map_err($parse_err)?;
+
+        $($do)*
+
+        $bf_name.ensure_none_set_unchecked().map_err($unhandled_err)?;
     };
 }
 
