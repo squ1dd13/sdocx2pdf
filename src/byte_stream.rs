@@ -236,18 +236,23 @@ pub trait ByteStreamLe: ReadBytesExt {
     /// while including the size of the `u32` used to encode that size. As such, it returns an
     /// error if `size < 4`.
     fn take_inclusive_length_prefixed(
-        &mut self,
-    ) -> Result<Window<&mut Self>, TakeInclusiveLengthPrefixedError> {
+        mut self,
+    ) -> Result<Window<Self>, TakeInclusiveLengthPrefixedError>
+    where
+        Self: Sized,
+    {
         let frame_size = self.read_u32_le()?;
 
-        // Return a window of `frame_size` bytes into `self`, offset such that the
         Window::new_at(self, 4, frame_size.into())
             .map_err(|_| TakeInclusiveLengthPrefixedError::SizeTooSmall(frame_size))
     }
 
-    /// Reads `size: u32` from `self` and then a wrapper that can read at most `size` bytes from
-    /// `self`.
-    fn take_exclusive_length_prefixed(&mut self) -> io::Result<Take<&mut Self>> {
+    /// Reads `size: u32` from `self` and returns a wrapper that can read at most `size` further
+    /// bytes from `self`.
+    fn take_exclusive_length_prefixed(mut self) -> io::Result<Take<Self>>
+    where
+        Self: Sized,
+    {
         let size: u64 = self.read_u32_le()?.into();
         Ok(self.take(size))
     }

@@ -4,10 +4,13 @@ use crate::{
         ByteStreamLe, ExactSizedStream, ReadStringError, TakeInclusiveLengthPrefixedError,
         UnfinishedParsingError,
     },
+    impl_try_from_for_optional_from,
     page::object::text::TextObject,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
 use sha2::Digest;
 use std::{
     collections::HashMap,
@@ -145,50 +148,71 @@ impl PenInfo {
     }
 }
 
+#[derive(Debug, FromPrimitive)]
+enum VoiceAction {
+    /// `VOICE_ACTION_NONE`
+    None = 0,
+    /// `VOICE_ACTION_START`
+    Start = 1,
+    /// `VOICE_ACTION_PAUSE`
+    Pause = 2,
+    /// `VOICE_ACTION_RESUME`
+    Resume = 3,
+    /// `VOICE_ACTION_STOP`
+    Stop = 4,
+}
+
+impl_try_from_for_optional_from!(VoiceAction, u32, from_u32, pub InvalidVoiceActionError);
+
+#[derive(Debug)]
+struct VoiceEvent {
+    time: DateTime<Utc>,
+    action: VoiceAction,
+}
+
 #[derive(Debug)]
 struct VoiceRecordingInfo {
-    id: u32,
+    attached_file_id: u32,
     name: String,
     duration_str: String,
-    first_big_number: DateTime<Utc>,
-    somethings: Vec<(u32, DateTime<Utc>)>,
-    precise_duration: Option<chrono::Duration>,
+    date_created: DateTime<Utc>,
+    events: Vec<VoiceEvent>,
+    precise_duration: chrono::Duration,
 }
 
 impl VoiceRecordingInfo {
-    fn try_parse(mut stream: (impl ByteStreamLe + Seek)) -> Result<VoiceRecordingInfo> {
-        let data_end_offset = {
-            let data_size: u64 = stream.read_u32_le()?.into();
-            let data_start_offset = stream.stream_position()?;
+    fn try_parse(mut stream: impl ByteStreamLe) -> Result<VoiceRecordingInfo> {
+        let mut frame = stream.take_exclusive_length_prefixed()?;
 
-            data_start_offset + data_size
+        let attached_file_id = frame.read_u32_le()?;
+        let name = frame.read_short_u16_string()?;
+        let duration_str = frame.read_short_u16_string()?;
+        let date_created = frame.read_timestamp()?;
+
+        let events = {
+            let count: usize = frame.read_u32_le()?.try_into()?;
+            let mut events = Vec::with_capacity(count);
+
+            for _ in 0..count {
+                events.push(VoiceEvent {
+                    action: VoiceAction::try_from(frame.read_u32_le()?)?,
+                    time: frame.read_timestamp()?,
+                });
+            }
+
+            events
         };
 
-        let id = stream.read_u32_le()?;
-        let name = stream.read_short_u16_string()?;
-        let duration_str = stream.read_short_u16_string()?;
-        let first_big_number = stream.read_timestamp()?;
+        let precise_duration = chrono::Duration::milliseconds(frame.read_i64_le()?);
 
-        let number_of_somethings = stream.read_u32_le()?;
-
-        let mut somethings = Vec::with_capacity(number_of_somethings.try_into()?);
-
-        for _ in 0..number_of_somethings {
-            somethings.push((stream.read_u32_le()?, stream.read_timestamp()?));
-        }
-
-        let precise_duration = if stream.stream_position()? < data_end_offset {
-            Some(chrono::Duration::milliseconds(stream.read_i64_le()?))
-        } else {
-            None
-        };
+        frame.ensure_eof()?;
 
         Ok(VoiceRecordingInfo {
-            id,
+            attached_file_id,
             name,
             duration_str,
-            first_big_number,
-            somethings,
+            date_created,
+            events,
             precise_duration,
         })
     }
@@ -263,7 +287,7 @@ impl NoteDoc {
         let min_format_version = stream.read_u32_le()?;
 
         let title_text = {
-            let mut stream = stream.take_exclusive_length_prefixed()?;
+            let mut stream = (&mut stream).take_exclusive_length_prefixed()?;
 
             let text = TextObject::try_parse_standalone(&mut stream)?;
             stream.ensure_eof()?;
@@ -272,7 +296,7 @@ impl NoteDoc {
         };
 
         let body_text = {
-            let mut stream = stream.take_exclusive_length_prefixed()?;
+            let mut stream = (&mut stream).take_exclusive_length_prefixed()?;
 
             let text = TextObject::try_parse_standalone(&mut stream)?;
             stream.ensure_eof()?;
