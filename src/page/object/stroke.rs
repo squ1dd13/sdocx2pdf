@@ -7,7 +7,10 @@ use thiserror::Error;
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
-    byte_stream::{ByteStreamLe, ReadBitfieldError, WrongEndOffsetError},
+    byte_stream::{
+        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError,
+        TakeInclusiveLengthPrefixedError, UnfinishedParsingError, WrongEndOffsetError,
+    },
     impl_try_from_for_optional_from,
     page::{
         Point,
@@ -61,6 +64,12 @@ impl Event {
         if is_negative { -absolute } else { absolute }
     }
 
+    /// Parses compressed stroke event data from `stream`.
+    ///
+    /// In compressed data, instead of every event having each field stored in full, only full
+    /// values are stored for the first event, and subsequent events are represented as deltas,
+    /// with 16 bits for each field. Instead of floating-point values, two different fixed-point
+    /// formats are used.
     fn parse_compressed_events(
         stream: &mut impl ByteStreamLe,
         event_count: usize,
@@ -258,6 +267,9 @@ pub enum StrokeParseError {
     #[error("io error")]
     Io(#[from] io::Error),
 
+    #[error(transparent)]
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
+
     #[error("invalid data type {0} for stroke object (should be 1)")]
     BadDataType(u16),
 
@@ -279,8 +291,8 @@ pub enum StrokeParseError {
     #[error(transparent)]
     BadStrokeType(#[from] InvalidStrokeTypeError),
 
-    #[error("parsed wrong number of bytes")]
-    BadEndOffset(#[from] WrongEndOffsetError),
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -325,12 +337,7 @@ impl StrokeObject {
         object_base: ObjectBase,
         child_count: u16,
     ) -> Result<StrokeObject, StrokeParseError> {
-        let start_offset = stream.stream_position()?;
-
-        let expected_end = {
-            let size: u64 = stream.read_u32_le()?.into();
-            start_offset + size
-        };
+        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
 
         let data_type = stream.read_u16_le()?;
 
@@ -341,7 +348,7 @@ impl StrokeObject {
         let flex_offset: u64 = stream.read_u32_le()?.into();
 
         let mut property_flags =
-            CheckedBitfield::try_parse(stream).map_err(StrokeParseError::FieldCheckFlags)?;
+            CheckedBitfield::try_parse(&mut stream).map_err(StrokeParseError::FieldCheckFlags)?;
 
         unpack_bool_flags!(property_flags, {
             0 => is_curve_enabled;
@@ -362,20 +369,20 @@ impl StrokeObject {
             .map_err(StrokeParseError::UnhandledProperty)?;
 
         let stated_field_check_flags =
-            CheckedBitfield::try_parse(stream).map_err(StrokeParseError::FieldCheckFlags)?;
+            CheckedBitfield::try_parse(&mut stream).map_err(StrokeParseError::FieldCheckFlags)?;
 
         let event_count: usize = stream.read_u16_le()?.into();
 
         let events = if is_curve_enabled {
-            Event::parse_compressed_events(stream, event_count, is_tilt_data_present, true)?
+            Event::parse_compressed_events(&mut stream, event_count, is_tilt_data_present, true)?
         } else {
-            Event::parse_uncompressed_events(stream, event_count, is_tilt_data_present)?
+            Event::parse_uncompressed_events(&mut stream, event_count, is_tilt_data_present)?
         };
 
         let tool_type = ToolType::try_from(stream.read_u16_le()?)?;
 
         let mut field_check_flags = if flex_offset != 0 {
-            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
+            stream.seek(SeekFrom::Start(flex_offset))?;
             stated_field_check_flags
         } else {
             CheckedBitfield::default()
@@ -416,15 +423,7 @@ impl StrokeObject {
             eprintln!("Warning: Read unknown stroke field (value {unk})");
         };
 
-        let actual_end = stream.stream_position()?;
-
-        if actual_end != expected_end {
-            return Err(WrongEndOffsetError {
-                actual_end,
-                expected_end,
-            }
-            .into());
-        }
+        stream.ensure_eof()?;
 
         Ok(StrokeObject {
             object_base,
