@@ -3,6 +3,7 @@ use std::io;
 use crate::{
     byte_stream::ByteStreamLe,
     page::{Point, Rect},
+    read_u32_sized_vec,
 };
 use num_derive::FromPrimitive;
 use thiserror::Error;
@@ -37,8 +38,8 @@ pub enum PathParseError {
     #[error("io error")]
     Io(#[from] std::io::Error),
 
-    #[error("segment count does not fit in `usize`")]
-    TooManySegments(#[source] std::num::TryFromIntError),
+    #[error("segment count {0} does not fit in `usize`")]
+    TooManySegments(u32),
 
     #[error("invalid segment type ID {0}")]
     BadSegmentType(u8),
@@ -51,45 +52,36 @@ pub struct Path {
 
 impl Path {
     pub fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<Path, PathParseError> {
-        let segment_count: usize = stream
-            .read_u32_le()?
-            .try_into()
-            .map_err(PathParseError::TooManySegments)?;
+        Ok(Path {
+            segments: read_u32_sized_vec!(stream, PathParseError::TooManySegments, {
+                match stream.read_u8()? {
+                    1 => PathSegment::MoveTo(Point::try_parse_f64(stream)?),
+                    2 => PathSegment::LineTo(Point::try_parse_f64(stream)?),
 
-        let mut segments = Vec::with_capacity(segment_count);
+                    3 => PathSegment::QuadTo(
+                        Point::try_parse_f64(stream)?,
+                        Point::try_parse_f64(stream)?,
+                    ),
 
-        for _ in 0..segment_count {
-            segments.push(match stream.read_u8()? {
-                1 => PathSegment::MoveTo(Point::try_parse_f64(stream)?),
+                    4 => PathSegment::CubicTo(
+                        Point::try_parse_f64(stream)?,
+                        Point::try_parse_f64(stream)?,
+                        Point::try_parse_f64(stream)?,
+                    ),
 
-                2 => PathSegment::LineTo(Point::try_parse_f64(stream)?),
+                    5 => PathSegment::ArcTo(
+                        Rect::try_parse_f64(stream)?,
+                        stream.read_f64_le()?,
+                        stream.read_f64_le()?,
+                    ),
 
-                3 => PathSegment::QuadTo(
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                ),
+                    6 => PathSegment::Close,
+                    7 => PathSegment::AddOval(Rect::try_parse_f64(stream)?),
 
-                4 => PathSegment::CubicTo(
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                    Point::try_parse_f64(stream)?,
-                ),
-
-                5 => PathSegment::ArcTo(
-                    Rect::try_parse_f64(stream)?,
-                    stream.read_f64_le()?,
-                    stream.read_f64_le()?,
-                ),
-
-                6 => PathSegment::Close,
-
-                7 => PathSegment::AddOval(Rect::try_parse_f64(stream)?),
-
-                bad => return Err(PathParseError::BadSegmentType(bad)),
-            });
-        }
-
-        Ok(Path { segments })
+                    bad => return Err(PathParseError::BadSegmentType(bad)),
+                }
+            }),
+        })
     }
 }
 
@@ -124,7 +116,7 @@ pub struct GradientColour {
 impl GradientColour {
     pub fn try_parse(stream: &mut impl ByteStreamLe) -> io::Result<GradientColour> {
         Ok(GradientColour {
-            colour: stream.read_u32_le()?.to_le_bytes(),
+            colour: stream.read_4_bytes()?,
             position: stream.read_f32_le()?,
         })
     }
