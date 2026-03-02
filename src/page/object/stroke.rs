@@ -78,45 +78,20 @@ impl Event {
         };
 
         // Alternates x, y, x, y, ...
-        let point_deltas_xy = {
-            let mut deltas = vec![0_u16; 2 * delta_count];
-            stream.read_u16_into::<LittleEndian>(&mut deltas)?;
-            deltas
-        };
+        let point_deltas_xy = stream.read_u16s(2 * delta_count)?;
 
         let origin_pressure = stream.read_f32_le()?;
-
-        // todo: Add method to ByteStreamLe for reading many u16s
-        let pressure_deltas = {
-            let mut deltas = vec![0_u16; delta_count];
-            stream.read_u16_into::<LittleEndian>(&mut deltas)?;
-            deltas
-        };
+        let pressure_deltas = stream.read_u16s(delta_count)?;
 
         let origin_timestamp = stream.read_u32_le()?;
-
-        let timestamp_deltas = {
-            let mut deltas = vec![0_u16; delta_count];
-            stream.read_u16_into::<LittleEndian>(&mut deltas)?;
-            deltas
-        };
+        let timestamp_deltas = stream.read_u16s(delta_count)?;
 
         let (origin_tilt_data, tilt_deltas, orientation_deltas) = if has_tilt_data {
             let origin_tilt = stream.read_f32_le()?;
-
-            let tilt_deltas = {
-                let mut deltas = vec![0_u16; delta_count];
-                stream.read_u16_into::<LittleEndian>(&mut deltas)?;
-                deltas
-            };
+            let tilt_deltas = stream.read_u16s(delta_count)?;
 
             let origin_orientation = stream.read_f32_le()?;
-
-            let orientation_deltas = {
-                let mut deltas = vec![0_u16; delta_count];
-                stream.read_u16_into::<LittleEndian>(&mut deltas)?;
-                deltas
-            };
+            let orientation_deltas = stream.read_u16s(delta_count)?;
 
             (
                 Some(TiltData {
@@ -175,40 +150,14 @@ impl Event {
         has_tilt_data: bool,
     ) -> io::Result<Vec<Event>> {
         // x, y, x, y, ...
-        let points_xy = {
-            let mut xy = vec![0.0; 2 * event_count];
-            stream.read_f64_into::<LittleEndian>(&mut xy)?;
-            xy
-        };
+        let points_xy = stream.read_f64s(2 * event_count)?;
 
-        let pressures = {
-            let mut pressures = vec![0.0; event_count];
-            stream.read_f32_into::<LittleEndian>(&mut pressures)?;
-
-            pressures
-        };
-
-        let timestamps = {
-            let mut timestamps = vec![0; event_count];
-            stream.read_u32_into::<LittleEndian>(&mut timestamps)?;
-
-            timestamps
-        };
+        let pressures = stream.read_f32s(event_count)?;
+        let timestamps = stream.read_u32s(event_count)?;
 
         let (tilts, orientations) = if has_tilt_data {
-            let tilts = {
-                let mut tilts = vec![0.0; event_count];
-                stream.read_f32_into::<LittleEndian>(&mut tilts)?;
-
-                tilts
-            };
-
-            let orientations = {
-                let mut orientations = vec![0.0; event_count];
-                stream.read_f32_into::<LittleEndian>(&mut orientations)?;
-
-                orientations
-            };
+            let tilts = stream.read_f32s(event_count)?;
+            let orientations = stream.read_f32s(event_count)?;
 
             (tilts, orientations)
         } else {

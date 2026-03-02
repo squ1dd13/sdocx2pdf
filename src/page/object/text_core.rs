@@ -126,7 +126,7 @@ impl Span {
         // >> 16 bytes to here, which is the end of the base <<
 
         // Anything left is specific to the span type. (There does not have to be anything left.)
-        let bytes = stream.read_u8_buf(data_size - 16)?;
+        let bytes = stream.read_u8s(data_size - 16)?;
 
         Ok(Span {
             span_base: SpanBase {
@@ -190,7 +190,7 @@ impl Paragraph {
         let start_pos = stream.read_u32_le()?;
         let end_pos = stream.read_u32_le()?;
 
-        let bytes = stream.read_u8_buf(data_size - 12)?;
+        let bytes = stream.read_u8s(data_size - 12)?;
 
         Ok(Paragraph {
             paragraph_base: ParagraphBase {

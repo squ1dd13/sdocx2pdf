@@ -226,6 +226,24 @@ impl<T: Seek> Seek for BlindWindow<T> {
     }
 }
 
+macro_rules! vec_read {
+    ($fn_name:ident, $read_type:ty, $read_into_fn:ident) => {
+        fn $fn_name(&mut self, n: usize) -> io::Result<Vec<$read_type>> {
+            let mut v = vec![Default::default(); n];
+            self.$read_into_fn::<LittleEndian>(&mut v)?;
+            Ok(v)
+        }
+    };
+}
+
+macro_rules! le_wrapper {
+    ($le_name:ident, $t:ty, $bo_name:ident) => {
+        fn $le_name(&mut self) -> io::Result<$t> {
+            self.$bo_name::<LittleEndian>()
+        }
+    };
+}
+
 /// Extends `ReadBytesExt` with methods for parsing sdoc binary files (which are little-endian).
 pub trait ByteStreamLe: Read {
     /// Reads `size: u32` from `self`, and then returns a `Window` that can read at most `size - 4`
@@ -258,7 +276,7 @@ pub trait ByteStreamLe: Read {
     }
 
     /// Reads exactly `n` bytes into a `Vec`, and returns it.
-    fn read_u8_buf(&mut self, n: usize) -> io::Result<Vec<u8>> {
+    fn read_u8s(&mut self, n: usize) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0_u8; n];
         self.read_exact(&mut bytes)?;
 
@@ -268,18 +286,15 @@ pub trait ByteStreamLe: Read {
     /// Reads `n_chars` bytes and returns the UTF-8 decoded result.
     fn read_u8_string(&mut self, n_chars: usize) -> Result<String, ReadStringError> {
         Ok(String::from_utf8(
-            self.read_u8_buf(n_chars)
-                .map_err(ReadStringError::BytesIo)?,
+            self.read_u8s(n_chars).map_err(ReadStringError::BytesIo)?,
         )?)
     }
 
     /// Reads `2 * n_chars` bytes and returns the UTF-16 decoded result.
     fn read_u16_string(&mut self, n_chars: usize) -> Result<String, ReadStringError> {
-        let mut buf = vec![0_u16; n_chars];
-        self.read_u16_into::<LittleEndian>(&mut buf)
-            .map_err(ReadStringError::BytesIo)?;
-
-        Ok(String::from_utf16(&buf)?)
+        Ok(String::from_utf16(
+            &self.read_u16s(n_chars).map_err(ReadStringError::BytesIo)?,
+        )?)
     }
 
     /// Reads `n_chars: u16`, then `2 * n_chars` bytes, and returns the UTF-16 decoded result.
@@ -333,57 +348,31 @@ pub trait ByteStreamLe: Read {
         ReadBytesExt::read_u8(self)
     }
 
-    fn read_u16_le(&mut self) -> io::Result<u16> {
-        self.read_u16::<LittleEndian>()
-    }
-
-    fn read_u24_le(&mut self) -> io::Result<u32> {
-        self.read_u24::<LittleEndian>()
-    }
-
-    fn read_u32_le(&mut self) -> io::Result<u32> {
-        self.read_u32::<LittleEndian>()
-    }
-
     fn read_4_bytes(&mut self) -> io::Result<[u8; 4]> {
         self.read_u32_le().map(u32::to_le_bytes)
     }
 
-    fn read_u48_le(&mut self) -> io::Result<u64> {
-        self.read_u48::<LittleEndian>()
-    }
+    le_wrapper!(read_u16_le, u16, read_u16);
+    le_wrapper!(read_u24_le, u32, read_u24);
+    le_wrapper!(read_u32_le, u32, read_u32);
+    le_wrapper!(read_u48_le, u64, read_u48);
+    le_wrapper!(read_u64_le, u64, read_u64);
 
-    fn read_u64_le(&mut self) -> io::Result<u64> {
-        self.read_u64::<LittleEndian>()
-    }
+    le_wrapper!(read_i16_le, i16, read_i16);
+    le_wrapper!(read_i24_le, i32, read_i24);
+    le_wrapper!(read_i32_le, i32, read_i32);
+    le_wrapper!(read_i48_le, i64, read_i48);
+    le_wrapper!(read_i64_le, i64, read_i64);
 
-    fn read_i16_le(&mut self) -> io::Result<i16> {
-        self.read_i16::<LittleEndian>()
-    }
+    le_wrapper!(read_f32_le, f32, read_f32);
+    le_wrapper!(read_f64_le, f64, read_f64);
 
-    fn read_i24_le(&mut self) -> io::Result<i32> {
-        self.read_i24::<LittleEndian>()
-    }
+    vec_read!(read_u16s, u16, read_u16_into);
+    vec_read!(read_u32s, u32, read_u32_into);
+    vec_read!(read_u64s, u64, read_u64_into);
 
-    fn read_i32_le(&mut self) -> io::Result<i32> {
-        self.read_i32::<LittleEndian>()
-    }
-
-    fn read_i48_le(&mut self) -> io::Result<i64> {
-        self.read_i48::<LittleEndian>()
-    }
-
-    fn read_i64_le(&mut self) -> io::Result<i64> {
-        self.read_i64::<LittleEndian>()
-    }
-
-    fn read_f32_le(&mut self) -> io::Result<f32> {
-        self.read_f32::<LittleEndian>()
-    }
-
-    fn read_f64_le(&mut self) -> io::Result<f64> {
-        self.read_f64::<LittleEndian>()
-    }
+    vec_read!(read_f32s, f32, read_f32_into);
+    vec_read!(read_f64s, f64, read_f64_into);
 }
 
 impl<T: ReadBytesExt> ByteStreamLe for T {}

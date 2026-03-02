@@ -81,7 +81,7 @@ impl OpaqueBytes {
         let size: usize = stream.read_u32_le()?.try_into()?;
 
         Ok(OpaqueBytes {
-            bytes: stream.read_u8_buf(size)?,
+            bytes: stream.read_u8s(size)?,
         })
     }
 
@@ -90,7 +90,7 @@ impl OpaqueBytes {
         let size: usize = stream.read_u32_le()?.try_into()?;
 
         Ok(OpaqueBytes {
-            bytes: stream.read_u8_buf(size.checked_sub(4).ok_or_else(|| {
+            bytes: stream.read_u8s(size.checked_sub(4).ok_or_else(|| {
                 eyre!("Size ({size}) cannot be inclusive as it is less than 4")
             })?)?,
         })

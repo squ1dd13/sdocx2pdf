@@ -77,17 +77,17 @@ impl EncryptionInfo {
 
             encryption_salt: {
                 let salt_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8_buf(salt_size)?
+                stream.read_u8s(salt_size)?
             },
 
             encryption_iv: {
                 let iv_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8_buf(iv_size)?
+                stream.read_u8s(iv_size)?
             },
 
             encryption_key: {
                 let key_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8_buf(key_size)?
+                stream.read_u8s(key_size)?
             },
         })
     }
