@@ -227,7 +227,7 @@ impl<T: Seek> Seek for BlindWindow<T> {
 }
 
 /// Extends `ReadBytesExt` with methods for parsing sdoc binary files (which are little-endian).
-pub trait ByteStreamLe: ReadBytesExt {
+pub trait ByteStreamLe: Read {
     /// Reads `size: u32` from `self`, and then returns a `Window` that can read at most `size - 4`
     /// further bytes from `self`. The 4 bytes before the current position in the returned reader
     /// are the bytes of `size`.
@@ -329,6 +329,10 @@ pub trait ByteStreamLe: ReadBytesExt {
         .map_err(ReadBitfieldError::BitsIo)
     }
 
+    fn read_u8(&mut self) -> io::Result<u8> {
+        ReadBytesExt::read_u8(self)
+    }
+
     fn read_u16_le(&mut self) -> io::Result<u16> {
         self.read_u16::<LittleEndian>()
     }
@@ -384,6 +388,10 @@ pub trait ByteStreamLe: ReadBytesExt {
 
 impl<T: ReadBytesExt> ByteStreamLe for T {}
 
+pub trait SeekableByteStreamLe: ByteStreamLe + Seek {}
+
+impl<T: ByteStreamLe + Seek> SeekableByteStreamLe for T {}
+
 /// An error type for use when parsing should finish at a particular offset in the stream, but
 /// ends somewhere else. This may indicate a parsing bug.
 #[derive(Error, Debug)]
@@ -414,4 +422,33 @@ impl<T> ExactSizedStream for Take<T> {
     fn n_remaining(&self) -> u64 {
         self.limit()
     }
+}
+
+#[macro_export]
+macro_rules! read_u32_sized_vec {
+    ($stream:expr, $usize_err:expr, $elem:expr) => {{
+        let count = $stream.read_u32_le()?;
+        let count: usize = count.try_into().map_err(|_| $usize_err(count))?;
+
+        let mut v = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            v.push($elem);
+        }
+
+        v
+    }};
+
+    ($stream:expr, $usize_err:expr, $idx:ident => $elem:expr) => {{
+        let count = $stream.read_u32_le()?;
+        let count: usize = count.try_into().map_err(|_| $usize_err(count))?;
+
+        let mut v = Vec::with_capacity(count);
+
+        for $idx in 0..count {
+            v.push($elem);
+        }
+
+        v
+    }};
 }

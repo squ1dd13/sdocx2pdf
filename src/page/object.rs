@@ -1,6 +1,6 @@
 use crate::{
     OpaqueBytes,
-    byte_stream::ByteStreamLe,
+    byte_stream::{ByteStreamLe, SeekableByteStreamLe},
     page::{
         Point, Rect,
         object::{
@@ -359,12 +359,12 @@ impl ObjectBase {
         Sha256::digest(s.as_bytes()).into()
     }
 
-    fn try_parse_inheritor<T: ByteStreamLe + Seek, I: ConcreteInheritsObjectBase>(
-        stream: &mut T,
+    fn try_parse_inheritor<T: ByteStreamLe + Seek + ?Sized, I: ConcreteInheritsObjectBase>(
+        mut stream: &mut T,
         child_count: u16,
     ) -> Result<I> {
-        let base = ObjectBase::try_parse(stream)?;
-        I::try_parse(stream, base, child_count)
+        let base = ObjectBase::try_parse(&mut stream)?;
+        I::try_parse(&mut stream, base, child_count)
     }
 }
 
@@ -446,8 +446,10 @@ pub enum DocObject {
 }
 
 impl DocObject {
-    pub fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
+    // We use dynamic dispatch for the stream because object parsing can be recursive, and we don't
+    // want to end up with recursive stream types ("Take<&mut Take<&mut Take<...>>>").
+    pub fn try_parse(
+        stream: &mut dyn SeekableByteStreamLe,
         object_type: impl TryInto<u8> + Clone + std::fmt::Display,
         child_count: u16,
     ) -> Result<DocObject> {

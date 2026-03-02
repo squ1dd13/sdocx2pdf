@@ -25,7 +25,7 @@ struct AuthorInfo {
 }
 
 impl AuthorInfo {
-    fn try_parse(mut stream: impl ByteStreamLe) -> Result<AuthorInfo> {
+    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<AuthorInfo> {
         Ok(AuthorInfo {
             strings: [
                 stream.read_short_u16_string()?,
@@ -77,7 +77,7 @@ struct PenInfo {
 }
 
 impl PenInfo {
-    fn try_parse_simple(mut stream: impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
+    fn try_parse_simple(stream: &mut impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
         Ok(PenInfo {
             name: stream
                 .read_short_u16_string()
@@ -108,7 +108,7 @@ impl PenInfo {
         })
     }
 
-    fn try_parse_full(mut stream: impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
+    fn try_parse_full(stream: &mut impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
         let mut stream = stream.take_inclusive_length_prefixed()?;
 
         let pen_info = PenInfo {
@@ -181,7 +181,7 @@ struct VoiceRecordingInfo {
 }
 
 impl VoiceRecordingInfo {
-    fn try_parse(mut stream: impl ByteStreamLe) -> Result<VoiceRecordingInfo> {
+    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<VoiceRecordingInfo> {
         let mut frame = stream.take_exclusive_length_prefixed()?;
 
         let attached_file_id = frame.read_u32_le()?;
@@ -264,7 +264,7 @@ pub struct NoteDoc {
 }
 
 impl NoteDoc {
-    pub fn try_parse(mut stream: (impl ByteStreamLe + Seek)) -> Result<NoteDoc> {
+    pub fn try_parse(stream: &mut (impl ByteStreamLe + Seek)) -> Result<NoteDoc> {
         let start_offset = stream.stream_position()?;
 
         let flexible_data_area_offset = {
@@ -287,7 +287,7 @@ impl NoteDoc {
         let min_format_version = stream.read_u32_le()?;
 
         let title_text = {
-            let mut stream = (&mut stream).take_exclusive_length_prefixed()?;
+            let mut stream = stream.take_exclusive_length_prefixed()?;
 
             let text = TextObject::try_parse_standalone(&mut stream)?;
             stream.ensure_eof()?;
@@ -296,7 +296,7 @@ impl NoteDoc {
         };
 
         let body_text = {
-            let mut stream = (&mut stream).take_exclusive_length_prefixed()?;
+            let mut stream = stream.take_exclusive_length_prefixed()?;
 
             let text = TextObject::try_parse_standalone(&mut stream)?;
             stream.ensure_eof()?;
@@ -314,13 +314,13 @@ impl NoteDoc {
             },
 
             app_version: if field_check_flags & 2 != 0 {
-                Some(AppVersion::try_parse(&mut stream)?)
+                Some(AppVersion::try_parse(stream)?)
             } else {
                 None
             },
 
             author_info: if field_check_flags & 4 != 0 {
-                Some(AuthorInfo::try_parse(&mut stream)?)
+                Some(AuthorInfo::try_parse(stream)?)
             } else {
                 None
             },
@@ -380,7 +380,7 @@ impl NoteDoc {
         };
 
         let compatible_last_pen_info = if field_check_flags & 0x1000 != 0 {
-            Some(PenInfo::try_parse_simple(&mut stream)?)
+            Some(PenInfo::try_parse_simple(stream)?)
         } else {
             None
         };
@@ -390,7 +390,7 @@ impl NoteDoc {
 
             Some(
                 (0..voice_data_count)
-                    .map(|_| VoiceRecordingInfo::try_parse(&mut stream))
+                    .map(|_| VoiceRecordingInfo::try_parse(stream))
                     .collect::<Result<_, _>>()?,
             )
         } else {
@@ -412,7 +412,7 @@ impl NoteDoc {
         };
 
         let last_pen_info = if field_check_flags & 0x8000 != 0 {
-            Some(PenInfo::try_parse_full(&mut stream)?)
+            Some(PenInfo::try_parse_full(stream)?)
         } else {
             None
         };
@@ -472,7 +472,7 @@ impl NoteDoc {
 
             // Copy exactly `data_size` bytes from the stream into the hasher. Note that this
             // brings the position in the stream back to where it was before the `seek` above.
-            io::copy(&mut (&mut stream).take(data_size), &mut hasher);
+            io::copy(&mut stream.take(data_size), &mut hasher);
 
             hasher.finalize()
         };

@@ -5,8 +5,13 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{ByteStreamLe, ReadStringError, WrongEndOffsetError},
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadStringError, SeekableByteStreamLe,
+        UnfinishedParsingError, WrongEndOffsetError,
+    },
+    impl_try_from_for_optional_from,
     page::object::DocObject,
+    read_u32_sized_vec,
 };
 
 #[derive(Debug, FromPrimitive)]
@@ -18,6 +23,8 @@ enum Gravity {
     /// `GRAVITY_BOTTOM`
     Bottom = 2,
 }
+
+impl_try_from_for_optional_from!(Gravity, u8, from_u8, pub InvalidGravityError);
 
 #[derive(Debug, FromPrimitive)]
 enum SpanType {
@@ -228,8 +235,8 @@ pub enum CommonParseError {
     #[error("failed to parse a paragraph")]
     Paragraph(#[from] ParagraphParseError),
 
-    #[error("invalid gravity type {0}")]
-    BadGravityType(u8),
+    #[error("invalid gravity type")]
+    BadGravityType(#[from] InvalidGravityError),
 
     #[error("object span count does not fit in `usize`")]
     TooManyObjectSpans,
@@ -237,11 +244,11 @@ pub enum CommonParseError {
     #[error("failed to parse a doc object")]
     DocObject(#[source] color_eyre::Report),
 
-    #[error("object span did not finish where expected")]
-    BadObjectSpanEndOffset(#[source] WrongEndOffsetError),
+    #[error("bytes left over after parsing object span")]
+    ObjectSpanUnfinished(#[source] UnfinishedParsingError),
 
-    #[error("did not finish where expected")]
-    BadEndOffset(#[source] WrongEndOffsetError),
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -260,52 +267,27 @@ pub struct Common {
 }
 
 impl Common {
-    pub fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
+    pub fn try_parse(
+        stream: &mut (impl ByteStreamLe + Seek),
         format_version: u32,
     ) -> Result<Common, CommonParseError> {
-        let expected_end = {
-            let data_size: u64 = stream.read_u32_le()?.into();
-
-            // >> `data_size` starts here <<
-            let data_start = stream.stream_position()?;
-
-            data_start + data_size
-        };
+        let mut stream = stream.take_exclusive_length_prefixed()?;
 
         let text = stream
             .read_long_u16_string()
             .map_err(CommonParseError::MainText)?;
 
-        let spans = {
-            let count: usize = stream
-                .read_u32_le()?
-                .try_into()
-                .map_err(|_| CommonParseError::TooManySpans)?;
+        let spans = read_u32_sized_vec!(
+            stream,
+            |_| CommonParseError::TooManySpans,
+            Span::try_parse(&mut stream)?
+        );
 
-            let mut spans = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                spans.push(Span::try_parse(stream)?);
-            }
-
-            spans
-        };
-
-        let paragraphs = {
-            let count: usize = stream
-                .read_u32_le()?
-                .try_into()
-                .map_err(|_| CommonParseError::TooManyParagraphs)?;
-
-            let mut paragraphs = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                paragraphs.push(Paragraph::try_parse(stream)?);
-            }
-
-            paragraphs
-        };
+        let paragraphs = read_u32_sized_vec!(
+            stream,
+            |_| CommonParseError::TooManyParagraphs,
+            Paragraph::try_parse(&mut stream)?
+        );
 
         let (left_margin, top_margin, right_margin, bottom_margin) = (
             stream.read_f32_le()?,
@@ -314,10 +296,7 @@ impl Common {
             stream.read_f32_le()?,
         );
 
-        let gravity = {
-            let val = stream.read_u8()?;
-            Gravity::from_u8(val).ok_or(CommonParseError::BadGravityType(val))?
-        };
+        let gravity = Gravity::try_from(stream.read_u8()?)?;
 
         let section_data = {
             let count: usize = stream.read_u16_le()?.into();
@@ -331,69 +310,44 @@ impl Common {
             data
         };
 
-        let mut object_spans = vec![];
-
-        if format_version >= 2035 {
-            // This is stored as a Boolean and written explicitly as a 32-bit integer.
+        let object_spans = if format_version >= 2035 && {
+            // This is stored as a Boolean but written explicitly as a 32-bit integer.
             let object_spans_present = stream.read_u32_le()? != 0;
+
+            // todo: ??
             let _zero = stream.read_u32_le()?;
 
-            if object_spans_present {
-                let object_span_count: usize = stream
-                    .read_u32_le()?
-                    .try_into()
-                    .map_err(|_| CommonParseError::TooManyObjectSpans)?;
+            object_spans_present
+        } {
+            read_u32_sized_vec!(stream, |_| CommonParseError::TooManyObjectSpans, {
+                let mut span_stream = (&mut stream).take_exclusive_length_prefixed()?;
 
-                object_spans.reserve_exact(object_span_count);
+                let doc_object_size = span_stream.read_u32_le()?;
 
-                for _ in 0..object_span_count {
-                    let obj_span_expected_end = {
-                        let size: u64 = stream.read_u32_le()?.into();
-                        let start = stream.stream_position()?;
+                // This could be a single byte...
+                let object_type = span_stream.read_u32_le()?;
 
-                        start + size
-                    };
+                // `doc_object_size` measures exactly the size of this:
+                let doc_object = DocObject::try_parse(&mut span_stream, object_type, 0)
+                    .map_err(CommonParseError::DocObject)?;
 
-                    let doc_object_size = stream.read_u32_le()?;
+                let span = DocObjectSpan {
+                    object: doc_object,
+                    start: span_stream.read_u32_le()?,
+                    _end: 0,
+                };
 
-                    // This could be a single byte...
-                    let object_type = stream.read_u32_le()?;
+                span_stream
+                    .ensure_eof()
+                    .map_err(CommonParseError::ObjectSpanUnfinished)?;
 
-                    // `doc_object_size` measures exactly the size of this:
-                    let doc_object = DocObject::try_parse(stream, object_type, 0)
-                        .map_err(CommonParseError::DocObject)?;
+                span
+            })
+        } else {
+            vec![]
+        };
 
-                    object_spans.push(DocObjectSpan {
-                        object: doc_object,
-                        start: stream.read_u32_le()?,
-                        _end: 0,
-                    });
-
-                    // Since doc objects can be extremely complex (we're parsing one right now),
-                    // check the end offset matches what we expected. There's plenty of room for
-                    // bugs in the parsing.
-                    let obj_span_actual_end = stream.stream_position()?;
-
-                    if obj_span_actual_end != obj_span_expected_end {
-                        return Err(CommonParseError::BadObjectSpanEndOffset(
-                            WrongEndOffsetError {
-                                actual_end: obj_span_actual_end,
-                                expected_end: obj_span_expected_end,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-
-        let actual_end = stream.stream_position()?;
-
-        if actual_end != expected_end {
-            return Err(CommonParseError::BadEndOffset(WrongEndOffsetError {
-                actual_end,
-                expected_end,
-            }));
-        }
+        stream.ensure_eof()?;
 
         Ok(Common {
             text,

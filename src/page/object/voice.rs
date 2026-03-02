@@ -58,21 +58,21 @@ pub struct VoiceObject {
 }
 
 impl VoiceObject {
-    fn try_parse(
-        mut stream: (impl ByteStreamLe + Seek),
+    fn try_parse<T: ByteStreamLe + Seek>(
+        stream: &mut T,
         object_base: ObjectBase,
     ) -> Result<VoiceObject, VoiceObjectParseError> {
-        let mut frame: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
 
-        match frame.read_u16_le()? {
+        match stream.read_u16_le()? {
             10 => (),
             bad => return Err(VoiceObjectParseError::BadDataType(bad)),
         };
 
-        let flex_offset: u64 = frame.read_u32_le()?.into();
+        let flex_offset: u64 = stream.read_u32_le()?.into();
 
         read_flags!(
-            &mut frame,
+            &mut stream,
             property_flags,
             VoiceObjectParseError::PropertyFlags,
             VoiceObjectParseError::UnhandledProperty,
@@ -82,31 +82,31 @@ impl VoiceObject {
         );
 
         read_flags!(
-            &mut frame,
+            &mut stream,
             field_check_flags,
             VoiceObjectParseError::FieldCheckFlags,
             VoiceObjectParseError::UnhandledField,
             {
                 if flex_offset != 0 {
-                    frame.seek(io::SeekFrom::Start(flex_offset))?;
+                    stream.seek(io::SeekFrom::Start(flex_offset))?;
                 } else {
                     // Nullify the field check flags if there's no flex data.
                     field_check_flags.clear();
                 }
 
                 unpack_field_flags!(field_check_flags, {
-                    0 => attached_file_id: frame.read_u32_le()?;
+                    0 => attached_file_id: stream.read_u32_le()?;
 
                     1 => title:
-                        frame.read_short_u16_string().map_err(VoiceObjectParseError::Title)?;
+                        stream.read_short_u16_string().map_err(VoiceObjectParseError::Title)?;
 
                     2 => play_time:
-                        frame.read_short_u16_string().map_err(VoiceObjectParseError::PlayTime)?;
+                        stream.read_short_u16_string().map_err(VoiceObjectParseError::PlayTime)?;
                 });
             }
         );
 
-        frame.ensure_eof()?;
+        stream.ensure_eof()?;
 
         Ok(VoiceObject {
             object_base,

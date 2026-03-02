@@ -1,6 +1,6 @@
 use std::io::{self, Seek, SeekFrom};
 
-use byteorder::LittleEndian;
+use byteorder::{LittleEndian, ReadBytesExt};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;

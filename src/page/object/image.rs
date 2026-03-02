@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
-    byte_stream::{ByteStreamLe, ReadBitfieldError},
+    byte_stream::{
+        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError,
+        TakeInclusiveLengthPrefixedError, UnfinishedParsingError,
+    },
     page::{
         Rect,
         object::{
@@ -19,6 +22,9 @@ use crate::{
 pub enum ImageObjectParseError {
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    #[error(transparent)]
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
 
     #[error("invalid data type {0} for image object (should be 3)")]
     BadDataType(u16),
@@ -38,8 +44,8 @@ pub enum ImageObjectParseError {
     #[error(transparent)]
     BadBorderType(#[from] InvalidBorderTypeError),
 
-    #[error("{0} bytes remain after parsing")]
-    BytesRemain(u64),
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -54,10 +60,7 @@ impl ImageObject {
     ) -> Result<ImageObject, ImageObjectParseError> {
         // See `TextObject` parsing.
 
-        let start_offset = stream.stream_position()?;
-        let size: u64 = stream.read_u32_le()?.into();
-
-        let mut stream = stream.take(size - 4);
+        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
 
         match stream.read_u16_le()? {
             3 => (),
@@ -75,7 +78,7 @@ impl ImageObject {
             .map_err(ImageObjectParseError::FieldCheckFlags)?;
 
         let mut field_check_flags = if flex_offset != 0 {
-            stream.seek(io::SeekFrom::Start(start_offset + flex_offset))?;
+            stream.seek(io::SeekFrom::Start(flex_offset))?;
             stated_field_check_flags
         } else {
             CheckedBitfield::default()
@@ -123,9 +126,7 @@ impl ImageObject {
         shape.image.original_rect = original_rect;
         shape.image.original_image_id = original_image_bind_id;
 
-        if let remaining @ 1.. = stream.limit() {
-            return Err(ImageObjectParseError::BytesRemain(remaining));
-        }
+        stream.ensure_eof()?;
 
         Ok(ImageObject { shape })
     }

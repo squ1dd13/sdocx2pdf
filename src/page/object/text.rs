@@ -5,7 +5,10 @@ use thiserror::Error;
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
-    byte_stream::{ByteStreamLe, ReadBitfieldError},
+    byte_stream::{
+        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError,
+        TakeInclusiveLengthPrefixedError, UnfinishedParsingError,
+    },
     page::object::{
         ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,
         shape::{BorderType, InvalidBorderTypeError, ShapeObject},
@@ -18,6 +21,9 @@ use crate::{
 pub enum TextObjectParseError {
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    #[error(transparent)]
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
 
     #[error("invalid data type {0} for text object (should be 2)")]
     BadDataType(u16),
@@ -37,8 +43,8 @@ pub enum TextObjectParseError {
     #[error(transparent)]
     BadBorderType(#[from] InvalidBorderTypeError),
 
-    #[error("{0} byte(s) remain after parsing")]
-    BytesRemain(u64),
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -51,12 +57,7 @@ impl TextObject {
         stream: &mut (impl ByteStreamLe + Seek),
         mut shape: ShapeObject,
     ) -> Result<TextObject, TextObjectParseError> {
-        let start_offset = stream.stream_position()?;
-
-        let size: u64 = stream.read_u32_le()?.into();
-
-        // Subtract 4 because we already read a u32 size.
-        let mut stream = stream.take(size - 4);
+        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
 
         #[allow(
             irrefutable_let_patterns,
@@ -80,7 +81,7 @@ impl TextObject {
             .map_err(TextObjectParseError::FieldCheckFlags)?;
 
         let mut field_check_flags = if flex_offset != 0 {
-            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
+            stream.seek(SeekFrom::Start(flex_offset))?;
             stated_field_check_flags
         } else {
             CheckedBitfield::default()
@@ -100,9 +101,7 @@ impl TextObject {
             .ensure_none_set_unchecked()
             .map_err(TextObjectParseError::UnhandledField)?;
 
-        if let remaining @ 1.. = stream.limit() {
-            return Err(TextObjectParseError::BytesRemain(remaining));
-        }
+        stream.ensure_eof()?;
 
         Ok(TextObject { shape })
     }
