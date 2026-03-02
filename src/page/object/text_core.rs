@@ -11,7 +11,7 @@ use crate::{
     },
     impl_try_from_for_optional_from,
     page::object::DocObject,
-    read_u32_sized_vec,
+    read_u16_sized_vec, read_u32_sized_vec,
 };
 
 #[derive(Debug, FromPrimitive)]
@@ -298,17 +298,8 @@ impl Common {
 
         let gravity = Gravity::try_from(stream.read_u8()?)?;
 
-        let section_data = {
-            let count: usize = stream.read_u16_le()?.into();
-
-            let mut data = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                data.push((stream.read_u32_le()?, stream.read_u32_le()?));
-            }
-
-            data
-        };
+        let section_data =
+            read_u16_sized_vec!(stream, (stream.read_u32_le()?, stream.read_u32_le()?));
 
         let object_spans = if format_version >= 2035 && {
             // This is stored as a Boolean but written explicitly as a 32-bit integer.

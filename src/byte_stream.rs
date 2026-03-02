@@ -414,6 +414,33 @@ impl<T> ExactSizedStream for Take<T> {
 }
 
 #[macro_export]
+macro_rules! read_u16_sized_vec {
+    ($stream:expr, $elem:expr) => {{
+        let count: usize = $stream.read_u16_le()?.into();
+
+        let mut v = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            v.push($elem);
+        }
+
+        v
+    }};
+
+    ($stream:expr, $idx:ident => $elem:expr) => {{
+        let count: usize = $stream.read_u16_le()?.into();
+
+        let mut v = Vec::with_capacity(count);
+
+        for $idx in 0..count {
+            v.push($elem);
+        }
+
+        v
+    }};
+}
+
+#[macro_export]
 macro_rules! read_u32_sized_vec {
     ($stream:expr, $usize_err:expr, $elem:expr) => {{
         let count = $stream.read_u32_le()?;
