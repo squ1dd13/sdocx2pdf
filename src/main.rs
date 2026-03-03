@@ -171,6 +171,7 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540",
         "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854",
         "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
+        "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930",
     ];
 
     for path in extracted_sdocx_paths {

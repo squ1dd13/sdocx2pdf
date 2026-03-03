@@ -5,7 +5,7 @@ use crate::{
         Point, Rect,
         object::{
             image::ImageObject, line::LineObject, shape::ShapeObject, stroke::StrokeObject,
-            text::TextObject, voice::VoiceObject,
+            text::TextObject, voice::VoiceObject, web::WebObject,
         },
     },
 };
@@ -24,6 +24,7 @@ mod stroke;
 pub mod text;
 mod text_core;
 mod voice;
+mod web;
 
 #[derive(Debug, Default)]
 struct DocBundle {
@@ -427,7 +428,7 @@ pub enum DocObject {
     Table(OpaqueObject),
 
     /// `WCon_ObjectWeb`; extends `WCon_ObjectBase`
-    Web(OpaqueObject),
+    Web(Box<WebObject>),
 
     /// `WCon_ObjectPainting`; extends `WCon_ObjectBase`
     Painting(OpaqueObject),
@@ -501,6 +502,13 @@ impl DocObject {
             )?)));
         }
 
+        if object_type == 13 {
+            return Ok(DocObject::Web(Box::new(ObjectBase::try_parse_inheritor(
+                stream,
+                child_count,
+            )?)));
+        }
+
         if object_type == 15 {
             return Err(eyre!("parsing not implemented for old strokes"));
         }
@@ -514,10 +522,6 @@ impl DocObject {
             }),
             11 => DocObject::Formula({
                 eprintln!("Warning: Formulas are not yet supported");
-                object
-            }),
-            13 => DocObject::Web({
-                eprintln!("Warning: Web objects are not yet supported");
                 object
             }),
             14 => DocObject::Painting({
@@ -560,11 +564,11 @@ impl DocObject {
             DocObject::Text(text_object) => text_object.object_base(),
             DocObject::Image(image_object) => image_object.object_base(),
             DocObject::Voice(voice_object) => voice_object.object_base(),
+            DocObject::Web(web_object) => web_object.object_base(),
 
             DocObject::Container(object)
             | DocObject::Formula(object)
             | DocObject::Table(object)
-            | DocObject::Web(object)
             | DocObject::Painting(object)
             | DocObject::Link(object)
             | DocObject::Maths(object)
