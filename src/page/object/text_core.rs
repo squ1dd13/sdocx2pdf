@@ -107,7 +107,7 @@ impl Span {
     fn try_parse(stream: &mut impl ByteStreamLe) -> Result<Span, SpanParseError> {
         let data_size: usize = stream.read_u16_le()?.into();
 
-        // >> `data_size` starts mesasuring from here <<
+        // >> `data_size` starts measuring from here <<
 
         let span_type = {
             let val = stream.read_u32_le()?;
