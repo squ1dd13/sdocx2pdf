@@ -4,12 +4,14 @@ use color_eyre::Result;
 #[derive(Debug)]
 pub struct PageIdInfoPage {
     pub page_id: String,
+    #[expect(dead_code)]
     hash: [u8; 32],
 }
 
 #[derive(Debug)]
 pub struct PageIdInfo {
     /// The SHA256 digest from the associated `note.note` file.
+    #[expect(dead_code)]
     note_doc_sha256: [u8; 32],
     pub pages: Vec<PageIdInfoPage>,
 }

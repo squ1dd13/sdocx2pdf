@@ -5,12 +5,9 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, SeekableByteStreamLe,
-        UnfinishedParsingError, WrongEndOffsetError,
-    },
+    byte_stream::{ByteStreamLe, ExactSizedStream, ReadStringError, UnfinishedParsingError},
     impl_try_from_for_optional_from,
-    page::object::DocObject,
+    page::object::{DocObject, DocObjectParseError},
     read_u16_sized_vec, read_u32_sized_vec,
 };
 
@@ -79,6 +76,7 @@ enum IntervalType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct SpanBase {
     span_type: SpanType,
     start_pos: u32,
@@ -99,6 +97,7 @@ pub enum SpanParseError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Span {
     span_base: SpanBase,
     bytes: Vec<u8>,
@@ -155,6 +154,7 @@ enum ParagraphType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ParagraphBase {
     paragraph_type: ParagraphType,
     start_pos: u32,
@@ -171,6 +171,7 @@ pub enum ParagraphParseError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Paragraph {
     paragraph_base: ParagraphBase,
     bytes: Vec<u8>,
@@ -203,10 +204,8 @@ impl Paragraph {
     }
 }
 
-// todo: Contained DocObject may need to be boxed in the future to avoid recursion, depending on
-// what DocObject ends up looking like.
-
 #[derive(Debug)]
+#[allow(dead_code)]
 struct DocObjectSpan {
     object: DocObject,
     start: u32,
@@ -216,8 +215,8 @@ struct DocObjectSpan {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum CommonParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
 
     #[error("failed to read main text string")]
@@ -229,20 +228,17 @@ pub enum CommonParseError {
     #[error("paragraph count does not fit in `usize`")]
     TooManyParagraphs,
 
-    #[error("failed to parse a span")]
     Span(#[from] SpanParseError),
-
-    #[error("failed to parse a paragraph")]
     Paragraph(#[from] ParagraphParseError),
-
-    #[error("invalid gravity type")]
     BadGravityType(#[from] InvalidGravityError),
 
     #[error("object span count does not fit in `usize`")]
     TooManyObjectSpans,
 
-    #[error("failed to parse a doc object")]
-    DocObject(#[source] color_eyre::Report),
+    #[error("{0} is too big to be a valid object type")]
+    ObjectTypeTooBig(u32),
+
+    DocObject(#[from] Box<DocObjectParseError>),
 
     #[error("bytes left over after parsing object span")]
     ObjectSpanUnfinished(#[source] UnfinishedParsingError),
@@ -252,6 +248,7 @@ pub enum CommonParseError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Common {
     text: String,
     left_margin: f32,
@@ -267,7 +264,7 @@ pub struct Common {
 }
 
 impl Common {
-    pub fn try_parse(
+    pub fn try_parse_with_version(
         stream: &mut (impl ByteStreamLe + Seek),
         format_version: u32,
     ) -> Result<Common, CommonParseError> {
@@ -313,14 +310,19 @@ impl Common {
             read_u32_sized_vec!(stream, |_| CommonParseError::TooManyObjectSpans, {
                 let mut span_stream = (&mut stream).take_exclusive_length_prefixed()?;
 
-                let doc_object_size = span_stream.read_u32_le()?;
+                let _doc_object_size = span_stream.read_u32_le()?;
 
                 // This could be a single byte...
                 let object_type = span_stream.read_u32_le()?;
 
                 // `doc_object_size` measures exactly the size of this:
-                let doc_object = DocObject::try_parse(&mut span_stream, object_type, 0)
-                    .map_err(CommonParseError::DocObject)?;
+                let doc_object = DocObject::try_parse_with_type(
+                    &mut span_stream,
+                    object_type
+                        .try_into()
+                        .map_err(|_| CommonParseError::ObjectTypeTooBig(object_type))?,
+                )
+                .map_err(|e| CommonParseError::DocObject(Box::new(e)))?;
 
                 let span = DocObjectSpan {
                     object: doc_object,

@@ -1,39 +1,25 @@
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 use thiserror::Error;
 
 use crate::{
-    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError,
-        TakeInclusiveLengthPrefixedError, UnfinishedParsingError,
+        ByteStreamLe, ExactSizedStream, ReadStringError, TryParse, UnfinishedParsingError,
     },
-    page::object::{ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase},
+    page::object::{
+        HasObjectBase, ObjectBase, ObjectBaseParseError,
+        header::{ObjectHeader, ObjectHeaderError},
+    },
     unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum WebObjectParseError {
-    #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    BadSize(#[from] TakeInclusiveLengthPrefixedError),
-
-    #[error("invalid data type {0} for web object (should be 13)")]
-    BadDataType(u16),
-
-    #[error("failed to parse property flags")]
-    PropertyFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more property bits were not handled")]
-    UnhandledProperty(#[source] UnhandledBitsError),
-
-    #[error("failed to parse field check flags")]
-    FieldCheckFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more field check flags were not handled")]
-    UnhandledField(#[source] UnhandledBitsError),
+    Base(#[from] ObjectBaseParseError),
+    Header(#[from] ObjectHeaderError),
+    Unfinished(#[from] UnfinishedParsingError),
 
     #[error("failed to read title string")]
     Title(#[source] ReadStringError),
@@ -43,14 +29,12 @@ pub enum WebObjectParseError {
 
     #[error("failed to read uri string")]
     Uri(#[source] ReadStringError),
-
-    #[error(transparent)]
-    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct WebObject {
-    base: ObjectBase,
+    object_base: ObjectBase,
 
     attached_html_file_id: Option<u32>,
     thumbnail_file_id: Option<u32>,
@@ -66,37 +50,17 @@ pub struct WebObject {
     view_type: Option<u32>,
 }
 
-impl WebObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        base: ObjectBase,
-    ) -> Result<WebObject, WebObjectParseError> {
-        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+impl<R: Read + Seek> TryParse<R> for WebObject {
+    type ParseError = WebObjectParseError;
 
-        match stream.read_u16_le()? {
-            13 => (),
-            bad => return Err(WebObjectParseError::BadDataType(bad)),
-        }
+    fn try_parse(stream: &mut R) -> Result<WebObject, WebObjectParseError> {
+        let object_base = ObjectBase::try_parse(stream)?;
 
-        let flex_offset: u64 = stream.read_u32_le()?.into();
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 13)?;
 
-        // No property flags should be set.
-        CheckedBitfield::try_parse(&mut stream)
-            .map_err(WebObjectParseError::PropertyFlags)?
-            .ensure_none_set_unchecked()
-            .map_err(WebObjectParseError::UnhandledProperty)?;
+        let field_flags = header.init_flex(&mut stream)?;
 
-        let stated_field_check_flags = CheckedBitfield::try_parse(&mut stream)
-            .map_err(WebObjectParseError::FieldCheckFlags)?;
-
-        let mut field_check_flags = if flex_offset != 0 {
-            stream.seek(SeekFrom::Start(flex_offset))?;
-            stated_field_check_flags
-        } else {
-            CheckedBitfield::default()
-        };
-
-        unpack_field_flags!(field_check_flags, {
+        unpack_field_flags!(field_flags, {
             0 => attached_html_file_id: stream.read_u32_le()?;
             1 => thumbnail_file_id: stream.read_u32_le()?;
             2 => body: stream.read_short_u16_string().map_err(WebObjectParseError::Body)?;
@@ -106,19 +70,16 @@ impl WebObject {
 
         let image_type_id = stream.read_u32_le()?;
 
-        unpack_field_flags!(field_check_flags, {
+        unpack_field_flags!(field_flags, {
             5 => version: stream.read_u32_le()?;
             6 => view_type: stream.read_u32_le()?;
         });
 
-        field_check_flags
-            .ensure_none_set_unchecked()
-            .map_err(WebObjectParseError::UnhandledField)?;
-
+        header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(WebObject {
-            base,
+            object_base,
             attached_html_file_id,
             thumbnail_file_id,
             body,
@@ -131,18 +92,8 @@ impl WebObject {
     }
 }
 
-impl InheritsObjectBase for WebObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> color_eyre::eyre::Result<Self> {
-        Ok(WebObject::try_parse(stream, object_base)?)
-    }
-
+impl HasObjectBase for WebObject {
     fn object_base(&self) -> &ObjectBase {
-        &self.base
+        &self.object_base
     }
 }
-
-impl ConcreteInheritsObjectBase for WebObject {}

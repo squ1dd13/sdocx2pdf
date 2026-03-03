@@ -6,15 +6,18 @@ use std::io::Seek;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteSdkType {
     /// `SAMSUNG S-Pen PAINTING SDK`; 0x1 in DLL
+    #[expect(dead_code)]
     SamsungSPenPainting,
 
     /// `S-Pen SDK`; 0x2 in DLL
     SPen,
 
     /// `S-Pen PAINTING SDK`; 0x3 in DLL
+    #[expect(dead_code)]
     SPenPainting,
 
     /// `SAMSUNG S-Pen SDK`; 0x4 in DLL
+    #[expect(dead_code)]
     SamsungSPen,
 }
 
@@ -63,29 +66,30 @@ impl NoteSdkType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct EncryptionInfo {
-    encryption_size: u32,
-    encryption_salt: Vec<u8>,
-    encryption_iv: Vec<u8>,
-    encryption_key: Vec<u8>,
+    size: u32,
+    salt: Vec<u8>,
+    iv: Vec<u8>,
+    key: Vec<u8>,
 }
 
 impl EncryptionInfo {
     fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<EncryptionInfo> {
         Ok(EncryptionInfo {
-            encryption_size: stream.read_u32_le()?,
+            size: stream.read_u32_le()?,
 
-            encryption_salt: {
+            salt: {
                 let salt_size: usize = stream.read_u32_le()?.try_into()?;
                 stream.read_u8s(salt_size)?
             },
 
-            encryption_iv: {
+            iv: {
                 let iv_size: usize = stream.read_u32_le()?.try_into()?;
                 stream.read_u8s(iv_size)?
             },
 
-            encryption_key: {
+            key: {
                 let key_size: usize = stream.read_u32_le()?.try_into()?;
                 stream.read_u8s(key_size)?
             },
@@ -94,6 +98,7 @@ impl EncryptionInfo {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum PagingType {
     /// Traditional pages.
     Paged,
@@ -119,6 +124,7 @@ impl PagingType {
 
 /// The structure in `end_tag.bin`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ModelEndTag {
     sdk_type: NoteSdkType,
 

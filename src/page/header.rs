@@ -2,6 +2,7 @@ use crate::{OpaqueBytes, byte_stream::ByteStreamLe, page::Rect};
 use color_eyre::Result;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PdfDataItem {
     bind_id: u32,
     page_index: u32,
@@ -28,6 +29,7 @@ impl PdfDataItem {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CanvasCacheEntry {
     file_id: u32,
     width: u32,
@@ -63,6 +65,7 @@ impl CanvasCacheEntry {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CustomPageObject {
     object_type: u32,
     inner: OpaqueBytes,

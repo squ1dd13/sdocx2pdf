@@ -1,11 +1,16 @@
 use crate::{
     OpaqueBytes,
-    byte_stream::{ByteStreamLe, SeekableByteStreamLe},
+    byte_stream::{ByteStreamLe, SeekableByteStreamLe, TryParse},
     page::{
         Point, Rect,
         object::{
-            image::ImageObject, line::LineObject, shape::ShapeObject, stroke::StrokeObject,
-            text::TextObject, voice::VoiceObject, web::WebObject,
+            image::{ImageObject, ImageObjectParseError},
+            line::{LineObject, LineObjectParseError},
+            shape::{ShapeObject, ShapeParseError},
+            stroke::{StrokeObject, StrokeParseError},
+            text::{TextObject, TextObjectParseError},
+            voice::{VoiceObject, VoiceObjectParseError},
+            web::{WebObject, WebObjectParseError},
         },
     },
 };
@@ -13,8 +18,10 @@ use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek};
+use thiserror::Error;
 
+mod header;
 mod image;
 mod line;
 mod shape;
@@ -115,6 +122,7 @@ impl DocBundle {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ObjectBase {
     rotatable: bool,
     selectable: bool,
@@ -153,20 +161,16 @@ pub struct ObjectBase {
     group_id: Option<String>,
 }
 
-trait InheritsObjectBase: Sized {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> Result<Self>;
-
+pub trait HasObjectBase {
     fn object_base(&self) -> &ObjectBase;
 }
 
-trait ConcreteInheritsObjectBase: InheritsObjectBase {}
+pub type ObjectBaseParseError = color_eyre::Report;
 
-impl ObjectBase {
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<ObjectBase> {
+impl<R: Read + Seek> TryParse<R> for ObjectBase {
+    type ParseError = ObjectBaseParseError;
+
+    fn try_parse(stream: &mut R) -> Result<ObjectBase, ObjectBaseParseError> {
         let expected_end = {
             let start = stream.stream_position()?;
             let base_size: u64 = stream.read_u32_le()?.into();
@@ -354,49 +358,58 @@ impl ObjectBase {
             group_id,
         })
     }
+}
 
+impl ObjectBase {
     pub fn hash(&self) -> [u8; 32] {
         let s = format!("{}{}", self.uuid, self.modified_time.timestamp_micros());
         Sha256::digest(s.as_bytes()).into()
     }
-
-    fn try_parse_inheritor<T: ByteStreamLe + Seek + ?Sized, I: ConcreteInheritsObjectBase>(
-        mut stream: &mut T,
-        child_count: u16,
-    ) -> Result<I> {
-        let base = ObjectBase::try_parse(&mut stream)?;
-        I::try_parse(&mut stream, base, child_count)
-    }
 }
 
+pub type OpaqueObjectParseError = color_eyre::Report;
+
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct OpaqueObject {
-    child_count: u16,
-    base: ObjectBase,
+    object_base: ObjectBase,
     inner: OpaqueBytes,
 }
 
-impl InheritsObjectBase for OpaqueObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        base: ObjectBase,
-        child_count: u16,
-    ) -> Result<OpaqueObject> {
-        Ok(OpaqueObject {
-            child_count,
-            base,
-            inner: OpaqueBytes::try_parse_inclusive(stream)?,
-        })
-    }
+impl<R: Read + Seek> TryParse<R> for OpaqueObject {
+    type ParseError = OpaqueObjectParseError;
 
-    fn object_base(&self) -> &ObjectBase {
-        &self.base
+    fn try_parse(reader: &mut R) -> Result<Self, OpaqueObjectParseError> {
+        Ok(OpaqueObject {
+            object_base: ObjectBase::try_parse(reader)?,
+            inner: OpaqueBytes::try_parse_inclusive(reader)?,
+        })
     }
 }
 
-impl ConcreteInheritsObjectBase for OpaqueObject {}
+impl HasObjectBase for OpaqueObject {
+    fn object_base(&self) -> &ObjectBase {
+        &self.object_base
+    }
+}
 
-// todo: Remove boxes once everything is of a similar size.
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum DocObjectParseError {
+    Io(#[from] std::io::Error),
+    Image(#[from] ImageObjectParseError),
+    Line(#[from] LineObjectParseError),
+    Shape(#[from] ShapeParseError),
+    Stroke(#[from] StrokeParseError),
+    Text(#[from] TextObjectParseError),
+    Voice(#[from] VoiceObjectParseError),
+    Web(#[from] WebObjectParseError),
+
+    Opaque(#[from] OpaqueObjectParseError),
+
+    #[error("object type {0} is not supported")]
+    BadType(u8),
+}
 
 #[derive(Debug)]
 pub enum DocObject {
@@ -449,110 +462,62 @@ pub enum DocObject {
 impl DocObject {
     // We use dynamic dispatch for the stream because object parsing can be recursive, and we don't
     // want to end up with recursive stream types ("Take<&mut Take<&mut Take<...>>>").
-    pub fn try_parse(
-        stream: &mut dyn SeekableByteStreamLe,
-        object_type: impl TryInto<u8> + Clone + std::fmt::Display,
-        child_count: u16,
-    ) -> Result<DocObject> {
-        let object_type: u8 = object_type
-            .clone()
-            .try_into()
-            .map_err(|_| eyre!("Invalid object type ID {object_type}"))?;
-
-        eprintln!("Object type {object_type}");
-
-        if object_type == 8 {
-            return Ok(DocObject::Line(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 7 {
-            return Ok(DocObject::Shape(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 1 {
-            return Ok(DocObject::Stroke(Box::new(
-                ObjectBase::try_parse_inheritor(stream, child_count)?,
-            )));
-        }
-
-        if object_type == 2 {
-            return Ok(DocObject::Text(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 3 {
-            return Ok(DocObject::Image(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 10 {
-            return Ok(DocObject::Voice(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 13 {
-            return Ok(DocObject::Web(Box::new(ObjectBase::try_parse_inheritor(
-                stream,
-                child_count,
-            )?)));
-        }
-
-        if object_type == 15 {
-            return Err(eyre!("parsing not implemented for old strokes"));
-        }
-
-        let object: OpaqueObject = ObjectBase::try_parse_inheritor(stream, child_count)?;
+    pub fn try_parse_with_type(
+        mut stream: &mut dyn SeekableByteStreamLe,
+        object_type: u8,
+    ) -> Result<DocObject, DocObjectParseError> {
+        // Because `dyn SeekableByteStreamLe` is not `Sized`:
+        let stream = &mut stream;
 
         Ok(match object_type {
-            4 => DocObject::Container({
-                eprintln!("Warning: Containers are not yet supported");
-                object
-            }),
-            11 => DocObject::Formula({
-                eprintln!("Warning: Formulas are not yet supported");
-                object
-            }),
-            14 => DocObject::Painting({
-                eprintln!("Warning: Paintings are not yet supported");
-                object
-            }),
-            17 => DocObject::Link({
-                eprintln!("Warning: Links are not yet supported");
-                object
-            }),
-            19 => DocObject::Generic({
-                eprintln!("Warning: Generic objects are not yet supported");
-                object
-            }),
-            20 => DocObject::Plot({
-                eprintln!("Warning: Plots are not yet supported");
-                object
-            }),
-            21 => DocObject::Maths({
-                eprintln!("Warning: Maths objects are not yet supported");
-                object
-            }),
-            22 => DocObject::Table({
-                eprintln!("Warning: Tables are not yet supported");
-                object
-            }),
+            8 => DocObject::Line(Box::new(TryParse::try_parse(stream)?)),
+            7 => DocObject::Shape(Box::new(ShapeObject::try_parse_as_final(stream)?)),
+            1 => DocObject::Stroke(Box::new(TryParse::try_parse(stream)?)),
+            2 => DocObject::Text(Box::new(TryParse::try_parse(stream)?)),
+            3 => DocObject::Image(Box::new(TryParse::try_parse(stream)?)),
+            10 => DocObject::Voice(Box::new(TryParse::try_parse(stream)?)),
+            13 => DocObject::Web(Box::new(TryParse::try_parse(stream)?)),
 
-            unknown => return Err(eyre!("Unrecognised object type {unknown}")),
-            // There is also an object type 100, for `WDocObjectStrokeGroup`.
-            // As far as I can tell, this is not supposed to be written to disk, so we should
-            // never read it.
+            _ => {
+                let object = OpaqueObject::try_parse(stream)?;
+
+                match object_type {
+                    4 => DocObject::Container({
+                        eprintln!("Warning: Containers are not yet supported");
+                        object
+                    }),
+                    11 => DocObject::Formula({
+                        eprintln!("Warning: Formulas are not yet supported");
+                        object
+                    }),
+                    14 => DocObject::Painting({
+                        eprintln!("Warning: Paintings are not yet supported");
+                        object
+                    }),
+                    17 => DocObject::Link({
+                        eprintln!("Warning: Links are not yet supported");
+                        object
+                    }),
+                    19 => DocObject::Generic({
+                        eprintln!("Warning: Generic objects are not yet supported");
+                        object
+                    }),
+                    20 => DocObject::Plot({
+                        eprintln!("Warning: Plots are not yet supported");
+                        object
+                    }),
+                    21 => DocObject::Maths({
+                        eprintln!("Warning: Maths objects are not yet supported");
+                        object
+                    }),
+                    22 => DocObject::Table({
+                        eprintln!("Warning: Tables are not yet supported");
+                        object
+                    }),
+
+                    unknown => return Err(DocObjectParseError::BadType(unknown)),
+                }
+            }
         })
     }
 
@@ -573,7 +538,7 @@ impl DocObject {
             | DocObject::Link(object)
             | DocObject::Maths(object)
             | DocObject::Plot(object)
-            | DocObject::Generic(object) => &object.base,
+            | DocObject::Generic(object) => &object.object_base,
         }
     }
 }

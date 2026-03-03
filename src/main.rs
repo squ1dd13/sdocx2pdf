@@ -1,4 +1,3 @@
-#![allow(unused)]
 #![warn(
     clippy::cast_lossless,
     clippy::cast_possible_truncation,
@@ -44,7 +43,7 @@
 )]
 
 use crate::{
-    byte_stream::{ByteStreamLe, ReadBitfieldError},
+    byte_stream::ByteStreamLe,
     end_tag::{ModelEndTag, NoteSdkType},
     media_info::MediaInfo,
     note_doc::NoteDoc,
@@ -55,8 +54,7 @@ use color_eyre::{
     Result,
     eyre::{Context, eyre},
 };
-use std::{io::Write, path::PathBuf};
-use thiserror::Error;
+use std::path::PathBuf;
 
 mod bits;
 mod byte_stream;
@@ -104,6 +102,7 @@ impl std::fmt::Debug for OpaqueBytes {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct AppVersion {
     major: u32,
     minor: u32,
@@ -125,7 +124,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
     let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
-    // println!("{}: {media_info:#?}", media_info_path.display());
+    println!("{}: {media_info:#?}", media_info_path.display());
 
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
     let end_tag =
@@ -172,6 +171,7 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854",
         "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
         "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930",
+        "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957",
     ];
 
     for path in extracted_sdocx_paths {

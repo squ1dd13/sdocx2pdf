@@ -1,17 +1,14 @@
 use crate::{
     OpaqueBytes,
-    byte_stream::{ByteStreamLe, ReadStringError},
+    byte_stream::{ByteStreamLe, ExactSizedStream},
     page::{
         header::{CanvasCacheEntry, CustomPageObject, PdfDataItem},
         object::DocObject,
     },
 };
-use byteorder::LittleEndian;
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
-use indexmap::IndexMap;
-use sha2::Digest;
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 mod header;
 pub mod object;
@@ -39,6 +36,7 @@ impl Point {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(dead_code)]
 pub struct Rect {
     left: f64,
     top: f64,
@@ -76,6 +74,7 @@ impl Rect {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct Layer {
     visible: bool,
     lock_state: bool,
@@ -101,40 +100,33 @@ impl Layer {
         let object_type = stream.read_u8()?;
         let child_count = stream.read_u16_le()?;
 
-        // This is the size of the `ObjectBase`, the inner object, and the hash.
-        let total_size: u64 = stream.read_u32_le()?.into();
-        let expected_end = stream.stream_position()? + total_size;
+        if child_count != 0 {
+            return Err(eyre!("child count {child_count} > 0"));
+        }
 
-        let doc_object = DocObject::try_parse(stream, object_type, child_count)?;
+        let mut stream = stream.take_exclusive_length_prefixed()?;
+
+        let doc_object = DocObject::try_parse_with_type(&mut stream, object_type)?;
 
         let mut hash_read = [0_u8; 32];
         stream.read_exact(&mut hash_read)?;
 
         if doc_object.object_base().hash() != hash_read {
-            // fixme: This should be an error
-            eprintln!("Warning: Hash mismatch");
-        } else {
-            eprintln!("Hashes match!");
+            if object_type != 7 {
+                return Err(eyre!("doc object hash mismatch (type {object_type})"));
+            }
+
+            eprintln!("Warning: Ignoring hash and size mismatch for shape object");
+            stream.seek_relative(4)?;
         }
 
-        let here = stream.stream_position()?;
-
-        if here != expected_end {
-            // fixme: This should be an error
-            eprintln!(
-                "Warning: Object hash ended at {here}, not {expected_end}. Will `seek` to fix."
-            );
-
-            stream.seek(SeekFrom::Start(expected_end))?;
-        } else {
-            eprintln!("Object ended as expected");
-        }
+        stream.ensure_eof()?;
 
         Ok(doc_object)
     }
 
     fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Layer> {
-        let data_size = stream.read_u32_le()?;
+        let _data_size = stream.read_u32_le()?;
         let flex_offset: u64 = stream.read_u32_le()?.into();
 
         let property_flags = stream.read_variable_length_bitfield()?;
@@ -213,6 +205,7 @@ impl Layer {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct Page {
     is_text_only: bool,
 
@@ -242,6 +235,7 @@ pub struct Page {
     recognised_data_modified_time: Option<DateTime<Utc>>,
     stroke_recognition_data: Option<Vec<OpaqueBytes>>,
     custom_objects: Vec<CustomPageObject>,
+    current_layer_index: u16,
 
     hash: [u8; 32],
 
@@ -274,7 +268,7 @@ impl Page {
         // Return to the beginning.
         stream.seek(SeekFrom::Start(data_start_pos))?;
 
-        let page_size = stream.read_u32_le()?;
+        let _page_size = stream.read_u32_le()?;
         let flex_data_offset: u64 = stream.read_u32_le()?.into();
 
         let property_flags = stream.read_variable_length_bitfield()?;
@@ -487,6 +481,7 @@ impl Page {
             recognised_data_modified_time,
             stroke_recognition_data,
             custom_objects,
+            current_layer_index,
             hash,
             layers,
         })

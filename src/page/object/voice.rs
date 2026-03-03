@@ -1,39 +1,24 @@
-use std::io::{self, Seek};
+use std::io::{self, Read, Seek};
 
 use thiserror::Error;
 
 use crate::{
-    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError,
-        TakeInclusiveLengthPrefixedError, UnfinishedParsingError,
+        ByteStreamLe, ExactSizedStream, ReadStringError, TryParse, UnfinishedParsingError,
     },
-    page::object::{ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase},
-    read_flags, unpack_bool_flag, unpack_field_flags,
+    page::object::{
+        HasObjectBase, ObjectBase, ObjectBaseParseError,
+        header::{ObjectHeader, ObjectHeaderError},
+    },
+    unpack_bool_flag, unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum VoiceObjectParseError {
-    #[error(transparent)]
     Io(#[from] io::Error),
-
-    #[error(transparent)]
-    BadSize(#[from] TakeInclusiveLengthPrefixedError),
-
-    #[error("invalid data type {0} for voice object (should be 10)")]
-    BadDataType(u16),
-
-    #[error("failed to parse property flags")]
-    PropertyFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more property bits were not handled")]
-    UnhandledProperty(#[source] UnhandledBitsError),
-
-    #[error("failed to parse field check flags")]
-    FieldCheckFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more field check flags were not handled")]
-    UnhandledField(#[source] UnhandledBitsError),
+    Base(#[from] ObjectBaseParseError),
+    Header(#[from] ObjectHeaderError),
 
     #[error("failed to read title string")]
     Title(#[source] ReadStringError),
@@ -41,11 +26,11 @@ pub enum VoiceObjectParseError {
     #[error("failed to read play time string")]
     PlayTime(#[source] ReadStringError),
 
-    #[error(transparent)]
     Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct VoiceObject {
     object_base: ObjectBase,
 
@@ -57,55 +42,29 @@ pub struct VoiceObject {
     attached_file_id: Option<u32>,
 }
 
-impl VoiceObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-    ) -> Result<VoiceObject, VoiceObjectParseError> {
-        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+impl<R: Read + Seek> TryParse<R> for VoiceObject {
+    type ParseError = VoiceObjectParseError;
 
-        match stream.read_u16_le()? {
-            10 => (),
-            bad => return Err(VoiceObjectParseError::BadDataType(bad)),
-        };
+    fn try_parse(stream: &mut R) -> Result<VoiceObject, VoiceObjectParseError> {
+        let object_base = ObjectBase::try_parse(stream)?;
 
-        let flex_offset: u64 = stream.read_u32_le()?.into();
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 10)?;
 
-        read_flags!(
-            &mut stream,
-            property_flags,
-            VoiceObjectParseError::PropertyFlags,
-            VoiceObjectParseError::UnhandledProperty,
-            {
-                unpack_bool_flag!(property_flags, 0 => is_recorded);
-            }
-        );
+        unpack_bool_flag!(header.property_flags_mut(), 0 => is_recorded);
 
-        read_flags!(
-            &mut stream,
-            field_check_flags,
-            VoiceObjectParseError::FieldCheckFlags,
-            VoiceObjectParseError::UnhandledField,
-            {
-                if flex_offset != 0 {
-                    stream.seek(io::SeekFrom::Start(flex_offset))?;
-                } else {
-                    // Nullify the field check flags if there's no flex data.
-                    field_check_flags.clear();
-                }
+        let field_flags = header.init_flex(&mut stream)?;
 
-                unpack_field_flags!(field_check_flags, {
-                    0 => attached_file_id: stream.read_u32_le()?;
+        unpack_field_flags!(field_flags, {
+            0 => attached_file_id: stream.read_u32_le()?;
 
-                    1 => title:
-                        stream.read_short_u16_string().map_err(VoiceObjectParseError::Title)?;
+            1 => title:
+                stream.read_short_u16_string().map_err(VoiceObjectParseError::Title)?;
 
-                    2 => play_time:
-                        stream.read_short_u16_string().map_err(VoiceObjectParseError::PlayTime)?;
-                });
-            }
-        );
+            2 => play_time:
+                stream.read_short_u16_string().map_err(VoiceObjectParseError::PlayTime)?;
+        });
 
+        header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(VoiceObject {
@@ -118,18 +77,8 @@ impl VoiceObject {
     }
 }
 
-impl InheritsObjectBase for VoiceObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> color_eyre::eyre::Result<Self> {
-        Ok(VoiceObject::try_parse(stream, object_base)?)
-    }
-
+impl HasObjectBase for VoiceObject {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }
 }
-
-impl ConcreteInheritsObjectBase for VoiceObject {}

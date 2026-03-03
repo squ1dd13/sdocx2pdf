@@ -1,23 +1,55 @@
 use super::ObjectBase;
 use crate::{
-    byte_stream::ByteStreamLe,
+    bits::{CheckedBitfield, UnhandledBitsError},
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError,
+        TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
+    },
+    impl_try_from_for_optional_from,
     page::{
         Point,
         object::{
-            InheritsObjectBase,
-            shared::{ColourType, GradientColour, GradientType},
+            HasObjectBase, ObjectBaseParseError,
+            header::{ObjectHeader, ObjectHeaderError},
+            shared::{
+                ColourType, GradientColour, GradientType, InvalidColourTypeError,
+                InvalidGradientTypeError,
+            },
         },
     },
-};
-use color_eyre::{
-    Result,
-    eyre::{OptionExt, eyre},
+    read_size_and_vec, read_u32_sized_vec, unpack_bool_flag, unpack_field_flags,
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum LineColourEffectParseError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
+
+    #[error("failed to parse property flags")]
+    PropertyFlags(#[from] ReadBitfieldError),
+
+    #[error("one or more properties were unhandled")]
+    UnhandledProperty(#[from] UnhandledBitsError),
+
+    #[error(transparent)]
+    ColourType(#[from] InvalidColourTypeError),
+
+    #[error(transparent)]
+    GradientType(#[from] InvalidGradientTypeError),
+
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
+}
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct LineColourEffect {
     gradient_rotatable: bool,
     colour_type: ColourType,
@@ -29,41 +61,28 @@ struct LineColourEffect {
 }
 
 impl LineColourEffect {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<LineColourEffect> {
-        // (colour count) * 8 + 19
-        let _structure_size = stream.read_u32_le()?;
+    fn try_parse<R: Read>(stream: &mut R) -> Result<LineColourEffect, LineColourEffectParseError> {
+        let mut stream = stream.take_exclusive_length_prefixed()?;
 
-        // Not really variable length, and also not really a bitfield: the size byte is always 1,
-        // and the single byte that follows encodes the rotatability in the first bit (so it's
-        // effectively just a Boolean). The result is [0x1, 0x1 if rotatable else 0x0], but the
-        // first byte makes more sense if we assume the intention is to follow the variable-length
-        // bitfield format.
-        let property_flags = stream.read_variable_length_bitfield()?;
+        let mut property_flags = CheckedBitfield::try_parse(&mut stream)?;
 
-        Ok(LineColourEffect {
-            gradient_rotatable: property_flags & 1 != 0,
-            colour_type: {
-                let val = stream.read_u8()?;
-                ColourType::from_u8(val).ok_or_else(|| eyre!("Bad colour type {val}"))?
-            },
-            solid_colour: stream.read_u32_le()?.to_le_bytes(),
-            gradient_type: {
-                let val = stream.read_u8()?;
-                GradientType::from_u8(val).ok_or_else(|| eyre!("Bad gradient type {val}"))?
-            },
+        unpack_bool_flag!(property_flags, 0 => gradient_rotatable);
+
+        property_flags.ensure_none_set_unchecked()?;
+
+        let effect = LineColourEffect {
+            gradient_rotatable,
+            colour_type: ColourType::try_from(stream.read_u8()?)?,
+            solid_colour: stream.read_4_bytes()?,
+            gradient_type: GradientType::try_from(stream.read_u8()?)?,
             angle: stream.read_u16_le()?,
-            radial_gradient_pos: Point::try_parse_f32(stream)?,
-            colours: {
-                let count: usize = stream.read_u8()?.into();
-                let mut colours = Vec::with_capacity(count);
+            radial_gradient_pos: Point::try_parse_f32(&mut stream)?,
+            colours: read_size_and_vec!(stream, u8, GradientColour::try_parse(&mut stream)?),
+        };
 
-                for _ in 0..count {
-                    colours.push(GradientColour::try_parse(stream)?);
-                }
+        stream.ensure_eof()?;
 
-                colours
-            },
-        })
+        Ok(effect)
     }
 }
 
@@ -76,6 +95,8 @@ enum CapType {
     /// `CAP_TYPE_SQUARE`
     Square = 2,
 }
+
+impl_try_from_for_optional_from!(CapType, u8, from_u8, pub InvalidCapTypeError);
 
 #[derive(Debug, FromPrimitive)]
 enum CompoundType {
@@ -90,6 +111,8 @@ enum CompoundType {
     /// `COMPOUND_TYPE_TRIPLE`
     Triple = 4,
 }
+
+impl_try_from_for_optional_from!(CompoundType, u8, from_u8, pub InvalidCompoundTypeError);
 
 #[derive(Debug, FromPrimitive)]
 enum DashType {
@@ -111,6 +134,8 @@ enum DashType {
     LongDashDotDot = 7,
 }
 
+impl_try_from_for_optional_from!(DashType, u8, from_u8, pub InvalidDashTypeError);
+
 #[derive(Debug, FromPrimitive)]
 enum ArrowSize {
     /// `ARROW_SIZE_NORMAL`
@@ -120,6 +145,8 @@ enum ArrowSize {
     /// `ARROW_SIZE_BIG`
     Big = 2,
 }
+
+impl_try_from_for_optional_from!(ArrowSize, u8, from_u8, pub InvalidArrowSizeError);
 
 #[derive(Debug, FromPrimitive)]
 enum ArrowShape {
@@ -137,6 +164,8 @@ enum ArrowShape {
     OvalArrow = 5,
 }
 
+impl_try_from_for_optional_from!(ArrowShape, u8, from_u8, pub InvalidArrowShapeError);
+
 #[derive(Debug, FromPrimitive)]
 enum JoinType {
     /// `JOIN_TYPE_MITER`
@@ -147,7 +176,26 @@ enum JoinType {
     Bevel = 2,
 }
 
+impl_try_from_for_optional_from!(JoinType, u8, from_u8, pub InvalidJoinTypeError);
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum LineStyleEffectParseError {
+    Io(#[from] std::io::Error),
+
+    #[error("line style effect must be exactly 12 bytes, not {0}")]
+    WrongSize(u32),
+
+    CompoundType(#[from] InvalidCompoundTypeError),
+    DashType(#[from] InvalidDashTypeError),
+    CapType(#[from] InvalidCapTypeError),
+    JoinType(#[from] InvalidJoinTypeError),
+    ArrowShape(#[from] InvalidArrowShapeError),
+    ArrowSize(#[from] InvalidArrowSizeError),
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 struct LineStyleEffect {
     width: f32,
     compound_type: CompoundType,
@@ -161,60 +209,67 @@ struct LineStyleEffect {
 }
 
 impl LineStyleEffect {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<LineStyleEffect> {
-        let size = stream.read_u32_le()?;
-
-        if size != 12 {
-            return Err(eyre!("Line style effect size should be 12, not {size}"));
+    fn try_parse<R: Read>(stream: &mut R) -> Result<LineStyleEffect, LineStyleEffectParseError> {
+        match stream.read_u32_le()? {
+            12 => (),
+            bad => return Err(LineStyleEffectParseError::WrongSize(bad)),
         }
 
         let width = stream.read_f32_le()?;
 
-        let compound_type = stream.read_u8()?;
-        let dash_type = stream.read_u8()?;
-        let cap_type = stream.read_u8()?;
-        let join_type = stream.read_u8()?;
-        let begin_arrow_shape = stream.read_u8()?;
-        let begin_arrow_size = stream.read_u8()?;
-        let end_arrow_shape = stream.read_u8()?;
-        let end_arrow_size = stream.read_u8()?;
+        let mut buf = [0_u8; 8];
+        stream.read_exact(&mut buf)?;
 
         Ok(LineStyleEffect {
             width,
-
-            compound_type: CompoundType::from_u8(compound_type)
-                .ok_or_else(|| eyre!("Bad compound type {compound_type}"))?,
-
-            dash_type: DashType::from_u8(dash_type)
-                .ok_or_else(|| eyre!("Bad dash type {dash_type}"))?,
-
-            cap_type: CapType::from_u8(cap_type).ok_or_else(|| eyre!("Bad cap type {cap_type}"))?,
-
-            join_type: JoinType::from_u8(join_type)
-                .ok_or_else(|| eyre!("Bad join type {join_type}"))?,
-
-            begin_arrow_shape: ArrowShape::from_u8(begin_arrow_shape)
-                .ok_or_else(|| eyre!("Bad arrow shape {begin_arrow_shape}"))?,
-
-            begin_arrow_size: ArrowSize::from_u8(begin_arrow_size)
-                .ok_or_else(|| eyre!("Bad arrow size {begin_arrow_size}"))?,
-
-            end_arrow_shape: ArrowShape::from_u8(end_arrow_shape)
-                .ok_or_else(|| eyre!("Bad arrow shape {end_arrow_shape}"))?,
-
-            end_arrow_size: ArrowSize::from_u8(end_arrow_size)
-                .ok_or_else(|| eyre!("Bad arrow size {end_arrow_size}"))?,
+            compound_type: buf[0].try_into()?,
+            dash_type: buf[1].try_into()?,
+            cap_type: buf[2].try_into()?,
+            join_type: buf[3].try_into()?,
+            begin_arrow_shape: buf[4].try_into()?,
+            begin_arrow_size: buf[5].try_into()?,
+            end_arrow_shape: buf[6].try_into()?,
+            end_arrow_size: buf[7].try_into()?,
         })
     }
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ConnectionPoint {
     point: Point,
     uuids: Vec<String>,
 }
 
+#[derive(Error, Debug)]
+pub enum ShapeBaseParseError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Base(#[from] ObjectBaseParseError),
+
+    #[error(transparent)]
+    Header(#[from] ObjectHeaderError),
+
+    #[error("element count {0} is too large")]
+    TooManyElements(u32),
+
+    #[error(transparent)]
+    LineColourEffect(#[from] LineColourEffectParseError),
+
+    #[error(transparent)]
+    LineStyleEffect(#[from] LineStyleEffectParseError),
+
+    #[error(transparent)]
+    String(#[from] ReadStringError),
+
+    #[error(transparent)]
+    Unfinished(#[from] UnfinishedParsingError),
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ShapeBase {
     pub object_base: ObjectBase,
 
@@ -227,123 +282,66 @@ pub struct ShapeBase {
     points_of_connection: Vec<Point>,
 }
 
-impl InheritsObjectBase for ShapeBase {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> Result<ShapeBase> {
-        if child_count != 0 {
-            return Err(eyre!(
-                "Shape base should not have children, but {child_count} declared"
-            ));
-        }
+impl<R: Read + Seek> TryParse<R> for ShapeBase {
+    type ParseError = ShapeBaseParseError;
 
-        // The declared size is inclusive of the size field, so take the offset before
-        // reading the size.
-        let start_offset = stream.stream_position()?;
+    fn try_parse(stream: &mut R) -> Result<ShapeBase, ShapeBaseParseError> {
+        let object_base = ObjectBase::try_parse(stream)?;
 
-        let expected_end = {
-            let size: u64 = stream.read_u32_le()?.into();
-            start_offset + size
-        };
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 6)?;
 
-        let data_type_id = stream.read_u16_le()?;
+        let points_of_connection = read_u32_sized_vec!(
+            stream,
+            ShapeBaseParseError::TooManyElements,
+            Point::try_parse_f64(&mut stream)?
+        );
 
-        if data_type_id != 6 {
-            return Err(eyre!(
-                "Shape base data type ID should be 6, not {data_type_id}"
-            ));
-        }
-
-        let flex_offset: u64 = stream.read_u32_le()?.into();
-
-        // Again, these aren't really variable-length because they are hardcoded at 1 byte each.
-        // Also, there are no property flags, so that field is always 0.
-        let _property_flags = stream.read_variable_length_bitfield()?;
-        let stated_field_check_flags = stream.read_variable_length_bitfield()?;
-
-        let points_of_connection = {
-            let count: usize = stream.read_u32_le()?.try_into()?;
-            let mut points = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                points.push(Point::try_parse_f64(stream)?);
-            }
-
-            points
-        };
-
-        // Includes size of the count, so will be 4 even if there are no points.
+        // Inclusive size. Living on the edge by not constructing a window here ;)
         let _connection_points_total_size = stream.read_u32_le()?;
 
-        let connection_points = {
-            let count: usize = stream.read_u32_le()?.try_into()?;
-            let mut points = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                let point = Point::try_parse_f64(stream)?;
-
-                let uuid_count: usize = stream.read_u32_le()?.try_into()?;
-                let mut uuids = Vec::with_capacity(uuid_count);
-
-                for _ in 0..uuid_count {
-                    uuids.push(stream.read_short_u8_string()?);
-                }
-
-                points.push(ConnectionPoint { point, uuids });
+        let conn_pts = read_size_and_vec!(stream, u32, ShapeBaseParseError::TooManyElements, {
+            ConnectionPoint {
+                point: Point::try_parse_f64(&mut stream)?,
+                uuids: read_u32_sized_vec!(
+                    stream,
+                    ShapeBaseParseError::TooManyElements,
+                    stream.read_short_u8_string()?
+                ),
             }
+        });
 
-            points
-        };
+        let field_flags = header.init_flex(&mut stream)?;
 
-        let field_check_flags = if flex_offset != 0 {
-            // There is flex data, so seek to where it starts and use the field check flags we were
-            // given.
-            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
-            stated_field_check_flags
-        } else {
-            // No flex data, so disable all the fields.
-            0
-        };
+        unpack_field_flags!(field_flags, {
+            // missing 0, 1
 
-        let line_colour_effect = (stated_field_check_flags & 4 != 0)
-            .then(|| LineColourEffect::try_parse(stream))
-            .transpose()?;
+            2 => line_colour_effect: LineColourEffect::try_parse(&mut stream)?;
+            3 => line_style_effect: LineStyleEffect::try_parse(&mut stream)?;
 
-        let line_style_effect = (stated_field_check_flags & 8 != 0)
-            .then(|| LineStyleEffect::try_parse(stream))
-            .transpose()?;
+            // missing 4, 5, 6
 
-        let mut slave_uuids = vec![];
+            7 => slave_uuids: read_size_and_vec!(
+                stream,
+                u16,
+                stream.read_short_u8_string()?
+            ), else vec![];
+        });
 
-        if stated_field_check_flags & 128 != 0 {
-            let count: usize = stream.read_u16_le()?.into();
-            slave_uuids.reserve_exact(count);
-
-            for _ in 0..count {
-                slave_uuids.push(stream.read_short_u8_string()?);
-            }
-        }
-
-        let end_offset = stream.stream_position()?;
-
-        if end_offset != expected_end {
-            return Err(eyre!(
-                "Expected end offset is {expected_end}, but ended at {end_offset}"
-            ));
-        }
+        header.ensure_flags_used()?;
+        stream.ensure_eof()?;
 
         Ok(ShapeBase {
             object_base,
             line_colour_effect,
             line_style_effect,
             slave_uuids,
-            connection_points,
+            connection_points: conn_pts,
             points_of_connection,
         })
     }
+}
 
+impl HasObjectBase for ShapeBase {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }

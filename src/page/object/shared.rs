@@ -2,14 +2,17 @@ use std::io;
 
 use crate::{
     byte_stream::ByteStreamLe,
+    impl_try_from_for_optional_from,
     page::{Point, Rect},
     read_u32_sized_vec,
 };
+use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;
 
 /// A segment of a `Path`. Variant names are based on `SpenPath` constants.
 #[derive(Debug)]
+#[expect(dead_code)]
 enum PathSegment {
     /// `TYPE_MOVETO`; 1
     MoveTo(Point),
@@ -46,6 +49,7 @@ pub enum PathParseError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Path {
     segments: Vec<PathSegment>,
 }
@@ -95,6 +99,8 @@ pub enum ColourType {
     None = 2,
 }
 
+impl_try_from_for_optional_from!(ColourType, u8, from_u8, pub InvalidColourTypeError);
+
 #[derive(Debug, FromPrimitive)]
 pub enum GradientType {
     /// `GRADIENT_LINEAR`
@@ -107,7 +113,10 @@ pub enum GradientType {
     Path = 3,
 }
 
+impl_try_from_for_optional_from!(GradientType, u8, from_u8, pub InvalidGradientTypeError);
+
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GradientColour {
     pub colour: [u8; 4],
     pub position: f32,

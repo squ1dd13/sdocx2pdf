@@ -1,20 +1,18 @@
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 
-use byteorder::{LittleEndian, ReadBytesExt};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    bits::{CheckedBitfield, UnhandledBitsError},
-    byte_stream::{
-        BlindWindow, ByteStreamLe, ExactSizedStream, ReadBitfieldError,
-        TakeInclusiveLengthPrefixedError, UnfinishedParsingError, WrongEndOffsetError,
-    },
+    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
     impl_try_from_for_optional_from,
     page::{
         Point,
-        object::{ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase},
+        object::{
+            HasObjectBase, ObjectBase, ObjectBaseParseError,
+            header::{ObjectHeader, ObjectHeaderError},
+        },
     },
     unpack_bool_flags, unpack_field_flags,
 };
@@ -263,39 +261,19 @@ enum StrokeType {
 impl_try_from_for_optional_from!(StrokeType, u16, from_u16, pub InvalidStrokeTypeError);
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum StrokeParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
-
-    #[error(transparent)]
-    BadSize(#[from] TakeInclusiveLengthPrefixedError),
-
-    #[error("invalid data type {0} for stroke object (should be 1)")]
-    BadDataType(u16),
-
-    #[error("failed to parse property flags")]
-    PropertyFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more property bits were not handled")]
-    UnhandledProperty(#[source] UnhandledBitsError),
-
-    #[error("failed to parse field check flags")]
-    FieldCheckFlags(#[source] ReadBitfieldError),
-
-    #[error(transparent)]
+    Base(#[from] ObjectBaseParseError),
+    Header(#[from] ObjectHeaderError),
     BadToolType(#[from] InvalidToolTypeError),
-
-    #[error(transparent)]
     BadDashType(#[from] InvalidDashTypeError),
-
-    #[error(transparent)]
     BadStrokeType(#[from] InvalidStrokeTypeError),
-
-    #[error(transparent)]
     Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct StrokeObject {
     object_base: ObjectBase,
 
@@ -331,24 +309,15 @@ pub struct StrokeObject {
     pen_repeat_distance: f32,
 }
 
-impl StrokeObject {
-    fn try_parse_inner<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> Result<StrokeObject, StrokeParseError> {
-        let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+impl<R: Read + Seek> TryParse<R> for StrokeObject {
+    type ParseError = StrokeParseError;
 
-        let data_type = stream.read_u16_le()?;
+    fn try_parse(stream: &mut R) -> Result<StrokeObject, StrokeParseError> {
+        let object_base = ObjectBase::try_parse(stream)?;
 
-        if data_type != 1 {
-            return Err(StrokeParseError::BadDataType(data_type));
-        }
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 1)?;
 
-        let flex_offset: u64 = stream.read_u32_le()?.into();
-
-        let mut property_flags =
-            CheckedBitfield::try_parse(&mut stream).map_err(StrokeParseError::FieldCheckFlags)?;
+        let property_flags = header.property_flags_mut();
 
         unpack_bool_flags!(property_flags, {
             0 => is_curve_enabled;
@@ -364,13 +333,6 @@ impl StrokeObject {
             10 => !is_generated;
         });
 
-        property_flags
-            .ensure_none_set_unchecked()
-            .map_err(StrokeParseError::UnhandledProperty)?;
-
-        let stated_field_check_flags =
-            CheckedBitfield::try_parse(&mut stream).map_err(StrokeParseError::FieldCheckFlags)?;
-
         let event_count: usize = stream.read_u16_le()?.into();
 
         let events = if is_curve_enabled {
@@ -381,12 +343,7 @@ impl StrokeObject {
 
         let tool_type = ToolType::try_from(stream.read_u16_le()?)?;
 
-        let mut field_check_flags = if flex_offset != 0 {
-            stream.seek(SeekFrom::Start(flex_offset))?;
-            stated_field_check_flags
-        } else {
-            CheckedBitfield::default()
-        };
+        let field_check_flags = header.init_flex(&mut stream)?;
 
         // What follows is equivalent to
         // `SPen::ObjectStrokeBinaryHandler::m_ApplyBinary_FlexibleData`.
@@ -423,6 +380,7 @@ impl StrokeObject {
             eprintln!("Warning: Read unknown stroke field (value {unk})");
         };
 
+        header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(StrokeObject {
@@ -458,22 +416,8 @@ impl StrokeObject {
     }
 }
 
-impl InheritsObjectBase for StrokeObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> color_eyre::eyre::Result<StrokeObject> {
-        Ok(StrokeObject::try_parse_inner(
-            stream,
-            object_base,
-            child_count,
-        )?)
-    }
-
+impl HasObjectBase for StrokeObject {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }
 }
-
-impl ConcreteInheritsObjectBase for StrokeObject {}

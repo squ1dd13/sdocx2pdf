@@ -4,6 +4,7 @@ use color_eyre::Result;
 use std::io::{Seek, SeekFrom};
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct BoundFile {
     bind_id: u32,
     name: String,
@@ -14,6 +15,7 @@ struct BoundFile {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct MediaInfo {
     format_version: u32,
     bound_files: Vec<BoundFile>,

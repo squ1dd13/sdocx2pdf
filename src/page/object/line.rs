@@ -1,20 +1,51 @@
 use super::ObjectBase;
 use crate::{
-    byte_stream::ByteStreamLe,
+    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
+    impl_try_from_for_optional_from,
     page::{
         Point, Rect,
         object::{
-            ConcreteInheritsObjectBase, InheritsObjectBase, shape_base::ShapeBase, shared::Path,
+            HasObjectBase,
+            header::{ObjectHeader, ObjectHeaderError},
+            shape_base::{ShapeBase, ShapeBaseParseError},
+            shared::{Path, PathParseError},
         },
     },
+    read_size_and_vec, unpack_field_flags,
 };
-use color_eyre::eyre::{Result, eyre};
-use std::io::{Seek, SeekFrom};
+use color_eyre::eyre::Result;
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
+use std::io::{Read, Seek};
+use thiserror::Error;
+
+#[derive(Debug, FromPrimitive)]
+pub enum ConnectorType {
+    /// `CONNECTOR_BEGIN`
+    Begin = 0,
+
+    /// `CONNECTOR_END`
+    End = 1,
+}
+
+impl_try_from_for_optional_from!(ConnectorType, u8, from_u8, pub InvalidConnectorTypeError);
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum LineObjectParseError {
+    Io(#[from] std::io::Error),
+    Base(#[from] ShapeBaseParseError),
+    Header(#[from] ObjectHeaderError),
+    ConnectorType(#[from] InvalidConnectorTypeError),
+    Path(#[from] PathParseError),
+    Unfinished(#[from] UnfinishedParsingError),
+}
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LineObject {
     shape_base: ShapeBase,
-    connector_type: u8,
+    connector_type: ConnectorType,
     start_direction: u8,
     control_points: Vec<Point>,
     start_point: Point,
@@ -28,88 +59,37 @@ pub struct LineObject {
     path: Option<Path>,
 }
 
-impl InheritsObjectBase for LineObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> Result<LineObject> {
-        let shape_base = ShapeBase::try_parse(stream, object_base, child_count)?;
+impl<R: Read + Seek> TryParse<R> for LineObject {
+    type ParseError = LineObjectParseError;
 
-        let start_offset = stream.stream_position()?;
+    fn try_parse(stream: &mut R) -> Result<LineObject, LineObjectParseError> {
+        let shape_base = ShapeBase::try_parse(stream)?;
 
-        let expected_end = {
-            let size: u64 = stream.read_u32_le()?.into();
-            start_offset + size
-        };
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 8)?;
 
-        let data_type_id = stream.read_u16_le()?;
-
-        if data_type_id != 8 {
-            return Err(eyre!(
-                "Line object data type ID should be 8, not {data_type_id}"
-            ));
-        }
-
-        let flex_offset: u64 = stream.read_u32_le()?.into();
-
-        let _property_flags = stream.read_variable_length_bitfield()?;
-        let stated_field_check_flags = stream.read_variable_length_bitfield()?;
-
-        let connector_type = stream.read_u8()?;
+        let connector_type: ConnectorType = stream.read_u8()?.try_into()?;
         let start_direction = stream.read_u8()?;
 
-        let control_points = {
-            let count: usize = stream.read_u8()?.into();
-            let mut points = Vec::with_capacity(count);
+        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f64(&mut stream)?);
 
-            for _ in 0..count {
-                points.push(Point::try_parse_f64(stream)?);
-            }
+        let start_point = Point::try_parse_f64(&mut stream)?;
+        let end_point = Point::try_parse_f64(&mut stream)?;
 
-            points
-        };
-
-        let start_point = Point::try_parse_f64(stream)?;
-        let end_point = Point::try_parse_f64(stream)?;
-
-        let original_drawn_rect = Rect::try_parse_f64(stream)?;
-        let original_rect = Rect::try_parse_f64(stream)?;
+        let original_drawn_rect = Rect::try_parse_f64(&mut stream)?;
+        let original_rect = Rect::try_parse_f64(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
-        let field_check_flags = if flex_offset != 0 {
-            // We have flex data, so the fields are active.
-            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
-            stated_field_check_flags
-        } else {
-            // No flex data.
-            0
-        };
+        let field_flags = header.init_flex(&mut stream)?;
 
-        let default_pen_name_id = (field_check_flags & 1 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
+        unpack_field_flags!(field_flags, {
+            0 => default_pen_name_id: stream.read_u32_le()?;
+            1 => pen_style_id: stream.read_u32_le()?;
+            2 => pen_name_id: stream.read_u32_le()?;
+            3 => path: Path::try_parse(&mut stream)?;
+        });
 
-        let pen_style_id = (field_check_flags & 2 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let pen_name_id = (field_check_flags & 4 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .or(default_pen_name_id);
-
-        let path = (field_check_flags & 8 != 0)
-            .then(|| Path::try_parse(stream))
-            .transpose()?;
-
-        let end_offset = stream.stream_position()?;
-
-        if end_offset != expected_end {
-            return Err(eyre!(
-                "Expected end offset is {expected_end}, but ended at {end_offset}"
-            ));
-        }
+        header.ensure_flags_used()?;
+        stream.ensure_eof()?;
 
         Ok(LineObject {
             shape_base,
@@ -127,10 +107,10 @@ impl InheritsObjectBase for LineObject {
             path,
         })
     }
-
-    fn object_base(&self) -> &ObjectBase {
-        &self.shape_base.object_base
-    }
 }
 
-impl ConcreteInheritsObjectBase for LineObject {}
+impl HasObjectBase for LineObject {
+    fn object_base(&self) -> &ObjectBase {
+        self.shape_base.object_base()
+    }
+}

@@ -1,8 +1,14 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
 use io::Read;
-use std::io::{self, Cursor, Seek, SeekFrom, Take};
+use std::io::{self, Seek, SeekFrom, Take};
 use thiserror::Error;
+
+pub trait TryParse<R: ?Sized>: Sized {
+    type ParseError;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError>;
+}
 
 #[derive(Error, Debug)]
 pub enum ReadStringError {
@@ -79,6 +85,7 @@ pub struct BlindWindow<T>(Window<T>);
 impl<T> Window<T> {
     /// Returns a window into `inner` providing access to at most `length` bytes from the current
     /// position.
+    #[expect(dead_code)]
     pub const fn new(inner: T, length: u64) -> Window<T> {
         Window {
             inner,
@@ -193,8 +200,6 @@ impl<T: Seek> Seek for Window<T> {
                     return self.inner.seek(pos);
                 }
             }
-
-            _ => (),
         }
 
         Err(io::Error::new(
@@ -228,6 +233,7 @@ impl<T: Seek> Seek for BlindWindow<T> {
 
 macro_rules! vec_read {
     ($fn_name:ident, $read_type:ty, $read_into_fn:ident) => {
+        #[allow(dead_code)]
         fn $fn_name(&mut self, n: usize) -> io::Result<Vec<$read_type>> {
             let mut v = vec![Default::default(); n];
             self.$read_into_fn::<LittleEndian>(&mut v)?;
@@ -238,6 +244,7 @@ macro_rules! vec_read {
 
 macro_rules! le_wrapper {
     ($le_name:ident, $t:ty, $bo_name:ident) => {
+        #[allow(dead_code)]
         fn $le_name(&mut self) -> io::Result<$t> {
             self.$bo_name::<LittleEndian>()
         }
@@ -381,15 +388,6 @@ pub trait SeekableByteStreamLe: ByteStreamLe + Seek {}
 
 impl<T: ByteStreamLe + Seek> SeekableByteStreamLe for T {}
 
-/// An error type for use when parsing should finish at a particular offset in the stream, but
-/// ends somewhere else. This may indicate a parsing bug.
-#[derive(Error, Debug)]
-#[error("end offset {actual_end} differs from the expected {expected_end}")]
-pub struct WrongEndOffsetError {
-    pub actual_end: u64,
-    pub expected_end: u64,
-}
-
 #[derive(Error, Debug)]
 #[error("{remaining} bytes remain after parsing")]
 pub struct UnfinishedParsingError {
@@ -414,25 +412,23 @@ impl<T> ExactSizedStream for Take<T> {
 }
 
 #[macro_export]
-macro_rules! read_u16_sized_vec {
-    ($stream:expr, $elem:expr) => {{
-        let count: usize = $stream.read_u16_le()?.into();
-
+macro_rules! _read_size_and_vec_inner {
+    ($sz_read_as_usize:expr, $idx:ident => $elem:expr) => {{
+        let count: usize = $sz_read_as_usize;
         let mut v = Vec::with_capacity(count);
 
-        for _ in 0..count {
+        for $idx in 0..count {
             v.push($elem);
         }
 
         v
     }};
 
-    ($stream:expr, $idx:ident => $elem:expr) => {{
-        let count: usize = $stream.read_u16_le()?.into();
-
+    ($sz_read_as_usize:expr, $elem:expr) => {{
+        let count: usize = $sz_read_as_usize;
         let mut v = Vec::with_capacity(count);
 
-        for $idx in 0..count {
+        for _ in 0..count {
             v.push($elem);
         }
 
@@ -441,30 +437,33 @@ macro_rules! read_u16_sized_vec {
 }
 
 #[macro_export]
+macro_rules! read_size_and_vec {
+    ($stream:expr, u8, $($t:tt)+) => {
+        $crate::_read_size_and_vec_inner!($stream.read_u8()?.into(), $($t)+)
+    };
+
+    ($stream:expr, u16, $($t:tt)+) => {
+        $crate::_read_size_and_vec_inner!($stream.read_u16_le()?.into(), $($t)+)
+    };
+
+    ($stream:expr, u32, $usize_err:expr, $($t:tt)+) => {
+        $crate::_read_size_and_vec_inner!({
+            let count = $stream.read_u32_le()?;
+            count.try_into().map_err(|_| $usize_err(count))?
+        }, $($t)+)
+    };
+}
+
+#[macro_export]
+macro_rules! read_u16_sized_vec {
+    ($stream:expr, $($t:tt)+) => {
+        $crate::read_size_and_vec!($stream, u16, $($t)+)
+    };
+}
+
+#[macro_export]
 macro_rules! read_u32_sized_vec {
-    ($stream:expr, $usize_err:expr, $elem:expr) => {{
-        let count = $stream.read_u32_le()?;
-        let count: usize = count.try_into().map_err(|_| $usize_err(count))?;
-
-        let mut v = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            v.push($elem);
-        }
-
-        v
-    }};
-
-    ($stream:expr, $usize_err:expr, $idx:ident => $elem:expr) => {{
-        let count = $stream.read_u32_le()?;
-        let count: usize = count.try_into().map_err(|_| $usize_err(count))?;
-
-        let mut v = Vec::with_capacity(count);
-
-        for $idx in 0..count {
-            v.push($elem);
-        }
-
-        v
-    }};
+    ($stream:expr, $($t:tt)+) => {
+        $crate::read_size_and_vec!($stream, u32, $($t)+)
+    };
 }

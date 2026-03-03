@@ -1,8 +1,8 @@
 use crate::{
-    AppVersion, OpaqueBytes,
+    AppVersion,
     byte_stream::{
         ByteStreamLe, ExactSizedStream, ReadStringError, TakeInclusiveLengthPrefixedError,
-        UnfinishedParsingError,
+        TryParse, UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,
     page::object::text::TextObject,
@@ -14,11 +14,12 @@ use num_derive::FromPrimitive;
 use sha2::Digest;
 use std::{
     collections::HashMap,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
 };
 use thiserror::Error;
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct AuthorInfo {
     strings: [String; 3],
     image_id: u32,
@@ -56,6 +57,7 @@ enum PenInfoParseError {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct PenInfo {
     name: String,
     size: f32,
@@ -165,12 +167,14 @@ enum VoiceAction {
 impl_try_from_for_optional_from!(VoiceAction, u32, from_u32, pub InvalidVoiceActionError);
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct VoiceEvent {
     time: DateTime<Utc>,
     action: VoiceAction,
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct VoiceRecordingInfo {
     attached_file_id: u32,
     name: String,
@@ -219,6 +223,7 @@ impl VoiceRecordingInfo {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 struct NoteDocMetadata {
     app_name: Option<String>,
     app_version: Option<AppVersion>,
@@ -228,6 +233,7 @@ struct NoteDocMetadata {
 
 /// `libSpen_worddoc.dll`
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct NoteDoc {
     property_flags: u32,
     field_check_flags: u32,
@@ -289,7 +295,7 @@ impl NoteDoc {
         let title_text = {
             let mut stream = stream.take_exclusive_length_prefixed()?;
 
-            let text = TextObject::try_parse_standalone(&mut stream)?;
+            let text = TextObject::try_parse(&mut stream)?;
             stream.ensure_eof()?;
 
             text
@@ -298,7 +304,7 @@ impl NoteDoc {
         let body_text = {
             let mut stream = stream.take_exclusive_length_prefixed()?;
 
-            let text = TextObject::try_parse_standalone(&mut stream)?;
+            let text = TextObject::try_parse(&mut stream)?;
             stream.ensure_eof()?;
 
             text
@@ -472,7 +478,7 @@ impl NoteDoc {
 
             // Copy exactly `data_size` bytes from the stream into the hasher. Note that this
             // brings the position in the stream back to where it was before the `seek` above.
-            io::copy(&mut stream.take(data_size), &mut hasher);
+            io::copy(&mut stream.take(data_size), &mut hasher)?;
 
             hasher.finalize()
         };
@@ -480,7 +486,7 @@ impl NoteDoc {
         // Now read the corresponding hash from the stream.
         let hash_in_stream = {
             let mut v = [0_u8; 32];
-            stream.read_exact(&mut v);
+            stream.read_exact(&mut v)?;
             v
         };
 

@@ -1,24 +1,24 @@
 use crate::{
-    bits::{CheckedBitfield, UnhandledBitsError},
-    byte_stream::{ByteStreamLe, ReadBitfieldError, ReadStringError, WrongEndOffsetError},
-    impl_try_from_for_optional_from, option_on_bit,
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, TryParse,
+        UnfinishedParsingError,
+    },
+    impl_try_from_for_optional_from,
     page::{
         Point, Rect,
         object::{
-            ConcreteInheritsObjectBase, InheritsObjectBase, ObjectBase,
-            shape_base::ShapeBase,
+            HasObjectBase, ObjectBase,
+            header::{ObjectHeader, ObjectHeaderError},
+            shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
             text_core,
         },
     },
-    unpack_bool_flags, unpack_field_flags,
+    read_size_and_vec, unpack_bool_flags, unpack_field_flags,
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::{
-    hint,
-    io::{self, Seek, SeekFrom},
-};
+use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 #[derive(Debug, FromPrimitive)]
@@ -223,6 +223,7 @@ pub enum FillColourEffectParseError {
 
 // C.f. `LineColourEffect`, which is very similar but is serialised differently.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct FillColourEffect {
     solid_colour: [u8; 4],
     colour_type: ColourType,
@@ -273,6 +274,7 @@ impl FillColourEffect {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct FillImageEffect {
     image_type: u8,
     image_id: i32,
@@ -316,6 +318,7 @@ pub enum FillEffectParseError {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum FillEffect {
     Background {
         transparency: f32,
@@ -372,6 +375,7 @@ pub enum BorderType {
 impl_try_from_for_optional_from!(BorderType, u16, from_u16, pub InvalidBorderTypeError);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Template {
     is_flipped_horizontally: bool,
     is_flipped_vertically: bool,
@@ -381,6 +385,7 @@ struct Template {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Data {
     shape_type: ShapeType,
     fill_effect: Option<FillEffect>,
@@ -394,6 +399,7 @@ pub struct Data {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Pen {
     pen_name_id: Option<u32>,
     default_pen_name_id: Option<u32>,
@@ -493,6 +499,7 @@ enum TextAutoFitType {
 impl_try_from_for_optional_from!(TextAutoFitType, u8, from_u8, pub InvalidTextAutoFitTypeError);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Text {
     text_common: Option<text_core::Common>,
     text_area_type: Option<TextAreaType>,
@@ -513,6 +520,7 @@ struct Text {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Image {
     transparency: bool,
 
@@ -529,68 +537,35 @@ pub struct Image {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum ShapeParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
-
-    #[error("failed to parse shape base")]
-    ShapeBase(#[source] color_eyre::Report),
-
-    #[error("invalid data type {0} for shape object (should be 7)")]
-    BadDataType(u16),
-
-    #[error("failed to parse property flags")]
-    PropertyFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more property bits were not handled")]
-    UnhandledProperty(#[source] UnhandledBitsError),
-
-    #[error("failed to parse field check flags: {0:?}")]
-    FieldCheckFlags(#[source] ReadBitfieldError),
-
-    #[error("one or more field check flags were not handled")]
-    UnhandledField(#[source] UnhandledBitsError),
-
-    #[error(transparent)]
+    Base(#[from] ShapeBaseParseError),
+    Header(#[from] ObjectHeaderError),
     BadShapeType(#[from] InvalidShapeTypeError),
 
     #[error("failed to parse template path")]
     TemplatePath(#[source] PathParseError),
 
-    #[error("failed to parse common text data")]
     TextCommon(#[from] text_core::CommonParseError),
-
-    #[error(transparent)]
     BadTextAreaType(#[from] InvalidTextAreaTypeError),
-
-    #[error("failed to parse fill effect")]
     FillEffect(#[from] FillEffectParseError),
 
     #[error("failed to read hint text")]
     HintText(#[source] ReadStringError),
 
-    #[error(transparent)]
     BadHintTextStyle(#[from] InvalidHintTextStyleError),
-
-    #[error(transparent)]
     BadEllipsisType(#[from] InvalidEllipsisTypeError),
-
-    #[error(transparent)]
     BadTextAutoFitType(#[from] InvalidTextAutoFitTypeError),
-
-    #[error(transparent)]
     BadImeActionType(#[from] InvalidImeActionTypeError),
-
-    #[error(transparent)]
     BadTextInputType(#[from] InvalidTextInputTypeError),
-
-    #[error(transparent)]
-    BadEndOffset(#[from] WrongEndOffsetError),
+    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ShapeObject {
-    base: ShapeBase,
+    shape_base: ShapeBase,
     pub data: Data,
     pen: Pen,
     text: Text,
@@ -604,31 +579,15 @@ pub struct ShapeObject {
 }
 
 impl ShapeObject {
-    pub fn try_parse_inner<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
+    fn try_parse_inner<R: Read + Seek>(
+        stream: &mut R,
         is_shape_only: bool,
     ) -> Result<ShapeObject, ShapeParseError> {
-        let shape_base = ShapeBase::try_parse(stream, object_base, child_count)
-            .map_err(ShapeParseError::ShapeBase)?;
+        let shape_base = ShapeBase::try_parse(stream)?;
 
-        let start_offset = stream.stream_position()?;
+        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 7)?;
 
-        let expected_end = {
-            let size: u64 = stream.read_u32_le()?.into();
-            start_offset + size
-        };
-
-        match stream.read_u16_le()? {
-            7 => (),
-            bad => return Err(ShapeParseError::BadDataType(bad)),
-        }
-
-        let flex_offset: u64 = stream.read_u32_le()?.into();
-
-        let mut property_flags =
-            CheckedBitfield::try_parse(stream).map_err(ShapeParseError::PropertyFlags)?;
+        let property_flags = header.property_flags_mut();
 
         unpack_bool_flags!(property_flags, {
             0 => template_is_flipped_horizontally;
@@ -639,15 +598,8 @@ impl ShapeObject {
             5 => image_transparency;
         });
 
-        property_flags
-            .ensure_none_set_unchecked()
-            .map_err(ShapeParseError::UnhandledProperty)?;
-
-        let stated_field_check_flags =
-            CheckedBitfield::try_parse(stream).map_err(ShapeParseError::FieldCheckFlags)?;
-
         let shape_type: ShapeType = stream.read_u32_le()?.try_into()?;
-        let original_rect = Rect::try_parse_f64(stream)?;
+        let original_rect = Rect::try_parse_f64(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
         // Only read the template if the template size is >0.
@@ -657,39 +609,25 @@ impl ShapeObject {
                 is_flipped_vertically: template_is_flipped_vertically,
                 owner_rect: original_rect,
                 rotation: original_angle,
-                path: Path::try_parse(stream).map_err(ShapeParseError::TemplatePath)?,
+                path: Path::try_parse(&mut stream).map_err(ShapeParseError::TemplatePath)?,
             })
         } else {
             None
         };
 
-        let control_points = {
-            let count: usize = stream.read_u8()?.into();
-            let mut points = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                points.push(Point::try_parse_f32(stream)?);
-            }
-
-            points
-        };
+        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f32(&mut stream)?);
 
         // WCon_ObjectShape only reads this if `this.type == 7`, which happens iff it is not a
         // subclass like a text box or image.
         let original_drawn_rect = is_shape_only
-            .then(|| Rect::try_parse_f64(stream))
+            .then(|| Rect::try_parse_f64(&mut stream))
             .transpose()?;
 
-        let mut field_flags = if flex_offset != 0 {
-            stream.seek(SeekFrom::Start(start_offset + flex_offset))?;
-            stated_field_check_flags
-        } else {
-            CheckedBitfield::default()
-        };
+        let field_flags = header.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
-            0 => text_common: text_core::Common::try_parse(
-                stream,
+            0 => text_common: text_core::Common::try_parse_with_version(
+                &mut stream,
                 shape_base.object_base.format_version,
             )?;
 
@@ -699,7 +637,7 @@ impl ShapeObject {
             3 => default_pen_name_id: stream.read_u32_le()?;
             4 => file_id: stream.read_u32_le()?;
 
-            5 => fill_effect: FillEffect::try_parse(stream)?;
+            5 => fill_effect: FillEffect::try_parse(&mut stream)?;
 
             6 => unk_32_1: stream.read_u32_le()?;
             7 => unk_32_2: stream.read_u32_le()?;
@@ -721,10 +659,6 @@ impl ShapeObject {
             24 => lined_paper_colour: stream.read_4_bytes()?;
         });
 
-        field_flags
-            .ensure_none_set_unchecked()
-            .map_err(ShapeParseError::UnhandledField)?;
-
         if unk_32_1.is_some() || unk_32_2.is_some() || unk_16.is_some() {
             eprintln!(
                 "Warning: Read at least one unknown shape field: {:?}/{:?}/{:?}",
@@ -732,18 +666,11 @@ impl ShapeObject {
             );
         }
 
-        let actual_end = stream.stream_position()?;
-
-        if actual_end != expected_end {
-            return Err(WrongEndOffsetError {
-                actual_end,
-                expected_end,
-            }
-            .into());
-        }
+        header.ensure_flags_used()?;
+        stream.ensure_eof()?;
 
         Ok(ShapeObject {
-            base: shape_base,
+            shape_base,
             data: Data {
                 shape_type,
                 fill_effect,
@@ -798,25 +725,22 @@ impl ShapeObject {
             unk_16,
         })
     }
-}
 
-impl InheritsObjectBase for ShapeObject {
-    fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        object_base: ObjectBase,
-        child_count: u16,
-    ) -> color_eyre::eyre::Result<ShapeObject> {
-        Ok(ShapeObject::try_parse_inner(
-            stream,
-            object_base,
-            child_count,
-            true,
-        )?)
+    pub fn try_parse_as_final<R: Read + Seek>(
+        stream: &mut R,
+    ) -> Result<ShapeObject, ShapeParseError> {
+        ShapeObject::try_parse_inner(stream, true)
     }
 
+    pub fn try_parse_as_base<R: Read + Seek>(
+        stream: &mut R,
+    ) -> Result<ShapeObject, ShapeParseError> {
+        ShapeObject::try_parse_inner(stream, false)
+    }
+}
+
+impl HasObjectBase for ShapeObject {
     fn object_base(&self) -> &ObjectBase {
-        &self.base.object_base
+        self.shape_base.object_base()
     }
 }
-
-impl ConcreteInheritsObjectBase for ShapeObject {}
