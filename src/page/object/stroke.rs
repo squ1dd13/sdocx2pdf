@@ -1,4 +1,7 @@
-use std::io::{self, Read, Seek};
+use std::{
+    f32,
+    io::{self, Read, Seek},
+};
 
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -17,9 +20,21 @@ use crate::{
     unpack_bool_flags, unpack_field_flags,
 };
 
+/// See [Android developer website][1].
+///
+/// [1]: <https://developer.android.com/develop/ui/compose/touch-input/stylus-input/advanced-stylus-features#stylus_axis_data>
 #[derive(Clone, Copy, Debug)]
 struct TiltData {
+    /// Tilt angle in radians. Range is \[0, pi/2\], where 0 means the pen is parallel to the axis
+    /// coming out of the document towards the user, and pi/2 means the pen is parallel to the
+    /// plane of the document.
     tilt: f32,
+
+    /// Orientation angle in radians, relative to the document. Range is \[-pi, pi\], where
+    ///  * 0 means the pen is oriented with its tip towards the top of the document;
+    ///  * +/- pi means the tip is towards the bottom of the document;
+    ///  * -pi/2 means ths tip is towards the left;
+    ///  * pi/2 means the tip is towards the right.
     orientation: f32,
 }
 
@@ -36,7 +51,7 @@ impl Event {
     fn point_component_delta_to_float(fixed: u16) -> f64 {
         // | sign bit | 10 bit integer part | 5 bit fractional part |
         // 5 bits in the fractional part means a denominator of 2^5 = 32, so the maximum
-        // representable value is 0b1111111111 + 0b11111 / 32 = 1023.96875.
+        // representable value is 0b1111111111 + 0b11111 / 32 ≈ 1024.
 
         let is_negative = fixed & 0x8000 != 0;
         let integer = f64::from((fixed & 0x7fff) >> 5);
@@ -51,7 +66,7 @@ impl Event {
     fn small_delta_to_float(fixed: u16) -> f32 {
         // | sign bit | 3 bit integer part | 12 bit fractional part |
         // 12 bit fractional part means the denominator is 2^12 = 4096, so the maximum
-        // representable value is 0b111 + 0b111111111111 / 4096 = 7.999755859375.
+        // representable value is 0b111 + 0b111111111111 / 4096 ≈ 8.
 
         let is_negative = fixed & 0x8000 != 0;
         let integer = f32::from((fixed & 0x7fff) >> 12);
@@ -200,14 +215,22 @@ impl std::fmt::Debug for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(event @ t = {}, x = {}, y = {} w/ p = {}",
-            self.timestamp, self.point.x, self.point.y, self.pressure
+            "(event @ t = {}, (x, y) = ({:.5}, {:.5}); p = {:.2}%; ",
+            self.timestamp,
+            self.point.x,
+            self.point.y,
+            self.pressure * 100.0
         )?;
 
         if let Some(TiltData { tilt, orientation }) = self.tilt_data {
-            write!(f, ", t.t = {tilt}, t.o = {orientation})")
+            write!(
+                f,
+                "t.t = ({:.3})π, t.o = ({:.3})π)",
+                tilt / f32::consts::PI,
+                orientation / f32::consts::PI
+            )
         } else {
-            write!(f, ", w/o tilt)")
+            write!(f, "no tilt data)")
         }
     }
 }

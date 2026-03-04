@@ -140,31 +140,31 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
     let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
-    println!("{}: {media_info:#?}", media_info_path.display());
+    // println!("{}: {media_info:#?}", media_info_path.display());
 
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
     let end_tag =
         ModelEndTag::try_parse(&mut std::fs::File::open(&end_tag_path)?, NoteSdkType::SPen)?;
-    println!("{}: {end_tag:#?}", end_tag_path.display());
+    // println!("{}: {end_tag:#?}", end_tag_path.display());
 
     let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
     let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
-    println!("{}: {note_note:#?}", note_note_path.display());
+    // println!("{}: {note_note:#?}", note_note_path.display());
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
-    println!("{}: {page_id_info:?}", page_id_info_path.display());
+    // println!("{}: {page_id_info:?}", page_id_info_path.display());
 
     for page_info in &page_id_info.pages {
         let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
         page_path.set_extension("page");
 
-        let page = Page::try_parse_full(
-            &mut std::fs::File::open(&page_path)
-                .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?,
-        )?;
+        let file = std::fs::File::open(&page_path)
+            .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?;
 
-        println!("{}: {page:#?}", page_path.display());
+        let page = Page::try_parse_full(&mut std::io::BufReader::new(file))?;
+
+        // println!("{}: {page:#?}", page_path.display());
     }
 
     Ok(())
@@ -172,11 +172,11 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
 fn demo_all() -> Result<()> {
     let extracted_sdocx_paths = [
-        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
         "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
-        // "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
-        // "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
-        // "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
+        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
+        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
+        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
         "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
@@ -188,8 +188,11 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
         "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930",
         "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957",
-        // "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837",
+        "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837",
         "/home/alex/projects/re/sdocx/sample_docs/Note replay_260304_170858",
+        "/home/alex/projects/re/sdocx/sample_docs/tilt_test___Notes_260304_194325",
+        "/home/alex/projects/re/sdocx/sample_docs/CAMDOWN__up down left right pressure inc_260304_202617",
+        "/home/alex/projects/re/sdocx/sample_docs/Up down left right CAMRIGHT_260304_203137",
     ];
 
     for path in extracted_sdocx_paths {
