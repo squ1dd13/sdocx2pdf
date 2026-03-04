@@ -341,7 +341,7 @@ impl<R: Read + Seek> TryParse<R> for Stroke {
             Event::parse_uncompressed_events(&mut stream, event_count, is_tilt_data_present)?
         };
 
-        let tool_type = ToolType::try_from(stream.read_u16_le()?)?;
+        let tool_type: ToolType = stream.read_u16_le()?.try_into()?;
 
         let field_check_flags = header.init_flex(&mut stream)?;
 
@@ -370,9 +370,9 @@ impl<R: Read + Seek> TryParse<R> for Stroke {
             11 => rendering_level: stream.read_u32_le()?;
             12 => original_width: stream.read_u32_le()?;
             13 => initial_tolerance: stream.read_f32_le()?;
-            14 => dash_type: DashType::try_from(stream.read_u16_le()?)?;
+            14 => dash_type: stream.read_u16_le()?.try_into()?;
             15 => dash_offset: stream.read_f32_le()?;
-            16 => stroke_type: StrokeType::try_from(stream.read_u16_le()?)?;
+            16 => stroke_type: stream.read_u16_le()?.try_into()?;
             17 => pen_repeat_distance: stream.read_f32_le()?, else 0.5;
         });
 

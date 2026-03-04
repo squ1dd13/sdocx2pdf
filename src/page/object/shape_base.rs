@@ -72,9 +72,9 @@ impl LineColourEffect {
 
         let effect = LineColourEffect {
             gradient_rotatable,
-            colour_type: ColourType::try_from(stream.read_u8()?)?,
+            colour_type: stream.read_u8()?.try_into()?,
             solid_colour: stream.read_4_bytes()?,
-            gradient_type: GradientType::try_from(stream.read_u8()?)?,
+            gradient_type: stream.read_u8()?.try_into()?,
             angle: stream.read_u16_le()?,
             radial_gradient_pos: Point::try_parse_f32(&mut stream)?,
             colours: read_size_and_vec!(stream, u8, GradientColour::try_parse(&mut stream)?),

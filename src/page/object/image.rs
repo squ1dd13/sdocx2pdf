@@ -9,7 +9,7 @@ use crate::{
         object::{
             HasObjectBase, ObjectBase,
             header::{ObjectHeader, ObjectHeaderError},
-            shape::{BorderType, InvalidBorderTypeError, Shape, ShapeParseError},
+            shape::{InvalidBorderTypeError, Shape, ShapeParseError},
         },
     },
     unpack_field_flags,
@@ -49,7 +49,7 @@ impl<R: Read + Seek> TryParse<R> for Image {
 
             3 => border_colour: stream.read_4_bytes()?;
             4 => border_width: stream.read_f32_le()?;
-            5 => border_type: BorderType::try_from(stream.read_u16_le()?)?;
+            5 => border_type: stream.read_u16_le()?.try_into()?;
 
             // (missing 6, 7, 8)
 

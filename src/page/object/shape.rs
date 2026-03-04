@@ -631,7 +631,7 @@ impl Shape {
                 shape_base.object_base.format_version,
             )?;
 
-            1 => text_area_type: TextAreaType::try_from(stream.read_u8()?)?;
+            1 => text_area_type: stream.read_u8()?.try_into()?;
 
             2 => pen_name_id: stream.read_u32_le()?;
             3 => default_pen_name_id: stream.read_u32_le()?;
@@ -646,13 +646,12 @@ impl Shape {
             9 => hint_text: stream.read_short_u16_string().map_err(ShapeParseError::HintText)?;
             10 => hint_text_colour: stream.read_4_bytes()?;
             11 => hint_text_font_size: stream.read_f32_le()?;
-            22 => hint_text_style: HintTextStyle::try_from(stream.read_u8()?)?;
+            22 => hint_text_style: stream.read_u8()?.try_into()?;
 
-            12 => ellipsis_type: EllipsisType::try_from(stream.read_u8()?)?;
-            13 => text_auto_fit_type: TextAutoFitType::try_from(stream.read_u8()?)?;
-            14 => ime_action_type: ImeActionType::try_from(stream.read_u8()?)?;
-            15 => text_input_type:
-                TextInputType::try_from(stream.read_u8()?)?, else TextInputType::Text;
+            12 => ellipsis_type: stream.read_u8()?.try_into()?;
+            13 => text_auto_fit_type: stream.read_u8()?.try_into()?;
+            14 => ime_action_type: stream.read_u8()?.try_into()?;
+            15 => text_input_type: stream.read_u8()?.try_into()?, else TextInputType::Text;
 
             21 => hint_text_vertical_offset: stream.read_f32_le()?;
             23 => lined_paper_thickness: stream.read_f32_le()?;

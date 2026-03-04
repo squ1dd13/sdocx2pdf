@@ -199,7 +199,7 @@ impl VoiceRecordingInfo {
 
             for _ in 0..count {
                 events.push(VoiceEvent {
-                    action: VoiceAction::try_from(frame.read_u32_le()?)?,
+                    action: frame.read_u32_le()?.try_into()?,
                     time: frame.read_timestamp()?,
                 });
             }

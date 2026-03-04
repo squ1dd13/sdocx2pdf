@@ -7,7 +7,7 @@ use crate::{
     page::object::{
         HasObjectBase, ObjectBase,
         header::{ObjectHeader, ObjectHeaderError},
-        shape::{BorderType, InvalidBorderTypeError, Shape, ShapeParseError},
+        shape::{InvalidBorderTypeError, Shape, ShapeParseError},
     },
     unpack_field_flags,
 };
@@ -40,7 +40,7 @@ impl<R: Read + Seek> TryParse<R> for Text {
         unpack_field_flags!(field_flags, {
             1 => border_colour: stream.read_4_bytes()?;
             2 => border_width: stream.read_f32_le()?;
-            3 => border_type: BorderType::try_from(stream.read_u16_le()?)?;
+            3 => border_type: stream.read_u16_le()?.try_into()?;
         });
 
         shape.data.border_colour = border_colour;
