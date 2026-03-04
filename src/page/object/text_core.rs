@@ -1,11 +1,13 @@
-use std::io::{self, Seek};
+use std::io::{self, Read, Seek};
 
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{ByteStreamLe, ExactSizedStream, ReadStringError, UnfinishedParsingError},
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadStringError, TryParse, UnfinishedParsingError,
+    },
     impl_try_from_for_optional_from,
     page::object::{DocObject, DocObjectParseError},
     read_u16_sized_vec, read_u32_sized_vec,
@@ -59,9 +61,9 @@ enum SpanType {
     SpellCorrection = 22,
     /// `TYPE_FORMULA`
     Formula = 23,
-    /// `TYPE_MAX`
-    Max = 24,
 }
+
+impl_try_from_for_optional_from!(SpanType, u32, from_u32, pub InvalidSpanTypeError);
 
 #[derive(Debug, FromPrimitive)]
 enum IntervalType {
@@ -75,6 +77,8 @@ enum IntervalType {
     ExclusiveInclusive = 3,
 }
 
+impl_try_from_for_optional_from!(IntervalType, u32, from_u32, pub InvalidIntervalTypeError);
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct SpanBase {
@@ -85,15 +89,14 @@ struct SpanBase {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum SpanParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
+    SpanType(#[from] InvalidSpanTypeError),
+    IntervalTypes(#[from] InvalidIntervalTypeError),
 
-    #[error("invalid span type {0}")]
-    BadSpanType(u32),
-
-    #[error("invalid span interval type {0}")]
-    BadIntervalType(u32),
+    #[error("data size {0} is too small")]
+    BadSize(u16),
 }
 
 #[derive(Debug)]
@@ -103,38 +106,25 @@ struct Span {
     bytes: Vec<u8>,
 }
 
-impl Span {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<Span, SpanParseError> {
-        let data_size: usize = stream.read_u16_le()?.into();
+impl<R: Read> TryParse<R> for Span {
+    type ParseError = SpanParseError;
 
-        // >> `data_size` starts measuring from here <<
-
-        let span_type = {
-            let val = stream.read_u32_le()?;
-            SpanType::from_u32(val).ok_or(SpanParseError::BadSpanType(val))?
+    fn try_parse(stream: &mut R) -> Result<Span, SpanParseError> {
+        // First `u16` is the size of the span data that follows.
+        let extra_data_size: usize = match stream.read_u16_le()? {
+            // The `SpanBase` is 16 bytes.
+            data_size @ 16.. => (data_size - 16).into(),
+            data_size => return Err(SpanParseError::BadSize(data_size)),
         };
-
-        let start_pos = stream.read_u32_le()?;
-        let end_pos = stream.read_u32_le()?;
-
-        let interval_type = {
-            let val = stream.read_u32_le()?;
-            IntervalType::from_u32(val).ok_or(SpanParseError::BadIntervalType(val))?
-        };
-
-        // >> 16 bytes to here, which is the end of the base <<
-
-        // Anything left is specific to the span type. (There does not have to be anything left.)
-        let bytes = stream.read_u8s(data_size - 16)?;
 
         Ok(Span {
             span_base: SpanBase {
-                span_type,
-                start_pos,
-                end_pos,
-                interval_type,
+                span_type: stream.read_u32_le()?.try_into()?,
+                start_pos: stream.read_u32_le()?,
+                end_pos: stream.read_u32_le()?,
+                interval_type: stream.read_u32_le()?.try_into()?,
             },
-            bytes,
+            bytes: stream.read_u8s(extra_data_size)?,
         })
     }
 }
@@ -153,6 +143,8 @@ enum ParagraphType {
     ParsingState = 6,
 }
 
+impl_try_from_for_optional_from!(ParagraphType, u32, from_u32, pub InvalidParagraphTypeError);
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct ParagraphBase {
@@ -162,12 +154,13 @@ struct ParagraphBase {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum ParagraphParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
+    ParagraphType(#[from] InvalidParagraphTypeError),
 
-    #[error("invalid paragraph type {0}")]
-    BadParagraphType(u32),
+    #[error("data size {0} is too small")]
+    BadSize(u16),
 }
 
 #[derive(Debug)]
@@ -177,41 +170,33 @@ struct Paragraph {
     bytes: Vec<u8>,
 }
 
-impl Paragraph {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<Paragraph, ParagraphParseError> {
-        // See `Span` parsing logic.
+impl<R: Read> TryParse<R> for Paragraph {
+    type ParseError = ParagraphParseError;
 
-        let data_size: usize = stream.read_u16_le()?.into();
-
-        let paragraph_type = {
-            let val = stream.read_u32_le()?;
-            ParagraphType::from_u32(val).ok_or(ParagraphParseError::BadParagraphType(val))?
+    fn try_parse(stream: &mut R) -> Result<Paragraph, ParagraphParseError> {
+        // First `u16` is the size of the paragraph data that follows.
+        let extra_data_size: usize = match stream.read_u16_le()? {
+            // The `ParagraphBase` is 12 bytes.
+            data_size @ 12.. => (data_size - 12).into(),
+            data_size => return Err(ParagraphParseError::BadSize(data_size)),
         };
-
-        let start_pos = stream.read_u32_le()?;
-        let end_pos = stream.read_u32_le()?;
-
-        let bytes = stream.read_u8s(data_size - 12)?;
 
         Ok(Paragraph {
             paragraph_base: ParagraphBase {
-                paragraph_type,
-                start_pos,
-                end_pos,
+                paragraph_type: stream.read_u32_le()?.try_into()?,
+                start_pos: stream.read_u32_le()?,
+                end_pos: stream.read_u32_le()?,
             },
-            bytes,
+            bytes: stream.read_u8s(extra_data_size)?,
         })
     }
 }
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct DocObjectSpan {
+struct InlineObject {
+    position: u32,
     object: DocObject,
-    start: u32,
-
-    // todo: Remove this
-    _end: u32,
 }
 
 #[derive(Error, Debug)]
@@ -222,25 +207,21 @@ pub enum CommonParseError {
     #[error("failed to read main text string")]
     MainText(#[source] ReadStringError),
 
-    #[error("span count does not fit in `usize`")]
-    TooManySpans,
-
-    #[error("paragraph count does not fit in `usize`")]
-    TooManyParagraphs,
+    #[error("element count {0} is too large")]
+    TooManyElements(u32),
 
     Span(#[from] SpanParseError),
     Paragraph(#[from] ParagraphParseError),
     BadGravityType(#[from] InvalidGravityError),
 
-    #[error("object span count does not fit in `usize`")]
-    TooManyObjectSpans,
-
     #[error("{0} is too big to be a valid object type")]
     ObjectTypeTooBig(u32),
 
-    DocObject(#[from] Box<DocObjectParseError>),
+    // The object we were trying to parse could include text, in which case the error may contain a
+    // `CommonParseError`. `Box` here is to avoid recursion.
+    InlineObject(#[from] Box<DocObjectParseError>),
 
-    #[error("bytes left over after parsing object span")]
+    #[error("object span was unfinished")]
     ObjectSpanUnfinished(#[source] UnfinishedParsingError),
 
     #[error(transparent)]
@@ -260,7 +241,7 @@ pub struct Common {
     spans: Vec<Span>,
     paragraphs: Vec<Paragraph>,
     section_data: Vec<(u32, u32)>,
-    object_spans: Vec<DocObjectSpan>,
+    inline_objects: Vec<InlineObject>,
 }
 
 impl Common {
@@ -276,13 +257,13 @@ impl Common {
 
         let spans = read_u32_sized_vec!(
             stream,
-            |_| CommonParseError::TooManySpans,
+            CommonParseError::TooManyElements,
             Span::try_parse(&mut stream)?
         );
 
         let paragraphs = read_u32_sized_vec!(
             stream,
-            |_| CommonParseError::TooManyParagraphs,
+            CommonParseError::TooManyElements,
             Paragraph::try_parse(&mut stream)?
         );
 
@@ -293,44 +274,43 @@ impl Common {
             stream.read_f32_le()?,
         );
 
-        let gravity = Gravity::try_from(stream.read_u8()?)?;
+        let gravity: Gravity = stream.read_u8()?.try_into()?;
 
         let section_data =
             read_u16_sized_vec!(stream, (stream.read_u32_le()?, stream.read_u32_le()?));
 
-        let object_spans = if format_version >= 2035 && {
+        let inline_objects = if format_version >= 2035 && {
             // This is stored as a Boolean but written explicitly as a 32-bit integer.
-            let object_spans_present = stream.read_u32_le()? != 0;
+            let inline_objects_present = stream.read_u32_le()? != 0;
 
             // todo: ??
             let _zero = stream.read_u32_le()?;
 
-            object_spans_present
+            inline_objects_present
         } {
-            read_u32_sized_vec!(stream, |_| CommonParseError::TooManyObjectSpans, {
-                let mut span_stream = (&mut stream).take_exclusive_length_prefixed()?;
+            read_u32_sized_vec!(stream, CommonParseError::TooManyElements, {
+                let mut obj_stream = (&mut stream).take_exclusive_length_prefixed()?;
 
-                let _doc_object_size = span_stream.read_u32_le()?;
+                let _obj_size = obj_stream.read_u32_le()?;
 
                 // This could be a single byte...
-                let object_type = span_stream.read_u32_le()?;
-
-                // `doc_object_size` measures exactly the size of this:
-                let doc_object = DocObject::try_parse_with_type(
-                    &mut span_stream,
+                let object_type: u8 = {
+                    let object_type = obj_stream.read_u32_le()?;
                     object_type
                         .try_into()
-                        .map_err(|_| CommonParseError::ObjectTypeTooBig(object_type))?,
-                )
-                .map_err(|e| CommonParseError::DocObject(Box::new(e)))?;
-
-                let span = DocObjectSpan {
-                    object: doc_object,
-                    start: span_stream.read_u32_le()?,
-                    _end: 0,
+                        .map_err(|_| CommonParseError::ObjectTypeTooBig(object_type))?
                 };
 
-                span_stream
+                // `_obj_size` is exactly the size of this:
+                let object = DocObject::try_parse_with_type(&mut obj_stream, object_type)
+                    .map_err(Box::new)?;
+
+                let span = InlineObject {
+                    position: obj_stream.read_u32_le()?,
+                    object,
+                };
+
+                obj_stream
                     .ensure_eof()
                     .map_err(CommonParseError::ObjectSpanUnfinished)?;
 
@@ -352,7 +332,7 @@ impl Common {
             spans,
             paragraphs,
             section_data,
-            object_spans,
+            inline_objects,
         })
     }
 }
