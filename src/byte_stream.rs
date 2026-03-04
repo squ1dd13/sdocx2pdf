@@ -467,3 +467,39 @@ macro_rules! read_u32_sized_vec {
         $crate::read_size_and_vec!($stream, u32, $($t)+)
     };
 }
+
+#[macro_export]
+macro_rules! _read_size_and_map_inner {
+    ($sz_read_as_usize:expr, $kv:expr) => {{
+        let count: usize = $sz_read_as_usize;
+        let mut m = std::collections::HashMap::with_capacity(count);
+
+        for _ in 0..count {
+            let (k, v) = $kv;
+            m.insert(k, v);
+        }
+
+        m
+    }};
+}
+
+#[macro_export]
+macro_rules! read_size_and_map {
+    ($stream:expr, u8, $kv:expr) => {
+        $crate::_read_size_and_map_inner!($stream.read_u8()?.into(), $kv)
+    };
+
+    ($stream:expr, u16, $kv:expr) => {
+        $crate::_read_size_and_map_inner!($stream.read_u16_le()?.into(), $kv)
+    };
+
+    ($stream:expr, u32, $usize_err:expr, $kv:expr) => {
+        $crate::_read_size_and_vec_inner!(
+            {
+                let count = $stream.read_u32_le()?;
+                count.try_into().map_err(|_| $usize_err(count))?
+            },
+            $kv
+        )
+    };
+}

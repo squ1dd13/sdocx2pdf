@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{
     byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
     page::object::{
-        HasObjectBase, ObjectBase,
+        base::{HasObjectBase, ObjectBase},
         header::{ObjectHeader, ObjectHeaderError},
         shape::{InvalidBorderTypeError, Shape, ShapeParseError},
     },

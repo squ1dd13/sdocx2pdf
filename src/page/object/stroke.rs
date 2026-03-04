@@ -10,7 +10,7 @@ use crate::{
     page::{
         Point,
         object::{
-            HasObjectBase, ObjectBase, ObjectBaseParseError,
+            base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
             header::{ObjectHeader, ObjectHeaderError},
         },
     },
@@ -23,7 +23,6 @@ struct TiltData {
     orientation: f32,
 }
 
-#[derive(Debug)]
 struct Event {
     point: Point,
     pressure: f32,
@@ -194,6 +193,22 @@ impl Event {
         }
 
         Ok(events)
+    }
+}
+
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(event @ t = {}, x = {}, y = {} w/ p = {}",
+            self.timestamp, self.point.x, self.point.y, self.pressure
+        )?;
+
+        if let Some(TiltData { tilt, orientation }) = self.tilt_data {
+            write!(f, ", t.t = {tilt}, t.o = {orientation})")
+        } else {
+            write!(f, ", w/o tilt)")
+        }
     }
 }
 

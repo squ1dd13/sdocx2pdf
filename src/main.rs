@@ -54,7 +54,8 @@ use color_eyre::{
     Result,
     eyre::{Context, eyre},
 };
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
+use thiserror::Error;
 
 mod bits;
 mod byte_stream;
@@ -64,40 +65,55 @@ mod note_doc;
 mod page;
 mod page_id_info;
 
-/// Holds a generic vector of bytes.
+#[derive(Error, Debug)]
+pub enum OpaqueBytesParseError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("can't fit size {0} into `usize`")]
+    TooBig(u32),
+
+    #[error("size {0} is too small to be inclusive")]
+    TooSmall(u32),
+}
+
+/// Holds a vector of bytes.
 ///
 /// A common pattern in the binary formats is a 32-bit size `n` followed
 /// by `n` bytes. This structure is intended to store the bytes that occur in these
 /// patterns without having to actually parse whatever they encode.
-struct OpaqueBytes {
-    bytes: Vec<u8>,
-}
+struct OpaqueBytes(Vec<u8>);
 
 impl OpaqueBytes {
     /// Reads `size: u32` and the `size` bytes that follow, reading `size + 4` bytes in total.
-    fn try_parse_exclusive<T: ByteStreamLe>(stream: &mut T) -> Result<OpaqueBytes> {
-        let size: usize = stream.read_u32_le()?.try_into()?;
+    fn try_parse_exclusive<R: Read>(stream: &mut R) -> Result<OpaqueBytes, OpaqueBytesParseError> {
+        let size = stream.read_u32_le()?;
 
-        Ok(OpaqueBytes {
-            bytes: stream.read_u8s(size)?,
-        })
+        Ok(OpaqueBytes(
+            stream.read_u8s(
+                size.try_into()
+                    .map_err(|_| OpaqueBytesParseError::TooBig(size))?,
+            )?,
+        ))
     }
 
     /// Reads `size: u32` and the `size - 4` bytes that follow, reading `size` bytes in total.
-    fn try_parse_inclusive<T: ByteStreamLe>(stream: &mut T) -> Result<OpaqueBytes> {
-        let size: usize = stream.read_u32_le()?.try_into()?;
-
-        Ok(OpaqueBytes {
-            bytes: stream.read_u8s(size.checked_sub(4).ok_or_else(|| {
-                eyre!("Size ({size}) cannot be inclusive as it is less than 4")
-            })?)?,
-        })
+    fn try_parse_inclusive<R: Read>(stream: &mut R) -> Result<OpaqueBytes, OpaqueBytesParseError> {
+        match stream.read_u32_le()? {
+            too_small @ ..4 => Err(OpaqueBytesParseError::TooSmall(too_small)),
+            size => Ok(OpaqueBytes(
+                stream.read_u8s(
+                    size.try_into()
+                        .map_err(|_| OpaqueBytesParseError::TooBig(size))?,
+                )?,
+            )),
+        }
     }
 }
 
 impl std::fmt::Debug for OpaqueBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OpaqueBytes {{ ({} bytes) }}", self.bytes.len())
+        write!(f, "OpaqueBytes({} bytes)", self.0.len())
     }
 }
 
@@ -129,7 +145,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
     let end_tag =
         ModelEndTag::try_parse(&mut std::fs::File::open(&end_tag_path)?, NoteSdkType::SPen)?;
-    // println!("{}: {end_tag:#?}", end_tag_path.display());
+    println!("{}: {end_tag:#?}", end_tag_path.display());
 
     let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
     let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
@@ -137,7 +153,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
     let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
-    // println!("{}: {page_id_info:?}", page_id_info_path.display());
+    println!("{}: {page_id_info:?}", page_id_info_path.display());
 
     for page_info in &page_id_info.pages {
         let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
@@ -148,7 +164,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
                 .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?,
         )?;
 
-        // println!("{}: {page:#?}", page_path.display());
+        println!("{}: {page:#?}", page_path.display());
     }
 
     Ok(())
@@ -156,11 +172,11 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
 
 fn demo_all() -> Result<()> {
     let extracted_sdocx_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
+        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
         "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
+        // "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
+        // "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
+        // "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
         "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
         "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
@@ -172,7 +188,8 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
         "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930",
         "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957",
-        "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837",
+        // "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837",
+        "/home/alex/projects/re/sdocx/sample_docs/Note replay_260304_170858",
     ];
 
     for path in extracted_sdocx_paths {

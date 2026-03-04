@@ -20,12 +20,18 @@ pub struct CheckedBitfield {
     checked: u32,
 }
 
+impl<I: Into<u32>> From<I> for CheckedBitfield {
+    fn from(value: I) -> CheckedBitfield {
+        CheckedBitfield {
+            bits: value.into(),
+            checked: 0,
+        }
+    }
+}
+
 impl CheckedBitfield {
     pub fn try_parse(stream: &mut impl ByteStreamLe) -> Result<CheckedBitfield, ReadBitfieldError> {
-        Ok(CheckedBitfield {
-            bits: stream.read_variable_length_bitfield()?,
-            checked: 0,
-        })
+        stream.read_variable_length_bitfield().map(From::from)
     }
 
     pub const fn clear(&mut self) {

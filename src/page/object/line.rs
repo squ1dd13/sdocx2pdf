@@ -1,11 +1,10 @@
-use super::ObjectBase;
 use crate::{
     byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
     impl_try_from_for_optional_from,
     page::{
         Point, Rect,
         object::{
-            HasObjectBase,
+            base::{HasObjectBase, ObjectBase},
             header::{ObjectHeader, ObjectHeaderError},
             shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{Path, PathParseError},

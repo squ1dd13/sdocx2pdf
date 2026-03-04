@@ -7,7 +7,7 @@ use crate::{
     page::{
         Rect,
         object::{
-            HasObjectBase, ObjectBase,
+            base::{HasObjectBase, ObjectBase},
             header::{ObjectHeader, ObjectHeaderError},
             shape::{InvalidBorderTypeError, Shape, ShapeParseError},
         },

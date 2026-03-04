@@ -7,7 +7,7 @@ use crate::{
     page::{
         Point, Rect,
         object::{
-            HasObjectBase, ObjectBase,
+            base::{HasObjectBase, ObjectBase},
             header::{ObjectHeader, ObjectHeaderError},
             shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
@@ -628,7 +628,7 @@ impl Shape {
         unpack_field_flags!(field_flags, {
             0 => text_common: text_core::Common::try_parse_with_version(
                 &mut stream,
-                shape_base.object_base.format_version,
+                shape_base.object_base().format_version,
             )?;
 
             1 => text_area_type: stream.read_u8()?.try_into()?;

@@ -1,4 +1,3 @@
-use super::ObjectBase;
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
@@ -9,7 +8,7 @@ use crate::{
     page::{
         Point,
         object::{
-            HasObjectBase, ObjectBaseParseError,
+            base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
             header::{ObjectHeader, ObjectHeaderError},
             shared::{
                 ColourType, GradientColour, GradientType, InvalidColourTypeError,
@@ -271,7 +270,7 @@ pub enum ShapeBaseParseError {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ShapeBase {
-    pub object_base: ObjectBase,
+    object_base: ObjectBase,
 
     line_colour_effect: Option<LineColourEffect>,
     line_style_effect: Option<LineStyleEffect>,

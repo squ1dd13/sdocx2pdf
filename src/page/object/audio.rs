@@ -7,7 +7,7 @@ use crate::{
         ByteStreamLe, ExactSizedStream, ReadStringError, TryParse, UnfinishedParsingError,
     },
     page::object::{
-        HasObjectBase, ObjectBase, ObjectBaseParseError,
+        base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
         header::{ObjectHeader, ObjectHeaderError},
     },
     unpack_bool_flag, unpack_field_flags,
