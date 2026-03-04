@@ -9,7 +9,7 @@ use crate::{
         object::{
             HasObjectBase, ObjectBase,
             header::{ObjectHeader, ObjectHeaderError},
-            shape::{BorderType, InvalidBorderTypeError, ShapeObject, ShapeParseError},
+            shape::{BorderType, InvalidBorderTypeError, Shape, ShapeParseError},
         },
     },
     unpack_field_flags,
@@ -17,7 +17,7 @@ use crate::{
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum ImageObjectParseError {
+pub enum ImageParseError {
     Io(#[from] io::Error),
     Shape(#[from] ShapeParseError),
     Header(#[from] ObjectHeaderError),
@@ -26,15 +26,15 @@ pub enum ImageObjectParseError {
 }
 
 #[derive(Debug)]
-pub struct ImageObject {
-    shape: ShapeObject,
+pub struct Image {
+    shape: Shape,
 }
 
-impl<R: Read + Seek> TryParse<R> for ImageObject {
-    type ParseError = ImageObjectParseError;
+impl<R: Read + Seek> TryParse<R> for Image {
+    type ParseError = ImageParseError;
 
-    fn try_parse(stream: &mut R) -> Result<ImageObject, ImageObjectParseError> {
-        let mut shape = ShapeObject::try_parse_as_base(stream)?;
+    fn try_parse(stream: &mut R) -> Result<Image, ImageParseError> {
+        let mut shape = Shape::try_parse_as_base(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 3)?;
 
@@ -81,11 +81,11 @@ impl<R: Read + Seek> TryParse<R> for ImageObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(ImageObject { shape })
+        Ok(Image { shape })
     }
 }
 
-impl HasObjectBase for ImageObject {
+impl HasObjectBase for Image {
     fn object_base(&self) -> &ObjectBase {
         self.shape.object_base()
     }

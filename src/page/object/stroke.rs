@@ -274,7 +274,7 @@ pub enum StrokeParseError {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct StrokeObject {
+pub struct Stroke {
     object_base: ObjectBase,
 
     is_curve_enabled: bool,
@@ -309,10 +309,10 @@ pub struct StrokeObject {
     pen_repeat_distance: f32,
 }
 
-impl<R: Read + Seek> TryParse<R> for StrokeObject {
+impl<R: Read + Seek> TryParse<R> for Stroke {
     type ParseError = StrokeParseError;
 
-    fn try_parse(stream: &mut R) -> Result<StrokeObject, StrokeParseError> {
+    fn try_parse(stream: &mut R) -> Result<Stroke, StrokeParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 1)?;
@@ -383,7 +383,7 @@ impl<R: Read + Seek> TryParse<R> for StrokeObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(StrokeObject {
+        Ok(Stroke {
             object_base,
             is_curve_enabled,
             is_replay_only_enabled,
@@ -416,7 +416,7 @@ impl<R: Read + Seek> TryParse<R> for StrokeObject {
     }
 }
 
-impl HasObjectBase for StrokeObject {
+impl HasObjectBase for Stroke {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }

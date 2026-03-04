@@ -32,7 +32,7 @@ impl_try_from_for_optional_from!(ConnectorType, u8, from_u8, pub InvalidConnecto
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum LineObjectParseError {
+pub enum LineParseError {
     Io(#[from] std::io::Error),
     Base(#[from] ShapeBaseParseError),
     Header(#[from] ObjectHeaderError),
@@ -43,7 +43,7 @@ pub enum LineObjectParseError {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct LineObject {
+pub struct Line {
     shape_base: ShapeBase,
     connector_type: ConnectorType,
     start_direction: u8,
@@ -59,10 +59,10 @@ pub struct LineObject {
     path: Option<Path>,
 }
 
-impl<R: Read + Seek> TryParse<R> for LineObject {
-    type ParseError = LineObjectParseError;
+impl<R: Read + Seek> TryParse<R> for Line {
+    type ParseError = LineParseError;
 
-    fn try_parse(stream: &mut R) -> Result<LineObject, LineObjectParseError> {
+    fn try_parse(stream: &mut R) -> Result<Line, LineParseError> {
         let shape_base = ShapeBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 8)?;
@@ -91,7 +91,7 @@ impl<R: Read + Seek> TryParse<R> for LineObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(LineObject {
+        Ok(Line {
             shape_base,
             connector_type,
             start_direction,
@@ -109,7 +109,7 @@ impl<R: Read + Seek> TryParse<R> for LineObject {
     }
 }
 
-impl HasObjectBase for LineObject {
+impl HasObjectBase for Line {
     fn object_base(&self) -> &ObjectBase {
         self.shape_base.object_base()
     }

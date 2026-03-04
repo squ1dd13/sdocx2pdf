@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum VoiceObjectParseError {
+pub enum AudioParseError {
     Io(#[from] io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
@@ -31,7 +31,7 @@ pub enum VoiceObjectParseError {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct VoiceObject {
+pub struct Audio {
     object_base: ObjectBase,
 
     is_recorded: bool,
@@ -42,10 +42,10 @@ pub struct VoiceObject {
     attached_file_id: Option<u32>,
 }
 
-impl<R: Read + Seek> TryParse<R> for VoiceObject {
-    type ParseError = VoiceObjectParseError;
+impl<R: Read + Seek> TryParse<R> for Audio {
+    type ParseError = AudioParseError;
 
-    fn try_parse(stream: &mut R) -> Result<VoiceObject, VoiceObjectParseError> {
+    fn try_parse(stream: &mut R) -> Result<Audio, AudioParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 10)?;
@@ -58,16 +58,16 @@ impl<R: Read + Seek> TryParse<R> for VoiceObject {
             0 => attached_file_id: stream.read_u32_le()?;
 
             1 => title:
-                stream.read_short_u16_string().map_err(VoiceObjectParseError::Title)?;
+                stream.read_short_u16_string().map_err(AudioParseError::Title)?;
 
             2 => play_time:
-                stream.read_short_u16_string().map_err(VoiceObjectParseError::PlayTime)?;
+                stream.read_short_u16_string().map_err(AudioParseError::PlayTime)?;
         });
 
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(VoiceObject {
+        Ok(Audio {
             object_base,
             is_recorded,
             title,
@@ -77,7 +77,7 @@ impl<R: Read + Seek> TryParse<R> for VoiceObject {
     }
 }
 
-impl HasObjectBase for VoiceObject {
+impl HasObjectBase for Audio {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }

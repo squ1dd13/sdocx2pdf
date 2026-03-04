@@ -7,14 +7,14 @@ use crate::{
     page::object::{
         HasObjectBase, ObjectBase,
         header::{ObjectHeader, ObjectHeaderError},
-        shape::{BorderType, InvalidBorderTypeError, ShapeObject, ShapeParseError},
+        shape::{BorderType, InvalidBorderTypeError, Shape, ShapeParseError},
     },
     unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum TextObjectParseError {
+pub enum TextParseError {
     Io(#[from] io::Error),
     Shape(#[from] ShapeParseError),
     Header(#[from] ObjectHeaderError),
@@ -23,15 +23,15 @@ pub enum TextObjectParseError {
 }
 
 #[derive(Debug)]
-pub struct TextObject {
-    shape: ShapeObject,
+pub struct Text {
+    shape: Shape,
 }
 
-impl<R: Read + Seek> TryParse<R> for TextObject {
-    type ParseError = TextObjectParseError;
+impl<R: Read + Seek> TryParse<R> for Text {
+    type ParseError = TextParseError;
 
-    fn try_parse(stream: &mut R) -> Result<TextObject, TextObjectParseError> {
-        let mut shape = ShapeObject::try_parse_as_base(stream)?;
+    fn try_parse(stream: &mut R) -> Result<Text, TextParseError> {
+        let mut shape = Shape::try_parse_as_base(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 2)?;
 
@@ -50,11 +50,11 @@ impl<R: Read + Seek> TryParse<R> for TextObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(TextObject { shape })
+        Ok(Text { shape })
     }
 }
 
-impl HasObjectBase for TextObject {
+impl HasObjectBase for Text {
     fn object_base(&self) -> &ObjectBase {
         self.shape.object_base()
     }

@@ -5,7 +5,7 @@ use crate::{
         TryParse, UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,
-    page::object::text::TextObject,
+    page::object::text::Text,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
@@ -247,8 +247,8 @@ pub struct NoteDoc {
     page_horizontal_padding: u32,
     page_vertical_padding: u32,
     min_format_version: u32,
-    title_text: TextObject,
-    body_text: TextObject,
+    title_text: Text,
+    body_text: Text,
     metadata: NoteDocMetadata,
     template_uri: Option<String>,
     last_edited_page_index: Option<u32>,
@@ -295,7 +295,7 @@ impl NoteDoc {
         let title_text = {
             let mut stream = stream.take_exclusive_length_prefixed()?;
 
-            let text = TextObject::try_parse(&mut stream)?;
+            let text = Text::try_parse(&mut stream)?;
             stream.ensure_eof()?;
 
             text
@@ -304,7 +304,7 @@ impl NoteDoc {
         let body_text = {
             let mut stream = stream.take_exclusive_length_prefixed()?;
 
-            let text = TextObject::try_parse(&mut stream)?;
+            let text = Text::try_parse(&mut stream)?;
             stream.ensure_eof()?;
 
             text

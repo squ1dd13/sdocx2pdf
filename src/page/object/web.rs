@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum WebObjectParseError {
+pub enum WebParseError {
     Io(#[from] std::io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
@@ -33,7 +33,7 @@ pub enum WebObjectParseError {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct WebObject {
+pub struct Web {
     object_base: ObjectBase,
 
     attached_html_file_id: Option<u32>,
@@ -50,10 +50,10 @@ pub struct WebObject {
     view_type: Option<u32>,
 }
 
-impl<R: Read + Seek> TryParse<R> for WebObject {
-    type ParseError = WebObjectParseError;
+impl<R: Read + Seek> TryParse<R> for Web {
+    type ParseError = WebParseError;
 
-    fn try_parse(stream: &mut R) -> Result<WebObject, WebObjectParseError> {
+    fn try_parse(stream: &mut R) -> Result<Web, WebParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 13)?;
@@ -63,9 +63,9 @@ impl<R: Read + Seek> TryParse<R> for WebObject {
         unpack_field_flags!(field_flags, {
             0 => attached_html_file_id: stream.read_u32_le()?;
             1 => thumbnail_file_id: stream.read_u32_le()?;
-            2 => body: stream.read_short_u16_string().map_err(WebObjectParseError::Body)?;
-            3 => title: stream.read_short_u16_string().map_err(WebObjectParseError::Title)?;
-            4 => uri: stream.read_short_u16_string().map_err(WebObjectParseError::Uri)?;
+            2 => body: stream.read_short_u16_string().map_err(WebParseError::Body)?;
+            3 => title: stream.read_short_u16_string().map_err(WebParseError::Title)?;
+            4 => uri: stream.read_short_u16_string().map_err(WebParseError::Uri)?;
         });
 
         let image_type_id = stream.read_u32_le()?;
@@ -78,7 +78,7 @@ impl<R: Read + Seek> TryParse<R> for WebObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(WebObject {
+        Ok(Web {
             object_base,
             attached_html_file_id,
             thumbnail_file_id,
@@ -92,7 +92,7 @@ impl<R: Read + Seek> TryParse<R> for WebObject {
     }
 }
 
-impl HasObjectBase for WebObject {
+impl HasObjectBase for Web {
     fn object_base(&self) -> &ObjectBase {
         &self.object_base
     }

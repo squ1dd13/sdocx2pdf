@@ -4,14 +4,14 @@ use crate::{
     page::{
         Point, Rect,
         object::{
-            image::{ImageObject, ImageObjectParseError},
-            line::{LineObject, LineObjectParseError},
+            audio::{Audio, AudioParseError},
+            image::{Image, ImageParseError},
+            line::{Line, LineParseError},
             painting::{Painting, PaintingParseError},
-            shape::{ShapeObject, ShapeParseError},
-            stroke::{StrokeObject, StrokeParseError},
-            text::{TextObject, TextObjectParseError},
-            voice::{VoiceObject, VoiceObjectParseError},
-            web::{WebObject, WebObjectParseError},
+            shape::{Shape, ShapeParseError},
+            stroke::{Stroke, StrokeParseError},
+            text::{Text, TextParseError},
+            web::{Web, WebParseError},
         },
     },
 };
@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek};
 use thiserror::Error;
 
+mod audio;
 mod header;
 mod image;
 mod line;
@@ -32,7 +33,6 @@ mod shared;
 mod stroke;
 pub mod text;
 mod text_core;
-mod voice;
 mod web;
 
 #[derive(Debug, Default)]
@@ -400,14 +400,14 @@ impl HasObjectBase for OpaqueObject {
 pub enum DocObjectParseError {
     Io(#[from] std::io::Error),
 
-    Image(#[from] ImageObjectParseError),
-    Line(#[from] LineObjectParseError),
+    Image(#[from] ImageParseError),
+    Line(#[from] LineParseError),
     Painting(#[from] PaintingParseError),
     Shape(#[from] ShapeParseError),
     Stroke(#[from] StrokeParseError),
-    Text(#[from] TextObjectParseError),
-    Voice(#[from] VoiceObjectParseError),
-    Web(#[from] WebObjectParseError),
+    Text(#[from] TextParseError),
+    Voice(#[from] AudioParseError),
+    Web(#[from] WebParseError),
 
     Opaque(#[from] OpaqueObjectParseError),
 
@@ -418,25 +418,25 @@ pub enum DocObjectParseError {
 #[derive(Debug)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
-    Stroke(Box<StrokeObject>),
+    Stroke(Box<Stroke>),
 
-    /// `WCon_ObjectTextBoxOrImage` (variant 1) extends `WCon_ObjectShape` (`Shape`)
-    Text(Box<TextObject>),
+    /// `WCon_ObjectTextBoxOrImage` (my name; variant 1) extends `WCon_ObjectShape` (`Shape`)
+    Text(Box<Text>),
 
-    /// `WCon_ObjectTextBoxOrImage` (variant 0) extends `WCon_ObjectShape` (`Shape`)
-    Image(Box<ImageObject>),
+    /// `WCon_ObjectTextBoxOrImage` (my name; variant 0) extends `WCon_ObjectShape` (`Shape`)
+    Image(Box<Image>),
 
     /// `WCon_ObjectContainer`; extends `WCon_ObjectBase`
     Container(OpaqueObject),
 
     /// `WCon_ObjectShape`; extends `WCon_ObjectShapeBase`, which extends `WCon_ObjectBase`
-    Shape(Box<ShapeObject>),
+    Shape(Box<Shape>),
 
     /// `WCon_ObjectLine`; extends `WCon_ObjectShapeBase` (see `Shape`)
-    Line(Box<LineObject>),
+    Line(Box<Line>),
 
     /// `WCon_ObjectVoice`; extends `WCon_ObjectBase`
-    Voice(Box<VoiceObject>),
+    Audio(Box<Audio>),
 
     /// `WCon_ObjectFormula`; extends `WCon_ObjectBase`
     Formula(OpaqueObject),
@@ -445,7 +445,7 @@ pub enum DocObject {
     Table(OpaqueObject),
 
     /// `WCon_ObjectWeb`; extends `WCon_ObjectBase`
-    Web(Box<WebObject>),
+    Web(Box<Web>),
 
     /// `WCon_ObjectPainting`; extends `WCon_ObjectBase`
     Painting(Box<Painting>),
@@ -477,9 +477,9 @@ impl DocObject {
             1 => DocObject::Stroke(Box::new(TryParse::try_parse(stream)?)),
             2 => DocObject::Text(Box::new(TryParse::try_parse(stream)?)),
             3 => DocObject::Image(Box::new(TryParse::try_parse(stream)?)),
-            7 => DocObject::Shape(Box::new(ShapeObject::try_parse_as_final(stream)?)),
+            7 => DocObject::Shape(Box::new(Shape::try_parse_as_final(stream)?)),
             8 => DocObject::Line(Box::new(TryParse::try_parse(stream)?)),
-            10 => DocObject::Voice(Box::new(TryParse::try_parse(stream)?)),
+            10 => DocObject::Audio(Box::new(TryParse::try_parse(stream)?)),
             13 => DocObject::Web(Box::new(TryParse::try_parse(stream)?)),
             14 => DocObject::Painting(Box::new(TryParse::try_parse(stream)?)),
 
@@ -529,7 +529,7 @@ impl DocObject {
             DocObject::Stroke(stroke_object) => stroke_object.object_base(),
             DocObject::Text(text_object) => text_object.object_base(),
             DocObject::Image(image_object) => image_object.object_base(),
-            DocObject::Voice(voice_object) => voice_object.object_base(),
+            DocObject::Audio(voice_object) => voice_object.object_base(),
             DocObject::Web(web_object) => web_object.object_base(),
             DocObject::Painting(painting_object) => painting_object.object_base(),
 

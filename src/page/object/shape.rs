@@ -564,7 +564,7 @@ pub enum ShapeParseError {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct ShapeObject {
+pub struct Shape {
     shape_base: ShapeBase,
     pub data: Data,
     pen: Pen,
@@ -578,11 +578,11 @@ pub struct ShapeObject {
     unk_16: Option<u16>,
 }
 
-impl ShapeObject {
+impl Shape {
     fn try_parse_inner<R: Read + Seek>(
         stream: &mut R,
         is_shape_only: bool,
-    ) -> Result<ShapeObject, ShapeParseError> {
+    ) -> Result<Shape, ShapeParseError> {
         let shape_base = ShapeBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 7)?;
@@ -669,7 +669,7 @@ impl ShapeObject {
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
 
-        Ok(ShapeObject {
+        Ok(Shape {
             shape_base,
             data: Data {
                 shape_type,
@@ -726,20 +726,16 @@ impl ShapeObject {
         })
     }
 
-    pub fn try_parse_as_final<R: Read + Seek>(
-        stream: &mut R,
-    ) -> Result<ShapeObject, ShapeParseError> {
-        ShapeObject::try_parse_inner(stream, true)
+    pub fn try_parse_as_final<R: Read + Seek>(stream: &mut R) -> Result<Shape, ShapeParseError> {
+        Shape::try_parse_inner(stream, true)
     }
 
-    pub fn try_parse_as_base<R: Read + Seek>(
-        stream: &mut R,
-    ) -> Result<ShapeObject, ShapeParseError> {
-        ShapeObject::try_parse_inner(stream, false)
+    pub fn try_parse_as_base<R: Read + Seek>(stream: &mut R) -> Result<Shape, ShapeParseError> {
+        Shape::try_parse_inner(stream, false)
     }
 }
 
-impl HasObjectBase for ShapeObject {
+impl HasObjectBase for Shape {
     fn object_base(&self) -> &ObjectBase {
         self.shape_base.object_base()
     }
