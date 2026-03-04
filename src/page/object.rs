@@ -6,6 +6,7 @@ use crate::{
         object::{
             image::{ImageObject, ImageObjectParseError},
             line::{LineObject, LineObjectParseError},
+            painting::{Painting, PaintingParseError},
             shape::{ShapeObject, ShapeParseError},
             stroke::{StrokeObject, StrokeParseError},
             text::{TextObject, TextObjectParseError},
@@ -24,6 +25,7 @@ use thiserror::Error;
 mod header;
 mod image;
 mod line;
+mod painting;
 mod shape;
 mod shape_base;
 mod shared;
@@ -397,8 +399,10 @@ impl HasObjectBase for OpaqueObject {
 #[error(transparent)]
 pub enum DocObjectParseError {
     Io(#[from] std::io::Error),
+
     Image(#[from] ImageObjectParseError),
     Line(#[from] LineObjectParseError),
+    Painting(#[from] PaintingParseError),
     Shape(#[from] ShapeParseError),
     Stroke(#[from] StrokeParseError),
     Text(#[from] TextObjectParseError),
@@ -444,7 +448,7 @@ pub enum DocObject {
     Web(Box<WebObject>),
 
     /// `WCon_ObjectPainting`; extends `WCon_ObjectBase`
-    Painting(OpaqueObject),
+    Painting(Box<Painting>),
 
     /// `WCon_ObjectLink`; extends `WCon_ObjectBase`
     Link(OpaqueObject),
@@ -470,13 +474,14 @@ impl DocObject {
         let stream = &mut stream;
 
         Ok(match object_type {
-            8 => DocObject::Line(Box::new(TryParse::try_parse(stream)?)),
-            7 => DocObject::Shape(Box::new(ShapeObject::try_parse_as_final(stream)?)),
             1 => DocObject::Stroke(Box::new(TryParse::try_parse(stream)?)),
             2 => DocObject::Text(Box::new(TryParse::try_parse(stream)?)),
             3 => DocObject::Image(Box::new(TryParse::try_parse(stream)?)),
+            7 => DocObject::Shape(Box::new(ShapeObject::try_parse_as_final(stream)?)),
+            8 => DocObject::Line(Box::new(TryParse::try_parse(stream)?)),
             10 => DocObject::Voice(Box::new(TryParse::try_parse(stream)?)),
             13 => DocObject::Web(Box::new(TryParse::try_parse(stream)?)),
+            14 => DocObject::Painting(Box::new(TryParse::try_parse(stream)?)),
 
             _ => {
                 let object = OpaqueObject::try_parse(stream)?;
@@ -488,10 +493,6 @@ impl DocObject {
                     }),
                     11 => DocObject::Formula({
                         eprintln!("Warning: Formulas are not yet supported");
-                        object
-                    }),
-                    14 => DocObject::Painting({
-                        eprintln!("Warning: Paintings are not yet supported");
                         object
                     }),
                     17 => DocObject::Link({
@@ -530,11 +531,11 @@ impl DocObject {
             DocObject::Image(image_object) => image_object.object_base(),
             DocObject::Voice(voice_object) => voice_object.object_base(),
             DocObject::Web(web_object) => web_object.object_base(),
+            DocObject::Painting(painting_object) => painting_object.object_base(),
 
             DocObject::Container(object)
             | DocObject::Formula(object)
             | DocObject::Table(object)
-            | DocObject::Painting(object)
             | DocObject::Link(object)
             | DocObject::Maths(object)
             | DocObject::Plot(object)
