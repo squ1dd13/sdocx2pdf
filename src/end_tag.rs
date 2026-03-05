@@ -1,6 +1,8 @@
-use crate::{AppVersion, byte_stream::ByteStreamLe};
+use crate::{AppVersion, byte_stream::ByteStreamLe, impl_try_from_for_optional_from};
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
 use std::io::Seek;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,30 +99,71 @@ impl EncryptionInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, FromPrimitive)]
 #[allow(dead_code)]
-enum PagingType {
-    /// Traditional pages.
-    Paged,
+pub enum PageModel {
+    /// `PageMode.LIST`
+    Paged = 0,
 
-    /// Appears pageless to the user. Implemented by putting everything on one large page.
-    Pageless,
-
-    Unknown(u16),
+    /// `PageMode.SINGLE`
+    Pageless = 1,
 }
 
-impl PagingType {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<PagingType> {
-        Ok(match stream.read_u16_le()? {
-            0 => PagingType::Paged,
-            1 => PagingType::Pageless,
-            x => {
-                eprintln!("Found unknown paging type {x}. This shouldn't happen!");
-                PagingType::Unknown(x)
-            }
-        })
-    }
+impl_try_from_for_optional_from!(PageModel, u16, from_u16, pub InvalidPageModelError);
+
+#[derive(Debug, FromPrimitive)]
+pub enum DocumentType {
+    /// `UNLOCKED_DOC`
+    UnlockedDoc = 0,
+    /// `LOCKED_SDOC`
+    LockedSdoc = 1,
+    /// `LOCKED_SPD`
+    LockedSpd = 2,
+    /// `LOCKED_SNB`
+    LockedSnb = 3,
+    /// `LOCKED_TMEMO`
+    LockedTmemo = 4,
+    /// `LOCKED_WDOC`
+    LockedWdoc = 5,
 }
+
+impl_try_from_for_optional_from!(DocumentType, u16, from_u16, pub InvalidDocumentTypeError);
+
+#[derive(Debug, FromPrimitive)]
+pub enum TextDirection {
+    /// `TEXT_DIRECTION_LTR`
+    LeftToRight = 0,
+    /// `TEXT_DIRECTION_RTL`
+    RightToLeft = 1,
+    /// `TEXT_DIRECTION_DEFAULT`
+    Default = 2,
+}
+
+impl_try_from_for_optional_from!(TextDirection, u32, from_u32, pub InvalidTextDirectionError);
+
+#[derive(Debug, FromPrimitive)]
+pub enum BackgroundTheme {
+    /// `THEME_LIGHT`
+    Light = 0,
+    /// `THEME_DARK`
+    Dark = 1,
+    /// `THEME_DEFAULT`
+    Default = 2,
+}
+
+impl_try_from_for_optional_from!(BackgroundTheme, u32, from_u32, pub InvalidBackgroundThemeError);
+
+#[derive(Debug, FromPrimitive)]
+pub enum Orientation {
+    /// `Orientation.PORTRAIT`
+    Portrait = 0,
+    /// `Orientation.LANDSCAPE`
+    Landscape = 1,
+    /// `Orientation.LANDSCAPE_NEW`
+    LandscapeNew = 2,
+}
+
+impl_try_from_for_optional_from!(Orientation, u32, from_u32, pub InvalidOrientationError);
 
 /// The structure in `end_tag.bin`.
 #[derive(Debug)]
@@ -140,18 +183,18 @@ pub struct ModelEndTag {
     min_format_version: u32,
     created_time: DateTime<Utc>,
     last_viewed_page_index: u32,
-    page_model: PagingType,
-    document_type: u16,
+    page_model: PageModel,
+    document_type: DocumentType,
     owner_id: String,
     encryption_info: Option<EncryptionInfo>,
     display_created_time: DateTime<Utc>,
     display_modified_time: DateTime<Utc>,
     last_recognised_data_modified_time: DateTime<Utc>,
     fixed_font: String,
-    fixed_text_direction: u32,
-    fixed_background_theme: u32,
+    fixed_text_direction: TextDirection,
+    fixed_background_theme: BackgroundTheme,
     server_check_point: i64,
-    new_orientation: u32,
+    new_orientation: Orientation,
     min_unknown_version: u32,
     app_custom_data: String,
 }
@@ -193,8 +236,8 @@ impl ModelEndTag {
         let created_time = stream.read_timestamp()?;
         let last_viewed_page_index = stream.read_u32_le()?;
 
-        let page_model = PagingType::try_parse(stream)?;
-        let document_type = stream.read_u16_le()?;
+        let page_model: PageModel = stream.read_u16_le()?.try_into()?;
+        let document_type: DocumentType = stream.read_u16_le()?.try_into()?;
 
         let owner_id = stream.read_short_u16_string()?;
 
@@ -214,12 +257,12 @@ impl ModelEndTag {
         let last_recognised_data_modified_time = stream.read_timestamp()?;
 
         let fixed_font = stream.read_short_u16_string()?;
-        let fixed_text_direction = stream.read_u32_le()?;
-        let fixed_background_theme = stream.read_u32_le()?;
+        let fixed_text_direction: TextDirection = stream.read_u32_le()?.try_into()?;
+        let fixed_background_theme: BackgroundTheme = stream.read_u32_le()?.try_into()?;
 
         let server_check_point = stream.read_i64_le()?;
 
-        let new_orientation = stream.read_u32_le()?;
+        let new_orientation: Orientation = stream.read_u32_le()?.try_into()?;
         let min_unknown_version = stream.read_u32_le()?;
 
         let app_custom_data = stream.read_long_u16_string()?;

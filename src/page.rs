@@ -1,6 +1,7 @@
 use crate::{
     OpaqueBytes,
     byte_stream::{ByteStreamLe, ExactSizedStream},
+    impl_try_from_for_optional_from,
     page::{
         header::{CanvasCacheEntry, CustomPageObject, PdfDataItem},
         object::DocObject,
@@ -8,6 +9,8 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
+use num::FromPrimitive;
+use num_derive::FromPrimitive;
 use std::io::{self, Read, Seek, SeekFrom};
 
 mod header;
@@ -204,6 +207,66 @@ impl Layer {
     }
 }
 
+#[derive(Debug, FromPrimitive)]
+pub enum TemplateType {
+    /// `TYPE_NONE`
+    None = 0,
+    /// `TYPE_NARROW_LINE`
+    NarrowLine = 1,
+    /// `TYPE_MEDIUM_LINE`
+    MediumLine = 2,
+    /// `TYPE_WIDE_LINE`
+    WideLine = 3,
+    /// `TYPE_NARROW_GRID`
+    NarrowGrid = 4,
+    /// `TYPE_MEDIUM_GRID`
+    MediumGrid = 5,
+    /// `TYPE_WIDE_GRID`
+    WideGrid = 6,
+    /// `TYPE_NARROW_DOT`
+    NarrowDot = 7,
+    /// `TYPE_MEDIUM_DOT`
+    MediumDot = 8,
+    /// `TYPE_WIDE_DOT`
+    WideDot = 9,
+    /// `TYPE_TODO`
+    Todo = 10,
+    /// `TYPE_OXFORD_PAPER`
+    OxfordPaper = 11,
+    /// `TYPE_CUSTOM`
+    Custom = 12,
+    /// `TYPE_WEEKLY`
+    Weekly = 13,
+    /// `TYPE_MONTHLY`
+    Monthly = 14,
+    /// `TYPE_MANUSCRIPT`
+    Manuscript = 15,
+    /// `TYPE_PDF`
+    Pdf = 16,
+}
+
+impl_try_from_for_optional_from!(TemplateType, u32, from_u32, pub InvalidTemplateTypeError);
+
+#[derive(Debug, FromPrimitive, Default)]
+pub enum BackgroundImageMode {
+    /// `BACKGROUND_IMAGE_MODE_CENTER`
+    #[default]
+    Centre = 0,
+    /// `BACKGROUND_IMAGE_MODE_STRETCH`
+    Stretch = 1,
+    /// `BACKGROUND_IMAGE_MODE_FIT`
+    Fit = 2,
+    /// `BACKGROUND_IMAGE_MODE_TILE`
+    Tile = 3,
+}
+
+impl_try_from_for_optional_from!(
+    BackgroundImageMode,
+    u32,
+    from_u32,
+    pub InvalidBackgroundImageModeError
+);
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct Page {
@@ -223,12 +286,12 @@ pub struct Page {
     tag_list: Option<Vec<String>>,
     template_uri: Option<String>,
     background_image_id: Option<i32>,
-    background_image_mode: u32,
+    background_image_mode: BackgroundImageMode,
     background_colour: [u8; 4],
     background_width: u32,
     background_rotation: u32,
     pdf_data_items: Option<Vec<PdfDataItem>>,
-    template_type: Option<u32>,
+    template_type: Option<TemplateType>,
     canvas_cache_map: Vec<(u32, CanvasCacheEntry)>,
     imported_data_height: Option<u32>,
     theme: Option<u32>,
@@ -315,10 +378,12 @@ impl Page {
             .then(|| stream.read_i32_le())
             .transpose()?;
 
-        let background_image_mode = (field_check_flags & 16 != 0)
+        let background_image_mode: BackgroundImageMode = (field_check_flags & 16 != 0)
             .then(|| stream.read_u32_le())
             .transpose()?
-            .unwrap_or(0);
+            .map(TryInto::try_into)
+            .transpose()?
+            .unwrap_or_default();
 
         let background_colour = (field_check_flags & 32 != 0)
             .then(|| stream.read_u32_le())
@@ -349,8 +414,10 @@ impl Page {
             None
         };
 
-        let template_type = (field_check_flags & 512 != 0)
+        let template_type: Option<TemplateType> = (field_check_flags & 512 != 0)
             .then(|| stream.read_u32_le())
+            .transpose()?
+            .map(TryInto::try_into)
             .transpose()?;
 
         // The app uses a `LinkedHashMap` here, so entry order must be important.
@@ -382,7 +449,9 @@ impl Page {
 
         let theme = (field_check_flags & 4096 != 0)
             .then(|| stream.read_u32_le())
-            .transpose()?;
+            .transpose()?
+            // This gets skipped by the libs.
+            .inspect(|v| eprintln!("Warning: Read theme value {v} of unknown meaning"));
 
         let recognised_data_modified_time = (field_check_flags & 32768 != 0)
             .then(|| stream.read_timestamp())
