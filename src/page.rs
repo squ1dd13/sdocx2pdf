@@ -479,8 +479,6 @@ impl Page {
 
             for _ in 0..custom_object_count {
                 custom_objects.push(CustomPageObject::try_parse(stream)?);
-
-                println!("co: {:#?}", custom_objects.last().unwrap());
             }
         }
 
