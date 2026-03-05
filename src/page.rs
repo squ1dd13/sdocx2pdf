@@ -1,6 +1,6 @@
 use crate::{
     OpaqueBytes,
-    byte_stream::{ByteStreamLe, ExactSizedStream},
+    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse},
     impl_try_from_for_optional_from,
     page::{
         header::{CanvasCacheEntry, CustomPageObject, PdfDataItem},
@@ -479,6 +479,8 @@ impl Page {
 
             for _ in 0..custom_object_count {
                 custom_objects.push(CustomPageObject::try_parse(stream)?);
+
+                println!("co: {:#?}", custom_objects.last().unwrap());
             }
         }
 

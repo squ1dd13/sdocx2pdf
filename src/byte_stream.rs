@@ -327,6 +327,17 @@ pub trait ByteStreamLe: Read {
         self.read_u8_string(n_chars)
     }
 
+    /// Reads `n_chars: u32`, then `n_chars` bytes, and returns the UTF-8 decoded result.
+    fn read_long_u8_string(&mut self) -> Result<String, ReadStringError> {
+        let n_chars: usize = self
+            .read_u32_le()
+            .map_err(ReadStringError::SizeIo)?
+            .try_into()
+            .map_err(ReadStringError::SizeConversion)?;
+
+        self.read_u8_string(n_chars)
+    }
+
     /// Reads an `i64` microsecond timestamp and converts it to a `DateTime`.
     fn read_timestamp(&mut self) -> Result<DateTime<Utc>, ReadTimestampError> {
         let value = self.read_i64_le()?;
@@ -483,6 +494,10 @@ macro_rules! _read_size_and_map_inner {
     }};
 }
 
+// fixme: `r_s_a_m` doesn't complain if it finds duplicate keys.
+// We shouldn't really need to check for them, but it would be more correct, and yet another
+// guard against parser bugs...
+
 #[macro_export]
 macro_rules! read_size_and_map {
     ($stream:expr, u8, $kv:expr) => {
@@ -494,7 +509,7 @@ macro_rules! read_size_and_map {
     };
 
     ($stream:expr, u32, $usize_err:expr, $kv:expr) => {
-        $crate::_read_size_and_vec_inner!(
+        $crate::_read_size_and_map_inner!(
             {
                 let count = $stream.read_u32_le()?;
                 count.try_into().map_err(|_| $usize_err(count))?
