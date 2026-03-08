@@ -1,13 +1,18 @@
 use crate::{
-    AppVersion,
-    byte_stream::{ByteStreamLe, TryParse},
-    impl_try_from_for_optional_from,
+    AppVersion, AppVersionParseError,
+    bits::{CheckedBitfield, UnhandledBitsError},
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadStringError, ReadTimestampError, TryParse,
+        UnfinishedParsingError,
+    },
+    context::TryParseWithContext,
+    impl_try_from_for_optional_from, unpack_bool_flag,
 };
 use chrono::{DateTime, Utc};
-use color_eyre::{Result, eyre::eyre};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io::Seek;
+use std::io::{Read, Seek, SeekFrom};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteSdkType {
@@ -36,39 +41,6 @@ impl NoteSdkType {
             NoteSdkType::SamsungSPen => "Document for SAMSUNG S-Pen SDK",
         }
     }
-
-    /// Checks whether the next `block_size` bytes in `stream` ends with an ident string
-    /// that matches `self`.
-    ///
-    /// The returned `bool` is `true` if the ident is successfully read and matches `self`,
-    /// and `false` if the read was successful but the ident doesn't match, or if `block_size`
-    /// is smaller than the length of the expected ident. If the read is successful,
-    /// the string constructed is returned as well.
-    ///
-    /// If `Ok` is returned, `stream` will be at the same position as it was when this method was
-    /// called.
-    fn verify_block_end<T: ByteStreamLe + Seek>(
-        self,
-        stream: &mut T,
-        block_size: usize,
-    ) -> Result<(bool, Option<String>)> {
-        let ident = self.ident();
-
-        let Some(ident_offset) = block_size.checked_sub(ident.len()) else {
-            // The block cannot contain the ident, because it isn't big enough.
-            return Ok((false, None));
-        };
-
-        // Seek to where the start of the ident should be.
-        stream.seek_relative(ident_offset.try_into()?)?;
-
-        let maybe_ident = stream.read_u8_string(ident.len())?;
-
-        // Return to the start of the block.
-        stream.seek_relative(-i64::try_from(block_size)?)?;
-
-        Ok((maybe_ident == ident, Some(maybe_ident)))
-    }
 }
 
 #[derive(Debug)]
@@ -80,24 +52,35 @@ struct EncryptionInfo {
     key: Vec<u8>,
 }
 
-impl EncryptionInfo {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<EncryptionInfo> {
+impl<R: Read> TryParse<R> for EncryptionInfo {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> std::io::Result<EncryptionInfo> {
         Ok(EncryptionInfo {
-            size: stream.read_u32_le()?,
-
+            size: reader.read_u32_le()?,
             salt: {
-                let salt_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8s(salt_size)?
-            },
+                let salt_size: usize = reader
+                    .read_u32_le()?
+                    .try_into()
+                    .map_err(|_| std::io::ErrorKind::InvalidInput)?;
 
+                reader.read_u8s(salt_size)?
+            },
             iv: {
-                let iv_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8s(iv_size)?
-            },
+                let iv_size: usize = reader
+                    .read_u32_le()?
+                    .try_into()
+                    .map_err(|_| std::io::ErrorKind::InvalidInput)?;
 
+                reader.read_u8s(iv_size)?
+            },
             key: {
-                let key_size: usize = stream.read_u32_le()?.try_into()?;
-                stream.read_u8s(key_size)?
+                let key_size: usize = reader
+                    .read_u32_le()?
+                    .try_into()
+                    .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+
+                reader.read_u8s(key_size)?
             },
         })
     }
@@ -168,16 +151,37 @@ pub enum Orientation {
 
 impl_try_from_for_optional_from!(Orientation, u32, from_u32, pub InvalidOrientationError);
 
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum EndTagParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+    Timestamp(#[from] ReadTimestampError),
+    AppVersion(#[from] AppVersionParseError),
+    PageModel(#[from] InvalidPageModelError),
+    DocumentType(#[from] InvalidDocumentTypeError),
+    TextDirection(#[from] InvalidTextDirectionError),
+    BackgroundTheme(#[from] InvalidBackgroundThemeError),
+    Orientation(#[from] InvalidOrientationError),
+    Unfinished(#[from] UnfinishedParsingError),
+
+    #[error("one or more property bits were unhandled")]
+    UnhandledProperty(#[from] UnhandledBitsError),
+
+    #[error("expected ident '{1}', but found '{0}' instead")]
+    WrongIdent(String, &'static str),
+}
+
 /// The structure in `end_tag.bin`.
 #[derive(Debug)]
 #[expect(dead_code)]
-pub struct ModelEndTag {
+pub struct EndTag {
     sdk_type: NoteSdkType,
 
     format_version: u32,
-    note_id: String,
+    note_uuid: String,
     last_modified_time: DateTime<Utc>,
-    property_flags: u32,
+    is_landscape: bool,
     cover_image: String,
     note_width: u32,
     note_height: f32,
@@ -202,84 +206,121 @@ pub struct ModelEndTag {
     app_custom_data: String,
 }
 
-impl ModelEndTag {
-    pub fn try_parse<T: ByteStreamLe + Seek>(
-        stream: &mut T,
-        sdk_type: NoteSdkType,
-    ) -> Result<ModelEndTag> {
-        let tag_size: usize = stream.read_u16_le()?.into();
+impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
+    type ParseError = EndTagParseError;
 
-        // Make sure the tag specifies the SDK type we are expecting.
-        let (ident_matches, ident_found) = sdk_type.verify_block_end(stream, tag_size)?;
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        sdk_type: &NoteSdkType,
+    ) -> Result<EndTag, EndTagParseError> {
+        // First two bytes give the size of the rest of the data.
+        let mut reader = reader.read_u16_le().map(|n| reader.take(n.into()))?;
 
-        let expected_ident = sdk_type.ident();
+        let ident = sdk_type.ident();
 
-        if !ident_matches {
-            return Err(ident_found.map_or_else(
-                || eyre!("Not enough space for ident '{expected_ident}'"),
-                |found| eyre!("Ident '{found}' does not match expected '{expected_ident}'"),
-            ));
+        // `unwrap` is fine because none of the idents come anywhere near even the `i8` limit.
+        let ident_len_i = i64::try_from(ident.len()).unwrap();
+
+        // The file's SDK type is indicated by a string at the end. Before parsing anything
+        // significant, we have to go and find that string to make sure it matches the SDK type we
+        // are trying to parse for.
+        {
+            reader.seek(SeekFrom::End(-ident_len_i))?;
+
+            let mut last_bytes = Vec::with_capacity(ident.len());
+            reader.read_to_end(&mut last_bytes)?;
+
+            if last_bytes != ident.as_bytes() {
+                return Err(EndTagParseError::WrongIdent(
+                    // Waiting for `string_from_utf8_lossy_owned` to be made stable...
+                    String::from_utf8_lossy(&last_bytes).into(),
+                    ident,
+                ));
+            }
+
+            // Go back to the beginning so we can actually parse the tag.
+            reader.seek(SeekFrom::Start(0))?;
         }
 
-        let format_version = stream.read_u32_le()?;
+        let format_version = reader.read_u32_le()?;
+        let note_uuid = reader.read_short_u16_string()?;
+        let last_modified_time = reader.read_timestamp()?;
 
-        let note_id = stream.read_short_u16_string()?;
-        let last_modified_time = stream.read_timestamp()?;
-        let property_flags = stream.read_u32_le()?;
-        let cover_image = stream.read_short_u16_string()?;
+        let is_landscape = {
+            let mut property_flags: CheckedBitfield = reader.read_u32_le()?.into();
+            unpack_bool_flag!(property_flags, 1 => v);
 
-        let note_width = stream.read_u32_le()?;
-        let note_height = stream.read_f32_le()?;
+            property_flags.ensure_none_set_unchecked()?;
 
-        let app_name = stream.read_short_u16_string()?;
-        let app_version = AppVersion::try_parse(stream)?;
-
-        let min_format_version = stream.read_u32_le()?;
-
-        let created_time = stream.read_timestamp()?;
-        let last_viewed_page_index = stream.read_u32_le()?;
-
-        let page_model: PageModel = stream.read_u16_le()?.try_into()?;
-        let document_type: DocumentType = stream.read_u16_le()?.try_into()?;
-
-        let owner_id = stream.read_short_u16_string()?;
-
-        let n_to_skip: i64 = stream.read_u32_le()?.into();
-        stream.seek_relative(n_to_skip)?;
-
-        let encryption_data_size = stream.read_u32_le()?;
-
-        let encryption_info = if encryption_data_size == 0 {
-            None
-        } else {
-            Some(EncryptionInfo::try_parse(stream)?)
+            v
         };
 
-        let display_created_time = stream.read_timestamp()?;
-        let display_modified_time = stream.read_timestamp()?;
-        let last_recognised_data_modified_time = stream.read_timestamp()?;
+        let cover_image = reader.read_short_u16_string()?;
 
-        let fixed_font = stream.read_short_u16_string()?;
-        let fixed_text_direction: TextDirection = stream.read_u32_le()?.try_into()?;
-        let fixed_background_theme: BackgroundTheme = stream.read_u32_le()?.try_into()?;
+        // Notice the two different types here:
+        let note_width = reader.read_u32_le()?;
+        let note_height = reader.read_f32_le()?;
 
-        let server_check_point = stream.read_i64_le()?;
+        let app_name = reader.read_short_u16_string()?;
+        let app_version = AppVersion::try_parse(&mut reader)?;
 
-        let new_orientation: Orientation = stream.read_u32_le()?.try_into()?;
-        let min_unknown_version = stream.read_u32_le()?;
+        let min_format_version = reader.read_u32_le()?;
 
-        let app_custom_data = stream.read_long_u16_string()?;
+        let created_time = reader.read_timestamp()?;
+        let last_viewed_page_index = reader.read_u32_le()?;
 
-        // We know that the real ident and expected ident match, so to seek past the
-        // real ident we can just skip the size of the expected ident.
-        stream.seek_relative(expected_ident.len().try_into()?)?;
+        let page_model: PageModel = reader.read_u16_le()?.try_into()?;
+        let document_type: DocumentType = reader.read_u16_le()?.try_into()?;
 
-        Ok(ModelEndTag {
-            sdk_type,
+        let owner_id = reader.read_short_u16_string()?;
+
+        if let n_to_skip @ 1.. = reader.read_u32_le()? {
+            eprintln!(
+                "Warning: Skipping {n_to_skip} bytes in end tag. There must be something there!"
+            );
+
+            reader.seek_relative(n_to_skip.into())?;
+        }
+
+        if let _encryption_data_size @ 1.. = reader.read_u32_le()? {
+            // Notes are exported unencrypted (usually?). If the encryption data is present, it
+            // could mean that the note is actually encrypted, in which case we won't be able to do
+            // much with it. You could probably get this to happen if you tried to read an end tag
+            // from the app's storage (i.e., not exported).
+            eprintln!(
+                "Warning: Encryption data present, but it shouldn't be if this is an exported file"
+            );
+
+            Some(EncryptionInfo::try_parse(&mut reader)?)
+        } else {
+            None
+        };
+
+        let display_created_time = reader.read_timestamp()?;
+        let display_modified_time = reader.read_timestamp()?;
+        let last_recognised_data_modified_time = reader.read_timestamp()?;
+
+        let fixed_font = reader.read_short_u16_string()?;
+        let fixed_text_direction: TextDirection = reader.read_u32_le()?.try_into()?;
+        let fixed_background_theme: BackgroundTheme = reader.read_u32_le()?.try_into()?;
+
+        let server_check_point = reader.read_i64_le()?;
+
+        let new_orientation: Orientation = reader.read_u32_le()?.try_into()?;
+        let min_unknown_version = reader.read_u32_le()?;
+
+        let app_custom_data = reader.read_long_u16_string()?;
+
+        // Only thing left in our `Take` should be the ident.
+        reader.seek_relative(ident_len_i)?;
+        reader.ensure_eof()?;
+
+        Ok(EndTag {
+            sdk_type: *sdk_type,
             format_version,
-            note_id,
+            note_uuid,
             last_modified_time,
-            property_flags,
+            is_landscape,
             cover_image,
             note_width,
             note_height,
@@ -291,7 +332,7 @@ impl ModelEndTag {
             page_model,
             document_type,
             owner_id,
-            encryption_info,
+            encryption_info: None,
             display_created_time,
             display_modified_time,
             last_recognised_data_modified_time,
