@@ -12,7 +12,6 @@ use crate::{
     },
     read_size_and_vec, unpack_field_flags,
 };
-use color_eyre::eyre::Result;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::io::{Read, Seek};

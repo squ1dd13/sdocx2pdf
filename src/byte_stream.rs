@@ -77,10 +77,25 @@ pub struct Window<T> {
     length: u64,
 }
 
+impl<T> std::fmt::Debug for Window<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Window")
+            .field("local_pos", &self.local_pos)
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Like a `Window<T>`, except that `SeekFrom::Start(0)` and `SeekFrom::End(0)` in a
 /// `BlindWindow<T>` refer respectively to the start and end of the window, as opposed to the
 /// start and end of the underlying `T`.
 pub struct BlindWindow<T>(Window<T>);
+
+impl<T> std::fmt::Debug for BlindWindow<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BlindWindow").field(&self.0).finish()
+    }
+}
 
 impl<T> Window<T> {
     /// Returns a window into `inner` providing access to at most `length` bytes from the current
@@ -414,9 +429,15 @@ pub struct UnfinishedParsingError {
 }
 
 pub trait ExactSizedStream {
+    /// Returns the number of bytes remaining before a read is guaranteed to return EOF.
     fn n_remaining(&self) -> u64;
 
-    fn ensure_eof(&self) -> Result<(), UnfinishedParsingError> {
+    /// Returns an error iff `self.n_remaining() != 0`. This consumes `self` so that it cannot be
+    /// used again.
+    fn ensure_eof(self) -> Result<(), UnfinishedParsingError>
+    where
+        Self: Sized,
+    {
         match self.n_remaining() {
             0 => Ok(()),
             remaining => Err(UnfinishedParsingError { remaining }),

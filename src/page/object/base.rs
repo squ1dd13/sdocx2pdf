@@ -297,8 +297,12 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
 }
 
 impl ObjectBase {
-    pub fn hash(&self) -> [u8; 32] {
+    pub fn compute_hash(&self) -> [u8; 32] {
         let s = format!("{}{}", self.uuid, self.modified_time.timestamp_micros());
         Sha256::digest(s.as_bytes()).into()
+    }
+
+    pub fn uuid(&self) -> &str {
+        &self.uuid
     }
 }

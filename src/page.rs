@@ -3,24 +3,27 @@ use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
         ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, ReadTimestampError,
-        TryParse,
+        TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
     context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
+    media_info::{BoundFile, NoSuchRegisteredFileError},
     page::{
         header::{
             CanvasCacheEntry, CustomPageObject, CustomPageObjectParseError, PdfDataItemParseError,
             PdfPage,
         },
-        object::DocObject,
+        object::{DocObject, DocObjectParseError},
     },
-    read_size_and_vec, unpack_bool_flag, unpack_field_flags,
+    read_size_and_vec, unpack_bool_flag, unpack_bool_flags, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
-use color_eyre::{Result, eyre::eyre};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::{
+    io::{self, Read, Seek, SeekFrom},
+    rc::Rc,
+};
 use thiserror::Error;
 
 mod header;
@@ -86,7 +89,40 @@ impl Rect {
     }
 }
 
-pub type LayerParseError = color_eyre::Report;
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum LayerParseError {
+    Io(#[from] io::Error),
+
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
+    String(#[from] ReadStringError),
+    Timestamp(#[from] ReadTimestampError),
+    Unfinished(#[from] UnfinishedParsingError),
+    NoSuchFile(#[from] NoSuchRegisteredFileError),
+    OpaqueBytes(#[from] OpaqueBytesParseError),
+    DocObject(#[from] DocObjectParseError),
+
+    #[error("failed to read property flags")]
+    PropertyFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more properties were unhandled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
+
+    #[error("failed to read field flags")]
+    FieldFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more field flags were unhandled")]
+    UnhandledField(#[source] UnhandledBitsError),
+
+    #[error("objects with children are not supported (child count = {0})")]
+    ObjectHasChildren(u16),
+
+    #[error("hash mismatch for object {0}")]
+    ObjectHashMismatch(String),
+
+    #[error("too many objects {0}")]
+    TooManyObjects(u32),
+}
 
 #[derive(Debug)]
 #[expect(dead_code)]
@@ -97,12 +133,12 @@ pub struct Layer {
 
     layer_id: u32,
 
-    alpha: u8,
-    background_colour: [u8; 4],
+    alpha: Option<u8>,
+    background_colour: Option<[u8; 4]>,
     name: Option<String>,
     uuid: Option<String>,
     modified_time: Option<DateTime<Utc>>,
-    thumbnail_media_id: Option<u32>,
+    thumbnail: Option<Rc<BoundFile>>,
     shadow_effect: Option<OpaqueBytes>,
 
     pub objects: Vec<DocObject>,
@@ -110,96 +146,119 @@ pub struct Layer {
     hash: [u8; 32],
 }
 
-impl Layer {
-    fn try_parse_object<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<DocObject> {
-        let object_type = stream.read_u8()?;
-        let child_count = stream.read_u16_le()?;
+impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
+    type ParseError = LayerParseError;
 
-        if child_count != 0 {
-            return Err(eyre!("child count {child_count} > 0"));
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        ctx: &DocumentContext<'_, '_>,
+    ) -> Result<Layer, LayerParseError> {
+        // Note: No `BlindWindow<_>` here, because the flex offset given by the layer is relative
+        // to `reader`, not to the start of the layer data (so we want `SeekFrom::Start` to be
+        // absolute in `reader`).
+        let mut header_reader = reader.take_inclusive_length_prefixed()?;
+
+        let flex_offset: u64 = header_reader.read_u32_le()?.into();
+
+        let mut property_flags = CheckedBitfield::try_parse(&mut header_reader)
+            .map_err(LayerParseError::PropertyFlags)?;
+
+        unpack_bool_flags!(property_flags, {
+            0 => !visible;
+            1 => event_forwardable;
+            2 => lock_state;
+        });
+
+        property_flags
+            .ensure_none_set_unchecked()
+            .map_err(LayerParseError::UnhandledProperty)?;
+
+        let mut field_flags =
+            CheckedBitfield::try_parse(&mut header_reader).map_err(LayerParseError::FieldFlags)?;
+
+        let layer_id = header_reader.read_u32_le()?;
+
+        {
+            let here = header_reader.stream_position()?;
+
+            if here != flex_offset {
+                eprintln!(
+                    "Warning: Did not reach layer flex offset naturally. \
+                Will seek from {here} to {flex_offset} (delta {}).",
+                    flex_offset.wrapping_sub(here).cast_signed()
+                );
+
+                header_reader.seek(SeekFrom::Start(flex_offset))?;
+            }
         }
 
-        let mut stream = stream.take_exclusive_length_prefixed()?;
+        unpack_field_flags!(field_flags, {
+            0 => alpha: header_reader.read_u8()?;
+            1 => background_colour: header_reader.read_4_bytes()?;
+            2 => name: header_reader.read_short_u16_string()?;
+            3 => uuid: header_reader.read_short_u16_string()?;
+            4 => modified_time: header_reader.read_timestamp()?;
+            5 => thumbnail: ctx.file_registry.try_get(header_reader.read_u32_le()?)?;
+            6 => shadow_effect: OpaqueBytes::try_parse_exclusive(&mut header_reader)?;
+        });
 
-        let doc_object = DocObject::try_parse_with_type(&mut stream, object_type)?;
+        field_flags
+            .ensure_none_set_unchecked()
+            .map_err(LayerParseError::UnhandledField)?;
 
-        let mut hash_read = [0_u8; 32];
-        stream.read_exact(&mut hash_read)?;
+        header_reader.ensure_eof()?;
 
-        if doc_object.object_base().hash() != hash_read {
-            if object_type != 7 {
-                return Err(eyre!("doc object hash mismatch (type {object_type})"));
+        let objects = read_size_and_vec!(reader, u32, LayerParseError::TooManyObjects, {
+            let object_type = reader.read_u8()?;
+
+            if let child_count @ 1.. = reader.read_u16_le()? {
+                return Err(LayerParseError::ObjectHasChildren(child_count));
             }
 
-            eprintln!("Warning: Ignoring hash and size mismatch for shape object");
-            stream.seek_relative(4)?;
-        }
+            let mut reader = reader.take_exclusive_length_prefixed()?;
 
-        stream.ensure_eof()?;
+            let object = DocObject::try_parse_with_type(&mut reader, object_type)?;
 
-        Ok(doc_object)
-    }
+            let mut hash_read = [0_u8; 32];
+            reader.read_exact(&mut hash_read)?;
 
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Layer, LayerParseError> {
-        let _data_size = stream.read_u32_le()?;
-        let flex_offset: u64 = stream.read_u32_le()?.into();
+            let object_hash = object.object_base().compute_hash();
 
-        let property_flags = stream.read_variable_length_bitfield()?;
-        let field_check_flags = stream.read_variable_length_bitfield()?;
+            if object_hash != hash_read
+                && (object_type != 7 || {
+                    // Type 7 is a shape object. Sometimes shapes are 4 bytes larger than they say
+                    // they are, which pushes the hash 4 bytes along. If this has happened, the
+                    // first 4 bytes of `hash_read` will be these extra bytes, and rereading the
+                    // hash but starting 4 bytes later should give us a match for the computed hash
+                    // of the object.
+                    //
+                    // I have not figured out where exactly this size mismatch comes from, but it
+                    // seems to be related to rotation: in the limited tests I have done, shapes
+                    // that have not been rotated appear exempt from the bug.
+                    //
+                    // If the reread hash matches, we carry on as normal.
 
-        // The first property flag is for invisibility, so visibility is its inverse.
-        let visible = property_flags & 1 == 0;
-        let lock_state = property_flags & 4 != 0;
-        let event_forwardable = property_flags & 2 != 0;
+                    // fixme: Shape size mismatch bug.
 
-        let layer_id = stream.read_u32_le()?;
+                    reader.seek_relative(-32 + 4)?;
+                    reader.read_exact(&mut hash_read)?;
 
-        stream.seek(SeekFrom::Start(flex_offset))?;
-
-        let alpha = (field_check_flags & 1 != 0)
-            .then(|| stream.read_u8())
-            .transpose()?
-            .unwrap_or(255);
-
-        let background_colour = (field_check_flags & 2 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map_or([0xff, 0xff, 0xff, 0xff], u32::to_le_bytes);
-
-        let name = (field_check_flags & 4 != 0)
-            .then(|| stream.read_short_u16_string())
-            .transpose()?;
-
-        let uuid = (field_check_flags & 8 != 0)
-            .then(|| stream.read_short_u16_string())
-            .transpose()?;
-
-        let modified_time = (field_check_flags & 16 != 0)
-            .then(|| stream.read_timestamp())
-            .transpose()?;
-
-        let thumbnail_media_id = (field_check_flags & 32 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let shadow_effect = (field_check_flags & 64 != 0)
-            .then(|| OpaqueBytes::try_parse_exclusive(stream))
-            .transpose()?;
-
-        let objects = {
-            let object_count: usize = stream.read_u32_le()?.try_into()?;
-
-            let mut objects = Vec::with_capacity(object_count);
-
-            for _ in 0..object_count {
-                objects.push(Layer::try_parse_object(stream)?);
+                    object_hash != hash_read
+                })
+            {
+                return Err(LayerParseError::ObjectHashMismatch(
+                    object.object_base().uuid().to_owned(),
+                ));
             }
 
-            objects
-        };
+            object
+        });
 
         let mut hash = [0_u8; 32];
-        stream.read_exact(&mut hash)?;
+        reader.read_exact(&mut hash)?;
+
+        // todo: Validate the hash, but retain it so that it can be used by the parent `Page`.
+        // A brief look suggests that the layer hashes may be used to compute the page hash.
 
         Ok(Layer {
             visible,
@@ -211,7 +270,7 @@ impl Layer {
             name,
             uuid,
             modified_time,
-            thumbnail_media_id,
+            thumbnail,
             shadow_effect,
             objects,
             hash,
@@ -506,7 +565,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
         let mut layers = Vec::with_capacity(layer_count);
 
         for _ in 0..layer_count {
-            layers.push(Layer::try_parse(reader)?);
+            layers.push(Layer::try_parse_with_ctx(reader, ctx)?);
         }
 
         // todo: Validate this.

@@ -13,7 +13,6 @@ use crate::{
         web::{Web, WebParseError},
     },
 };
-use color_eyre::Result;
 use std::io::{Read, Seek};
 use thiserror::Error;
 
