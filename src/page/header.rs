@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Read};
+use std::{collections::HashMap, io::Read, rc::Rc};
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
@@ -6,34 +6,47 @@ use crate::{
         ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, TryParse,
         UnfinishedParsingError,
     },
+    context::TryParseWithContext,
+    media_info::{BoundFile, FileRegistry, NoSuchRegisteredFileError},
     page::Rect,
     read_size_and_map,
 };
-use color_eyre::Result;
 use thiserror::Error;
+
+pub struct PdfDataItemParseCtx<'fr> {
+    pub file_registry: &'fr FileRegistry,
+    pub format_version: u32,
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum PdfDataItemParseError {
+    Io(#[from] std::io::Error),
+    NoSuchFile(#[from] NoSuchRegisteredFileError),
+}
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct PdfDataItem {
-    bind_id: u32,
+pub struct PdfPage {
+    pdf: Rc<BoundFile>,
     page_index: u32,
-    pdf_rect: Rect,
+    rect: Rect,
 }
 
-impl PdfDataItem {
-    pub fn try_parse<T: ByteStreamLe>(stream: &mut T, format_version: u32) -> Result<PdfDataItem> {
-        Ok(PdfDataItem {
-            bind_id: stream.read_u32_le()?,
-            page_index: stream.read_u32_le()?,
-            pdf_rect: if format_version < 2034 {
-                Rect::try_parse_f64(stream)?
+impl<R: Read> TryParseWithContext<R, PdfDataItemParseCtx<'_>> for PdfPage {
+    type ParseError = PdfDataItemParseError;
+
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        ctx: &PdfDataItemParseCtx<'_>,
+    ) -> Result<PdfPage, PdfDataItemParseError> {
+        Ok(PdfPage {
+            pdf: ctx.file_registry.try_get(reader.read_u32_le()?)?,
+            page_index: reader.read_u32_le()?,
+            rect: if ctx.format_version < 2034 {
+                Rect::try_parse_f64(reader)?
             } else {
-                Rect {
-                    left: stream.read_i32_le()?.into(),
-                    top: stream.read_i32_le()?.into(),
-                    right: stream.read_i32_le()?.into(),
-                    bottom: stream.read_i32_le()?.into(),
-                }
+                Rect::try_parse_i32(reader)?
             },
         })
     }
@@ -54,23 +67,25 @@ pub struct CanvasCacheEntry {
     system_font_path_hash: u32,
 }
 
-impl CanvasCacheEntry {
-    pub fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<CanvasCacheEntry> {
+impl<R: Read> TryParse<R> for CanvasCacheEntry {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> std::io::Result<CanvasCacheEntry> {
         Ok(CanvasCacheEntry {
-            file_id: stream.read_u32_le()?,
-            width: stream.read_u32_le()?,
-            height: stream.read_u32_le()?,
-            is_dark_mode: stream.read_u8()? == 1,
-            background_colour: stream.read_u32_le()?.to_le_bytes(),
+            file_id: reader.read_u32_le()?,
+            width: reader.read_u32_le()?,
+            height: reader.read_u32_le()?,
+            is_dark_mode: reader.read_u8()? == 1,
+            background_colour: reader.read_u32_le()?.to_le_bytes(),
             version: [
-                stream.read_u32_le()?,
-                stream.read_u32_le()?,
-                stream.read_u32_le()?,
+                reader.read_u32_le()?,
+                reader.read_u32_le()?,
+                reader.read_u32_le()?,
             ],
-            cache_version: stream.read_u32_le()?,
-            property: stream.read_u32_le()?,
-            locale_list_id: stream.read_u32_le()?,
-            system_font_path_hash: stream.read_u32_le()?,
+            cache_version: reader.read_u32_le()?,
+            property: reader.read_u32_le()?,
+            locale_list_id: reader.read_u32_le()?,
+            system_font_path_hash: reader.read_u32_le()?,
         })
     }
 }
@@ -81,6 +96,7 @@ pub enum CustomPageObjectParseError {
     Io(#[from] std::io::Error),
     Flags(#[from] ReadBitfieldError),
     String(#[from] ReadStringError),
+    BadAttachedFile(#[from] NoSuchRegisteredFileError),
     Unfinished(#[from] UnfinishedParsingError),
 
     #[error("one or more property bits were set, but none expected")]
@@ -125,54 +141,58 @@ pub struct CustomPageObject {
     object_type: CustomObjectType,
 
     uuid: String,
-    attached_files: HashMap<String, u32>,
+    attached_files: HashMap<String, Rc<BoundFile>>,
     custom_data: HashMap<String, String>,
     rect: Rect,
 }
 
-impl<R: Read> TryParse<R> for CustomPageObject {
+impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
     type ParseError = CustomPageObjectParseError;
 
-    fn try_parse(
-        stream: &mut R,
-    ) -> std::result::Result<CustomPageObject, CustomPageObjectParseError> {
-        let object_type: CustomObjectType = stream.read_u32_le()?.into();
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        file_registry: &FileRegistry,
+    ) -> Result<CustomPageObject, CustomPageObjectParseError> {
+        let object_type: CustomObjectType = reader.read_u32_le()?.into();
 
-        let mut stream = stream.take_exclusive_length_prefixed()?;
+        let mut reader = reader.take_exclusive_length_prefixed()?;
 
-        if let not_zero @ 1.. = stream.read_u32_le()? {
+        if let not_zero @ 1.. = reader.read_u32_le()? {
             eprintln!("Warning: Unexpected non-zero value {not_zero} at start of custom object");
             // ... whatever. Keep going.
         }
 
         // Property flags and field flags should be zero.
-        CheckedBitfield::try_parse(&mut stream)?
+        CheckedBitfield::try_parse(&mut reader)?
             .ensure_none_set_unchecked()
             .map_err(CustomPageObjectParseError::FoundProperty)?;
 
-        CheckedBitfield::try_parse(&mut stream)?
+        CheckedBitfield::try_parse(&mut reader)?
             .ensure_none_set_unchecked()
             .map_err(CustomPageObjectParseError::FoundField)?;
 
-        let uuid = stream.read_short_u8_string()?;
+        let uuid = reader.read_short_u8_string()?;
 
         let attached_files = read_size_and_map!(
-            stream,
+            reader,
             u32,
             CustomPageObjectParseError::MapTooBig,
-            (stream.read_long_u8_string()?, stream.read_u32_le()?)
+            (
+                reader.read_long_u8_string()?,
+                file_registry.try_get(reader.read_u32_le()?)?
+            )
         );
 
         let custom_data = read_size_and_map!(
-            stream,
+            reader,
             u32,
             CustomPageObjectParseError::MapTooBig,
-            (stream.read_long_u8_string()?, stream.read_long_u8_string()?)
+            (reader.read_long_u8_string()?, reader.read_long_u8_string()?)
         );
 
-        let rect = Rect::try_parse_f64(&mut stream)?;
+        let rect = Rect::try_parse_f64(&mut reader)?;
 
-        stream.ensure_eof()?;
+        reader.ensure_eof()?;
 
         Ok(CustomPageObject {
             object_type,

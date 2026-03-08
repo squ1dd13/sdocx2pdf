@@ -338,7 +338,6 @@ pub struct NoteDoc {
     string_registry: StringRegistry,
 }
 
-#[expect(dead_code)]
 impl NoteDoc {
     pub const fn string_registry(&self) -> &StringRegistry {
         &self.string_registry

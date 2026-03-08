@@ -432,7 +432,7 @@ impl<T> ExactSizedStream for Take<T> {
 
 #[macro_export]
 macro_rules! _read_size_and_vec_inner {
-    ($sz_read_as_usize:expr, $idx:ident => $elem:expr) => {{
+    ($sz_read_as_usize:expr, $idx:ident => $elem:expr$(,)?) => {{
         let count: usize = $sz_read_as_usize;
         let mut v = Vec::with_capacity(count);
 
@@ -443,7 +443,7 @@ macro_rules! _read_size_and_vec_inner {
         v
     }};
 
-    ($sz_read_as_usize:expr, $elem:expr) => {{
+    ($sz_read_as_usize:expr, $elem:expr$(,)?) => {{
         let count: usize = $sz_read_as_usize;
         let mut v = Vec::with_capacity(count);
 

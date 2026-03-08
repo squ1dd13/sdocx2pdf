@@ -1,17 +1,27 @@
 use crate::{
-    OpaqueBytes,
-    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse},
+    OpaqueBytes, OpaqueBytesParseError,
+    bits::{CheckedBitfield, UnhandledBitsError},
+    byte_stream::{
+        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, ReadTimestampError,
+        TryParse,
+    },
+    context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
     page::{
-        header::{CanvasCacheEntry, CustomPageObject, PdfDataItem},
+        header::{
+            CanvasCacheEntry, CustomPageObject, CustomPageObjectParseError, PdfDataItemParseError,
+            PdfPage,
+        },
         object::DocObject,
     },
+    read_size_and_vec, unpack_bool_flag, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::io::{self, Read, Seek, SeekFrom};
+use thiserror::Error;
 
 mod header;
 pub mod object;
@@ -76,6 +86,8 @@ impl Rect {
     }
 }
 
+pub type LayerParseError = color_eyre::Report;
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct Layer {
@@ -128,7 +140,7 @@ impl Layer {
         Ok(doc_object)
     }
 
-    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Layer> {
+    fn try_parse<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Layer, LayerParseError> {
         let _data_size = stream.read_u32_le()?;
         let flex_offset: u64 = stream.read_u32_le()?.into();
 
@@ -267,6 +279,38 @@ impl_try_from_for_optional_from!(
     pub InvalidBackgroundImageModeError
 );
 
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum PageParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+    Timestamp(#[from] ReadTimestampError),
+    BackgroundImageMode(#[from] InvalidBackgroundImageModeError),
+    CustomPageObject(#[from] CustomPageObjectParseError),
+    Layer(#[from] LayerParseError),
+    OpaqueBytes(#[from] OpaqueBytesParseError),
+    PdfDataItem(#[from] PdfDataItemParseError),
+    TemplateType(#[from] InvalidTemplateTypeError),
+
+    #[error("failed to read property flags")]
+    PropertyFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more properties were unhandled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
+
+    #[error("failed to read field flags")]
+    FieldFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more field flags were unhandled")]
+    UnhandledField(#[source] UnhandledBitsError),
+
+    #[error("too many entries ({0})")]
+    TooManyEntries(u32),
+
+    #[error("expected end string to be '{ex}', but it is '{0}'", ex = Page::END_STRING)]
+    BadEndString(String),
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct Page {
@@ -277,249 +321,209 @@ pub struct Page {
     height: u32,
     offset_x: u32,
     offset_y: u32,
-    page_id: String,
+    uuid: String,
     modified_time: DateTime<Utc>,
     format_version: u32,
     min_format_version: u32,
 
     drawn_rect: Option<Rect>,
-    tag_list: Option<Vec<String>>,
+    tags: Vec<String>,
     template_uri: Option<String>,
     background_image_id: Option<i32>,
-    background_image_mode: BackgroundImageMode,
-    background_colour: [u8; 4],
-    background_width: u32,
-    background_rotation: u32,
-    pdf_data_items: Option<Vec<PdfDataItem>>,
+    background_image_mode: Option<BackgroundImageMode>,
+    background_colour: Option<[u8; 4]>,
+    background_width: Option<u32>,
+    background_rotation: Option<u32>,
+    pdf_data_items: Vec<PdfPage>,
     template_type: Option<TemplateType>,
     canvas_cache_map: Vec<(u32, CanvasCacheEntry)>,
     imported_data_height: Option<u32>,
     theme: Option<u32>,
     recognised_data_modified_time: Option<DateTime<Utc>>,
-    stroke_recognition_data: Option<Vec<OpaqueBytes>>,
+    stroke_recognition_data: Vec<OpaqueBytes>,
     custom_objects: Vec<CustomPageObject>,
     current_layer_index: u16,
-
-    hash: [u8; 32],
 
     pub layers: Vec<Layer>,
 }
 
 impl Page {
-    const CLOSING_STRING: &str = "Page for SAMSUNG S-Pen SDK";
+    const END_STRING: &str = "Page for SAMSUNG S-Pen SDK";
+}
 
-    /// Parses a single page using all of `stream`.
-    ///
-    /// `stream` must not have anything after the end of the page data, because this method
-    /// seeks to the end of `stream` and expects it to match the correct format for a page.
-    pub fn try_parse_full<T: ByteStreamLe + Seek>(stream: &mut T) -> Result<Page> {
-        let data_start_pos = stream.stream_position()?;
-        let closing_string_size: i64 = Self::CLOSING_STRING.len().try_into()?;
+impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
+    type ParseError = PageParseError;
 
-        // Seek to where the closing string should begin.
-        stream.seek(SeekFrom::End(-closing_string_size))?;
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        ctx: &DocumentContext<'_, '_>,
+    ) -> Result<Page, PageParseError> {
+        let start = reader.stream_position()?;
 
-        let closing_string = stream.read_u8_string(Self::CLOSING_STRING.len())?;
+        let page_end_offset: u64 = start + u64::from(reader.read_u32_le()?);
+        let flex_offset: u64 = start + u64::from(reader.read_u32_le()?);
 
-        if closing_string != Self::CLOSING_STRING {
-            return Err(eyre!(
-                "Closing string '{closing_string}' does not match expected '{}'",
-                Self::CLOSING_STRING
-            ));
+        let mut property_flags =
+            CheckedBitfield::try_parse(reader).map_err(PageParseError::PropertyFlags)?;
+
+        unpack_bool_flag!(property_flags, 0 => is_text_only);
+
+        property_flags
+            .ensure_none_set_unchecked()
+            .map_err(PageParseError::UnhandledProperty)?;
+
+        let mut field_flags =
+            CheckedBitfield::try_parse(reader).map_err(PageParseError::FieldFlags)?;
+
+        let orientation = reader.read_u32_le()?;
+        let width = reader.read_u32_le()?;
+        let height = reader.read_u32_le()?;
+        let offset_x = reader.read_u32_le()?;
+        let offset_y = reader.read_u32_le()?;
+        let uuid = reader.read_short_u16_string()?;
+        let modified_time = reader.read_timestamp()?;
+        let format_version = reader.read_u32_le()?;
+        let min_format_version = reader.read_u32_le()?;
+
+        {
+            let here = reader.stream_position()?;
+
+            if here != flex_offset {
+                eprintln!(
+                    "Warning: Did not reach page flex offset naturally. \
+                Will seek from {here} to {flex_offset} (delta {}).",
+                    flex_offset.wrapping_sub(here).cast_signed()
+                );
+
+                reader.seek(SeekFrom::Start(flex_offset))?;
+            }
         }
 
-        // Return to the beginning.
-        stream.seek(SeekFrom::Start(data_start_pos))?;
+        unpack_field_flags!(field_flags, {
+            0 => drawn_rect: Rect::try_parse_f64(reader)?;
+            1 => tags: {
+                read_size_and_vec!(reader, u16, reader.read_short_u16_string()?)
+            }, else vec![];
 
-        let _page_size = stream.read_u32_le()?;
-        let flex_data_offset: u64 = stream.read_u32_le()?.into();
+            2 => template_uri: reader.read_short_u16_string()?;
+            3 => background_image_id: reader.read_i32_le()?;
+            4 => background_image_mode: reader.read_u32_le()?.try_into()?;
+            5 => background_colour: reader.read_4_bytes()?;
+            6 => background_width: reader.read_u32_le()?;
+            7 => background_rotation: reader.read_u32_le()?;
 
-        let property_flags = stream.read_variable_length_bitfield()?;
-        let is_text_only = property_flags & 0x1 != 0;
+            8 => pdf_data_items: {
+                let pdi_ctx = header::PdfDataItemParseCtx {
+                    file_registry: ctx.file_registry,
+                    format_version,
+                };
 
-        let field_check_flags = stream.read_variable_length_bitfield()?;
+                read_size_and_vec!(
+                    reader,
+                    u16,
+                    PdfPage::try_parse_with_ctx(reader, &pdi_ctx)?,
+                )
+            }, else vec![];
 
-        // == "Fixed area" ==
-        let orientation = stream.read_u32_le()?;
-        let width = stream.read_u32_le()?;
-        let height = stream.read_u32_le()?;
-        let offset_x = stream.read_u32_le()?;
-        let offset_y = stream.read_u32_le()?;
-        let page_id = stream.read_short_u16_string()?;
-        let modified_time = stream.read_timestamp()?;
-        let format_version = stream.read_u32_le()?;
-        let min_format_version = stream.read_u32_le()?;
-        // == End ==
+            9 => template_type: reader.read_u32_le()?.try_into()?;
+            10 => canvas_cache_map: {
+                let entry_count = reader.read_u32_le()?;
+                let entry_size = reader.read_u16_le()?;
 
-        stream.seek(SeekFrom::Start(flex_data_offset))?;
+                let mut canvas_cache_map: Vec<(u32, CanvasCacheEntry)> = vec![];
 
-        // == "Flexible area" ==
-        let drawn_rect = (field_check_flags & 1 != 0)
-            .then(|| Rect::try_parse_f64(stream))
-            .transpose()?;
+                if entry_size == 49 {
+                    canvas_cache_map
+                        .reserve_exact(entry_count.try_into()
+                        .map_err(|_| PageParseError::TooManyEntries(entry_count))?);
 
-        let tag_list: Option<Vec<String>> = if field_check_flags & 2 != 0 {
-            let tag_count = stream.read_u16_le()?;
+                    // The app uses a `LinkedHashMap` here, so entry order must be important.
+                    // We're unlikely to use this, so a `Vec` is fine in place of an `IndexMap`,
+                    // and we avoid another dependency.
+                    for _ in 0..entry_count {
+                        let key = reader.read_u32_le()?;
+                        let entry = CanvasCacheEntry::try_parse(reader)?;
 
-            Some(
-                (0..tag_count)
-                    .map(|_| stream.read_short_u16_string())
-                    .collect::<Result<_, _>>()?,
-            )
-        } else {
-            None
-        };
-
-        let template_uri = (field_check_flags & 4 != 0)
-            .then(|| stream.read_short_u16_string())
-            .transpose()?;
-
-        let background_image_id = (field_check_flags & 8 != 0)
-            .then(|| stream.read_i32_le())
-            .transpose()?;
-
-        let background_image_mode: BackgroundImageMode = (field_check_flags & 16 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map(TryInto::try_into)
-            .transpose()?
-            .unwrap_or_default();
-
-        let background_colour = (field_check_flags & 32 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map_or([0xff, 0xff, 0xff, 0xff], u32::to_le_bytes);
-
-        let background_width = (field_check_flags & 64 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .unwrap_or(0);
-
-        let background_rotation = (field_check_flags & 128 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .unwrap_or(0);
-
-        let pdf_data_items: Option<Vec<PdfDataItem>> = if field_check_flags & 256 != 0 {
-            let item_count = stream.read_u16_le()?;
-
-            let mut items = Vec::with_capacity(item_count.into());
-
-            for _ in 0..item_count {
-                items.push(PdfDataItem::try_parse(stream, format_version)?);
-            }
-
-            Some(items)
-        } else {
-            None
-        };
-
-        let template_type: Option<TemplateType> = (field_check_flags & 512 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            .map(TryInto::try_into)
-            .transpose()?;
-
-        // The app uses a `LinkedHashMap` here, so entry order must be important.
-        // Since we are unlikely to use this for much, a `Vec` is fine in place of a real map.
-        let mut canvas_cache_map: Vec<(u32, CanvasCacheEntry)> = vec![];
-
-        if field_check_flags & 1024 != 0 {
-            let entry_count: i64 = stream.read_u32_le()?.into();
-            let entry_size: i64 = stream.read_u16_le()?.into();
-
-            if entry_size == 49 {
-                canvas_cache_map.reserve_exact(entry_count.try_into()?);
-
-                for _ in 0..entry_count {
-                    let key = stream.read_u32_le()?;
-                    let entry = CanvasCacheEntry::try_parse(stream)?;
-
-                    canvas_cache_map.push((key, entry));
+                        canvas_cache_map.push((key, entry));
+                    }
+                } else {
+                    eprintln!("Warning: Skipping CCM: entry size is {entry_size}, not 49.");
+                    reader.seek_relative(i64::from(entry_count) * i64::from(entry_size))?;
                 }
-            } else {
-                eprintln!("Skipping canvas cache map: entry size is {entry_size}, not 49.");
-                stream.seek_relative(entry_count * entry_size)?;
+
+                canvas_cache_map
+            }, else vec![];
+
+            11 => imported_data_height: reader.read_u32_le()?;
+            12 => theme: {
+                // This gets skipped by the libs.
+                reader
+                    .read_u32_le()
+                    .inspect(|v| eprintln!("Warning: Read theme value {v} of unknown meaning"))?
+            };
+
+            // missing 13, 14
+
+            15 => recognised_data_modified_time: reader.read_timestamp()?;
+            16 => stroke_recognition_data: read_size_and_vec!(
+                reader,
+                u32,
+                PageParseError::TooManyEntries,
+                OpaqueBytes::try_parse_exclusive(reader)?,
+            ), else vec![];
+
+            // missing 17
+
+            18 => custom_objects: read_size_and_vec!(
+                reader,
+                u32,
+                PageParseError::TooManyEntries,
+                CustomPageObject::try_parse_with_ctx(reader, ctx.file_registry)?,
+            ), else vec![];
+        });
+
+        field_flags
+            .ensure_none_set_unchecked()
+            .map_err(PageParseError::UnhandledField)?;
+
+        {
+            let here = reader.stream_position()?;
+
+            if here != page_end_offset {
+                eprintln!(
+                    "Warning: Did not reach page end offset naturally. \
+                Will seek from {here} to {page_end_offset} (delta {}).",
+                    page_end_offset.wrapping_sub(here).cast_signed()
+                );
+
+                reader.seek(SeekFrom::Start(page_end_offset))?;
             }
         }
 
-        let imported_data_height = (field_check_flags & 2048 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?;
-
-        let theme = (field_check_flags & 4096 != 0)
-            .then(|| stream.read_u32_le())
-            .transpose()?
-            // This gets skipped by the libs.
-            .inspect(|v| eprintln!("Warning: Read theme value {v} of unknown meaning"));
-
-        let recognised_data_modified_time = (field_check_flags & 32768 != 0)
-            .then(|| stream.read_timestamp())
-            .transpose()?;
-
-        let stroke_recognition_data: Option<Vec<OpaqueBytes>> = if field_check_flags & 65536 != 0 {
-            let entry_count = stream.read_u32_le()?;
-
-            let mut entries = Vec::with_capacity(entry_count as usize);
-
-            for _ in 0..entry_count {
-                entries.push(OpaqueBytes::try_parse_exclusive(stream)?);
-            }
-
-            Some(entries)
-        } else {
-            None
-        };
-
-        let mut custom_objects: Vec<CustomPageObject> = vec![];
-
-        if field_check_flags & 262144 != 0 {
-            let custom_object_count: usize = stream.read_u32_le()?.try_into()?;
-            custom_objects.reserve_exact(custom_object_count);
-
-            for _ in 0..custom_object_count {
-                custom_objects.push(CustomPageObject::try_parse(stream)?);
-            }
-        }
-
-        // == End flexible ==
-
-        // fixme: The hash could be read at basically any point, since we seek back after.
-        // Not sure why it's done here.
-        let hash = {
-            let pos = stream.stream_position()?;
-
-            // The hash comes before the closing string, so seek before both.
-            stream.seek(SeekFrom::End(-closing_string_size - 32))?;
-
-            let mut hash = [0_u8; 32];
-            stream.read_exact(&mut hash)?;
-
-            // Return to where we were before.
-            stream.seek(SeekFrom::Start(pos))?;
-
-            hash
-        };
-
-        let layer_count: usize = stream.read_u16_le()?.into();
-        let current_layer_index = stream.read_u16_le()?;
+        let layer_count: usize = reader.read_u16_le()?.into();
+        let current_layer_index = reader.read_u16_le()?;
 
         let mut layers = Vec::with_capacity(layer_count);
 
         for _ in 0..layer_count {
-            layers.push(Layer::try_parse(stream)?);
+            layers.push(Layer::try_parse(reader)?);
         }
 
-        let mut remaining_bytes = vec![];
-        stream.read_to_end(&mut remaining_bytes)?;
+        // todo: Validate this.
+        let _hash = {
+            let mut h = [0_u8; 32];
+            reader.read_exact(&mut h)?;
+            h
+        };
 
-        let expected_remaining_count: usize = (32 + closing_string_size).try_into()?;
+        let mut remaining = Vec::with_capacity(Page::END_STRING.len());
+        reader.read_to_end(&mut remaining)?;
 
-        if remaining_bytes.len() != expected_remaining_count {
-            return Err(eyre!(
-                "Wrong number of bytes remaining: found {}, not {}",
-                remaining_bytes.len(),
-                expected_remaining_count
+        if remaining != Page::END_STRING.as_bytes() {
+            // string_from_utf8_lossy_owned is not stable yet:
+            // https://github.com/rust-lang/rust/issues/129436
+            return Err(PageParseError::BadEndString(
+                String::from_utf8_lossy(&remaining).into(),
             ));
         }
 
@@ -530,12 +534,12 @@ impl Page {
             height,
             offset_x,
             offset_y,
-            page_id,
+            uuid,
             modified_time,
             format_version,
             min_format_version,
             drawn_rect,
-            tag_list,
+            tags,
             template_uri,
             background_image_id,
             background_image_mode,
@@ -551,7 +555,6 @@ impl Page {
             stroke_recognition_data,
             custom_objects,
             current_layer_index,
-            hash,
             layers,
         })
     }

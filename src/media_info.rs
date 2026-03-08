@@ -85,7 +85,7 @@ impl<R: Read + Seek> TryParse<R> for FileRegistry {
             }
 
             // Other option is only three bytes at the end, so ignore the first of the four.
-            [.., b'E', b'O', b'F'] => false,
+            [_, b'E', b'O', b'F'] => false,
 
             bad => {
                 return Err(FileRegistryParseError::BadEofStr(

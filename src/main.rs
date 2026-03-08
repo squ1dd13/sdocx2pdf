@@ -43,7 +43,7 @@
 
 use crate::{
     byte_stream::{ByteStreamLe, TryParse},
-    context::TryParseWithContext,
+    context::{DocumentContext, TryParseWithContext},
     end_tag::{ModelEndTag, NoteSdkType},
     media_info::FileRegistry,
     note_doc::NoteDoc,
@@ -59,7 +59,6 @@ use thiserror::Error;
 
 mod bits;
 mod byte_stream;
-// mod doc;
 mod context;
 mod end_tag;
 mod media_info;
@@ -165,7 +164,13 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
         let file = std::fs::File::open(&page_path)
             .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?;
 
-        let page = Page::try_parse_full(&mut std::io::BufReader::new(file))?;
+        let page = Page::try_parse_with_ctx(
+            &mut std::io::BufReader::new(file),
+            &DocumentContext {
+                file_registry: &media_info,
+                string_registry: note_note.string_registry(),
+            },
+        )?;
 
         // println!("{}: {page:#?}", page_path.display());
     }
