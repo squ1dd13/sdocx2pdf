@@ -1,4 +1,8 @@
-use crate::{AppVersion, byte_stream::ByteStreamLe, impl_try_from_for_optional_from};
+use crate::{
+    AppVersion,
+    byte_stream::{ByteStreamLe, TryParse},
+    impl_try_from_for_optional_from,
+};
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
 use num::FromPrimitive;

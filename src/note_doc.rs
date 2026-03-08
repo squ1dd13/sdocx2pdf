@@ -1,17 +1,20 @@
 use crate::{
-    AppVersion,
+    AppVersion, AppVersionParseError,
+    bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, ReadTimestampError,
+        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, ReadTimestampError,
         TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
     context::TryParseWithContext,
+    end_tag::{
+        BackgroundTheme, InvalidBackgroundThemeError, InvalidTextDirectionError, TextDirection,
+    },
     impl_try_from_for_optional_from,
     media_info::{BoundFile, FileRegistry, NoSuchRegisteredFileError},
-    page::object::text::Text,
-    read_size_and_map, read_size_and_vec,
+    page::object::text::{Text, TextParseError},
+    read_size_and_map, read_size_and_vec, unpack_bool_flag, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
-use color_eyre::{Result, eyre::eyre};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use sha2::Digest;
@@ -22,6 +25,13 @@ use std::{
 };
 use thiserror::Error;
 
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum AuthorInfoParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 struct AuthorInfo {
@@ -29,21 +39,23 @@ struct AuthorInfo {
     image_id: u32,
 }
 
-impl AuthorInfo {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<AuthorInfo> {
+impl<R: Read> TryParse<R> for AuthorInfo {
+    type ParseError = AuthorInfoParseError;
+
+    fn try_parse(reader: &mut R) -> Result<AuthorInfo, AuthorInfoParseError> {
         Ok(AuthorInfo {
             strings: [
-                stream.read_short_u16_string()?,
-                stream.read_short_u16_string()?,
-                stream.read_short_u16_string()?,
+                reader.read_short_u16_string()?,
+                reader.read_short_u16_string()?,
+                reader.read_short_u16_string()?,
             ],
-            image_id: stream.read_u32_le()?,
+            image_id: reader.read_u32_le()?,
         })
     }
 }
 
 #[derive(Error, Debug)]
-enum PenInfoParseError {
+pub enum PenInfoParseError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
@@ -83,7 +95,7 @@ struct PenInfo {
 }
 
 impl PenInfo {
-    fn try_parse_simple(stream: &mut impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
+    fn try_parse_simple(stream: &mut impl Read) -> Result<PenInfo, PenInfoParseError> {
         Ok(PenInfo {
             name: stream
                 .read_short_u16_string()
@@ -114,7 +126,7 @@ impl PenInfo {
         })
     }
 
-    fn try_parse_full(stream: &mut impl ByteStreamLe) -> Result<PenInfo, PenInfoParseError> {
+    fn try_parse_full(stream: &mut impl Read) -> Result<PenInfo, PenInfoParseError> {
         let mut stream = stream.take_inclusive_length_prefixed()?;
 
         let pen_info = PenInfo {
@@ -179,7 +191,7 @@ struct VoiceEvent {
 
 #[derive(Error, Debug)]
 #[error(transparent)]
-pub enum VoiceRecordingInfoParseError {
+pub enum VoiceRecordingParseError {
     Io(#[from] std::io::Error),
     NoSuchFile(#[from] NoSuchRegisteredFileError),
     String(#[from] ReadStringError),
@@ -193,7 +205,7 @@ pub enum VoiceRecordingInfoParseError {
 
 #[derive(Debug)]
 #[expect(dead_code)]
-struct VoiceRecordingInfo {
+struct VoiceRecording {
     file: Rc<BoundFile>,
     name: String,
     duration_str: String,
@@ -202,21 +214,21 @@ struct VoiceRecordingInfo {
     precise_duration: chrono::Duration,
 }
 
-impl<R: Read> TryParseWithContext<R, FileRegistry> for VoiceRecordingInfo {
-    type ParseError = VoiceRecordingInfoParseError;
+impl<R: Read> TryParseWithContext<R, FileRegistry> for VoiceRecording {
+    type ParseError = VoiceRecordingParseError;
 
     fn try_parse_with_ctx(
         reader: &mut R,
         file_registry: &FileRegistry,
-    ) -> Result<Self, Self::ParseError> {
+    ) -> Result<VoiceRecording, VoiceRecordingParseError> {
         let mut reader = reader.read_u32_le().map(|n| reader.take(n.into()))?;
 
-        let vri = VoiceRecordingInfo {
+        let vri = VoiceRecording {
             file: file_registry.try_get(reader.read_u32_le()?)?,
             name: reader.read_short_u16_string()?,
             duration_str: reader.read_short_u16_string()?,
             date_created: reader.read_timestamp()?,
-            events: read_size_and_vec!(reader, u32, VoiceRecordingInfoParseError::TooManyEvents, {
+            events: read_size_and_vec!(reader, u32, VoiceRecordingParseError::TooManyEvents, {
                 VoiceEvent {
                     action: reader.read_u32_le()?.try_into()?,
                     time: reader.read_timestamp()?,
@@ -297,14 +309,49 @@ impl<R: Read> TryParse<R> for StringRegistry {
     }
 }
 
-pub type NoteDocParseError = color_eyre::Report;
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum NoteDocParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+    Timestamp(#[from] ReadTimestampError),
+    Text(#[from] TextParseError),
+    AppVersion(#[from] AppVersionParseError),
+    AuthorInfo(#[from] AuthorInfoParseError),
+    StringRegistry(#[from] StringRegistryParseError),
+    PenInfo(#[from] PenInfoParseError),
+    VoiceRecording(#[from] VoiceRecordingParseError),
+    NoSuchFile(#[from] NoSuchRegisteredFileError),
+    TextDirection(#[from] InvalidTextDirectionError),
+    BackgroundTheme(#[from] InvalidBackgroundThemeError),
+
+    #[error("failed to read property flags")]
+    PropertyFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more properties were unhandled")]
+    UnhandledProperty(#[source] UnhandledBitsError),
+
+    #[error("failed to read field flags")]
+    FieldFlags(#[source] ReadBitfieldError),
+
+    #[error("one or more field flags were unhandled")]
+    UnhandledField(#[source] UnhandledBitsError),
+
+    #[error("bytes left over after parsing text object")]
+    TextObject(#[source] UnfinishedParsingError),
+
+    #[error("too many entries ({0})")]
+    TooManyEntries(u32),
+
+    #[error("computed hash does not match hash in stream")]
+    HashMismatch,
+}
 
 /// `libSpen_worddoc.dll`
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct NoteDoc {
-    property_flags: u32,
-    field_check_flags: u32,
+    is_background_colour_inverted: bool,
     format_version: u32,
     id: String,
     file_revision: u32,
@@ -324,13 +371,13 @@ pub struct NoteDoc {
     last_edited_page_time: Option<DateTime<Utc>>,
     body_text_font_size_delta: Option<i32>,
     compatible_last_pen_info: Option<PenInfo>,
-    voice_data: Option<Vec<VoiceRecordingInfo>>,
-    attached_files: Option<HashMap<String, u32>>,
+    voice_data: Option<Vec<VoiceRecording>>,
+    attached_files: Option<HashMap<String, Rc<BoundFile>>>,
     last_pen_info: Option<PenInfo>,
     server_check_point: Option<i64>,
     fixed_font: Option<String>,
-    fixed_text_direction: Option<u32>,
-    fixed_background_theme: Option<u32>,
+    fixed_text_direction: Option<TextDirection>,
+    fixed_background_theme: Option<BackgroundTheme>,
     text_summarisation: Option<String>,
     stroke_group_size: Option<u32>,
     app_custom_data: Option<String>,
@@ -348,217 +395,149 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
     type ParseError = NoteDocParseError;
 
     fn try_parse_with_ctx(
-        stream: &mut R,
+        reader: &mut R,
         file_registry: &FileRegistry,
     ) -> Result<NoteDoc, NoteDocParseError> {
-        let start_offset = stream.stream_position()?;
+        let start = reader.stream_position()?;
+        let flex_offset = start + u64::from(reader.read_u32_le()?);
 
-        let flexible_data_area_offset = {
-            let flexible_data_area_jump: u64 = stream.read_u32_le()?.into();
-            start_offset + flexible_data_area_jump
+        let is_background_colour_inverted = {
+            let mut property_flags =
+                CheckedBitfield::try_parse(reader).map_err(NoteDocParseError::PropertyFlags)?;
+
+            unpack_bool_flag!(property_flags, 3 => v);
+
+            property_flags
+                .ensure_none_set_unchecked()
+                .map_err(NoteDocParseError::UnhandledProperty)?;
+
+            v
         };
 
-        let property_flags = stream.read_variable_length_bitfield()?;
-        let field_check_flags = stream.read_variable_length_bitfield()?;
+        let mut field_flags =
+            CheckedBitfield::try_parse(reader).map_err(NoteDocParseError::FieldFlags)?;
 
-        let format_version = stream.read_u32_le()?;
-        let id = stream.read_short_u16_string()?;
-        let file_revision = stream.read_u32_le()?;
-        let created_time = stream.read_timestamp()?;
-        let modified_time = stream.read_timestamp()?;
-        let width = stream.read_u32_le()?;
-        let height = stream.read_u32_le()?;
-        let page_horizontal_padding = stream.read_u32_le()?;
-        let page_vertical_padding = stream.read_u32_le()?;
-        let min_format_version = stream.read_u32_le()?;
+        let format_version = reader.read_u32_le()?;
+        let id = reader.read_short_u16_string()?;
+        let file_revision = reader.read_u32_le()?;
+        let created_time = reader.read_timestamp()?;
+        let modified_time = reader.read_timestamp()?;
+        let width = reader.read_u32_le()?;
+        let height = reader.read_u32_le()?;
+        let page_horizontal_padding = reader.read_u32_le()?;
+        let page_vertical_padding = reader.read_u32_le()?;
+        let min_format_version = reader.read_u32_le()?;
 
         let title_text = {
-            let mut stream = stream.take_exclusive_length_prefixed()?;
+            let mut reader = reader.take_exclusive_length_prefixed()?;
 
-            let text = Text::try_parse(&mut stream)?;
-            stream.ensure_eof()?;
+            let text = Text::try_parse(&mut reader)?;
+            reader.ensure_eof().map_err(NoteDocParseError::TextObject)?;
 
             text
         };
 
         let body_text = {
-            let mut stream = stream.take_exclusive_length_prefixed()?;
+            let mut reader = reader.take_exclusive_length_prefixed()?;
 
-            let text = Text::try_parse(&mut stream)?;
-            stream.ensure_eof()?;
+            let text = Text::try_parse(&mut reader)?;
+            reader.ensure_eof().map_err(NoteDocParseError::TextObject)?;
 
             text
         };
 
-        stream.seek(SeekFrom::Start(flexible_data_area_offset))?;
+        // fixme: Sometimes there's an eight-byte underread here.
+        // Parsing the gap as (u32, u32) yields something that looks suspiciously like a
+        // size (e.g. (1600, 2262)). Sometimes it's not there, though.
 
-        let metadata = NoteDocMetadata {
-            app_name: if field_check_flags & 1 != 0 {
-                Some(stream.read_short_u16_string()?)
-            } else {
-                None
-            },
+        {
+            let here = reader.stream_position()?;
 
-            app_version: if field_check_flags & 2 != 0 {
-                Some(AppVersion::try_parse(stream)?)
-            } else {
-                None
-            },
+            if here != flex_offset {
+                eprintln!(
+                    "Warning: Did not reach note flex offset naturally. \
+                Will seek from {here} to {flex_offset} (delta {}).",
+                    flex_offset.wrapping_sub(here).cast_signed()
+                );
 
-            author_info: if field_check_flags & 4 != 0 {
-                Some(AuthorInfo::try_parse(stream)?)
-            } else {
-                None
-            },
-
-            latitude_longitude: if field_check_flags & 8 != 0 {
-                Some((stream.read_f64_le()?, stream.read_f64_le()?))
-            } else {
-                None
-            },
-        };
-
-        let template_uri = if field_check_flags & 0x40 != 0 {
-            Some(stream.read_short_u16_string()?)
-        } else {
-            None
-        };
-
-        let last_edited_page_index = if field_check_flags & 0x80 != 0 {
-            Some(stream.read_u32_le()?)
-        } else {
-            None
-        };
-
-        let (last_edited_page_image_id, last_edited_page_time) = if field_check_flags & 0x200 != 0 {
-            (Some(stream.read_i32_le()?), Some(stream.read_timestamp()?))
-        } else {
-            (None, None)
-        };
-
-        let string_registry = (field_check_flags & 0x400 != 0)
-            .then(|| StringRegistry::try_parse(stream))
-            .transpose()?
-            .unwrap_or_default();
-
-        let body_text_font_size_delta = if field_check_flags & 0x800 != 0 {
-            Some(stream.read_i32_le()?)
-        } else {
-            None
-        };
-
-        let compatible_last_pen_info = if field_check_flags & 0x1000 != 0 {
-            Some(PenInfo::try_parse_simple(stream)?)
-        } else {
-            None
-        };
-
-        let voice_data: Option<Vec<VoiceRecordingInfo>> = if field_check_flags & 0x2000 != 0 {
-            let voice_data_count = stream.read_u32_le()?;
-
-            Some(
-                (0..voice_data_count)
-                    .map(|_| VoiceRecordingInfo::try_parse_with_ctx(stream, file_registry))
-                    .collect::<Result<_, _>>()?,
-            )
-        } else {
-            None
-        };
-
-        let attached_files: Option<HashMap<String, u32>> = if field_check_flags & 0x4000 != 0 {
-            let attached_files_count = stream.read_u16_le()?;
-
-            let mut map = HashMap::with_capacity(attached_files_count.into());
-
-            for _ in 0..attached_files_count {
-                map.insert(stream.read_short_u16_string()?, stream.read_u32_le()?);
+                reader.seek(SeekFrom::Start(flex_offset))?;
             }
+        }
 
-            Some(map)
-        } else {
-            None
-        };
+        unpack_field_flags!(field_flags, {
+            0 => app_name: reader.read_short_u16_string()?;
+            1 => app_version: AppVersion::try_parse(reader)?;
+            2 => author_info: AuthorInfo::try_parse(reader)?;
+            3 => latitude_longitude: (reader.read_f64_le()?, reader.read_f64_le()?);
+            // missing 4, 5
+            6 => template_uri: reader.read_short_u16_string()?;
+            7 => last_edited_page_index: reader.read_u32_le()?;
+            // missing 8
 
-        let last_pen_info = if field_check_flags & 0x8000 != 0 {
-            Some(PenInfo::try_parse_full(stream)?)
-        } else {
-            None
-        };
+            // These two are on the same bit:
+            9 => last_edited_page_image_id: reader.read_i32_le()?;
+            9 => last_edited_page_time: reader.read_timestamp()?;
 
-        let server_check_point = if field_check_flags & 0x10000 != 0 {
-            Some(stream.read_i64_le()?)
-        } else {
-            None
-        };
+            10 => string_registry: StringRegistry::try_parse(reader)?, else Default::default();
+            11 => body_text_font_size_delta: reader.read_i32_le()?;
+            12 => compatible_last_pen_info: PenInfo::try_parse_simple(reader)?;
+            13 => voice_data: read_size_and_vec!(
+                reader,
+                u32,
+                NoteDocParseError::TooManyEntries,
+                VoiceRecording::try_parse_with_ctx(reader, file_registry)?,
+            );
 
-        let fixed_font = if field_check_flags & 0x20000 != 0 {
-            Some(stream.read_short_u16_string()?)
-        } else {
-            None
-        };
+            14 => attached_files: read_size_and_map!(
+                reader,
+                u16,
+                (
+                    reader.read_short_u16_string()?,
+                    file_registry.try_get(reader.read_u32_le()?)?,
+                )
+            );
 
-        let fixed_text_direction = if field_check_flags & 0x40000 != 0 {
-            Some(stream.read_u32_le()?)
-        } else {
-            None
-        };
+            15 => last_pen_info: PenInfo::try_parse_full(reader)?;
+            16 => server_check_point: reader.read_i64_le()?;
+            17 => fixed_font: reader.read_short_u16_string()?;
+            18 => fixed_text_direction: reader.read_u32_le()?.try_into()?;
+            19 => fixed_background_theme: reader.read_u32_le()?.try_into()?;
+            20 => text_summarisation: reader.read_short_u16_string()?;
+            21 => stroke_group_size: reader.read_u32_le()?;
+            22 => app_custom_data: reader.read_long_u16_string()?;
+        });
 
-        let fixed_background_theme = if field_check_flags & 0x80000 != 0 {
-            Some(stream.read_u32_le()?)
-        } else {
-            None
-        };
-
-        let text_summarisation = if field_check_flags & 0x100000 != 0 {
-            Some(stream.read_short_u16_string()?)
-        } else {
-            None
-        };
-
-        let stroke_group_size = if field_check_flags & 0x200000 != 0 {
-            Some(stream.read_u32_le()?)
-        } else {
-            None
-        };
-
-        let app_custom_data = if field_check_flags & 0x400000 != 0 {
-            Some(stream.read_long_u16_string()?)
-        } else {
-            None
-        };
+        field_flags
+            .ensure_none_set_unchecked()
+            .map_err(NoteDocParseError::UnhandledField)?;
 
         let calculated_hash = {
             // Calculate the number of bytes we have read in total.
-            let data_size = {
-                let data_end_pos = stream.stream_position()?;
-                data_end_pos - start_offset
-            };
+            let data_size = reader.stream_position()? - start;
 
-            stream.seek(SeekFrom::Start(start_offset))?;
+            reader.seek(SeekFrom::Start(start))?;
 
             let mut hasher = sha2::Sha256::new();
 
             // Copy exactly `data_size` bytes from the stream into the hasher. Note that this
             // brings the position in the stream back to where it was before the `seek` above.
-            io::copy(&mut stream.take(data_size), &mut hasher)?;
+            io::copy(&mut reader.take(data_size), &mut hasher)?;
 
             hasher.finalize()
         };
 
-        // Now read the corresponding hash from the stream.
         let hash_in_stream = {
-            let mut v = [0_u8; 32];
-            stream.read_exact(&mut v)?;
-            v
+            let mut b = [0_u8; 32];
+            reader.read_exact(&mut b)?;
+            b
         };
 
         if calculated_hash[..] != hash_in_stream {
-            return Err(eyre!("hash mismatch"));
+            return Err(NoteDocParseError::HashMismatch);
         }
 
         Ok(NoteDoc {
-            property_flags,
-            field_check_flags,
+            is_background_colour_inverted,
             format_version,
             id,
             file_revision,
@@ -571,7 +550,12 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             min_format_version,
             title_text,
             body_text,
-            metadata,
+            metadata: NoteDocMetadata {
+                app_name,
+                app_version,
+                author_info,
+                latitude_longitude,
+            },
             template_uri,
             last_edited_page_index,
             last_edited_page_image_id,

@@ -42,7 +42,7 @@
 )]
 
 use crate::{
-    byte_stream::{ByteStreamLe, TryParse},
+    byte_stream::{ByteStreamLe, ReadStringError, TryParse},
     context::{DocumentContext, TryParseWithContext},
     end_tag::{ModelEndTag, NoteSdkType},
     media_info::FileRegistry,
@@ -118,6 +118,13 @@ impl std::fmt::Debug for OpaqueBytes {
     }
 }
 
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum AppVersionParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 struct AppVersion {
@@ -126,12 +133,14 @@ struct AppVersion {
     patch_name: String,
 }
 
-impl AppVersion {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<AppVersion> {
+impl<R: Read> TryParse<R> for AppVersion {
+    type ParseError = AppVersionParseError;
+
+    fn try_parse(reader: &mut R) -> std::result::Result<AppVersion, AppVersionParseError> {
         Ok(AppVersion {
-            major: stream.read_u32_le()?,
-            minor: stream.read_u32_le()?,
-            patch_name: stream.read_short_u16_string()?,
+            major: reader.read_u32_le()?,
+            minor: reader.read_u32_le()?,
+            patch_name: reader.read_short_u16_string()?,
         })
     }
 }
