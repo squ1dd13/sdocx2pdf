@@ -309,6 +309,8 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
             }
         });
 
+        let _skip = stream.read_u8()?;
+
         let field_flags = header.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
@@ -319,6 +321,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
 
             // missing 4, 5, 6
 
+            // SPen::FollowerManager::ApplyBinary
             7 => slave_uuids: read_size_and_vec!(
                 stream,
                 u16,

@@ -227,7 +227,14 @@ impl<T: Seek> Seek for BlindWindow<T> {
             current @ SeekFrom::Current(_) => current,
         };
 
-        self.0.seek(pos)
+        let seeked_pos_inner = self.0.seek(pos)?;
+
+        debug_assert_eq!(
+            seeked_pos_inner.strict_sub(self.0.start().unwrap()),
+            self.0.local_pos
+        );
+
+        Ok(self.0.local_pos)
     }
 }
 

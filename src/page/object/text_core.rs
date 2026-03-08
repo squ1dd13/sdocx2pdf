@@ -241,6 +241,8 @@ pub struct Common {
     spans: Vec<Span>,
     paragraphs: Vec<Paragraph>,
     section_data: Vec<(u32, u32)>,
+
+    // a.k.a. "object spans", but they're not really spans.
     inline_objects: Vec<InlineObject>,
 }
 

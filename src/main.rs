@@ -7,7 +7,6 @@
     clippy::char_lit_as_u8,
     clippy::checked_conversions,
     clippy::unnecessary_cast,
-    clippy::cognitive_complexity,
     clippy::dbg_macro,
     clippy::debug_assert_with_mut_call,
     clippy::doc_link_with_quotes,
@@ -193,6 +192,11 @@ fn demo_all() -> Result<()> {
         "/home/alex/projects/re/sdocx/sample_docs/tilt_test___Notes_260304_194325",
         "/home/alex/projects/re/sdocx/sample_docs/CAMDOWN__up down left right pressure inc_260304_202617",
         "/home/alex/projects/re/sdocx/sample_docs/Up down left right CAMRIGHT_260304_203137",
+        "/home/alex/projects/re/sdocx/sample_docs/V small shapes_260305_233455",
+        "/home/alex/projects/re/sdocx/sample_docs/Normal-sized shapes_260305_234841",
+        "/home/alex/projects/re/sdocx/sample_docs/V small shapes scaled up_260306_132640",
+        "/home/alex/projects/re/sdocx/sample_docs/Large diamond_260306_135138",
+        "/home/alex/projects/re/sdocx/sample_docs/fromwindows__V small shapes_260307_000230___meeeeeeeeeeeeee",
     ];
 
     for path in extracted_sdocx_paths {

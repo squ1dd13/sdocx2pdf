@@ -1,4 +1,7 @@
-use std::io::{Read, Seek};
+use std::{
+    cmp::Ordering,
+    io::{Read, Seek},
+};
 
 use thiserror::Error;
 
@@ -80,7 +83,30 @@ impl ObjectHeader {
         reader: &mut BlindWindow<R>,
     ) -> std::io::Result<&'me mut CheckedBitfield> {
         if self.flex_offset != 0 {
-            reader.seek(std::io::SeekFrom::Start(self.flex_offset.into()))?;
+            let flex_offset: u64 = self.flex_offset.into();
+            let here: u64 = reader.stream_position()?;
+
+            match flex_offset.cmp(&here) {
+                // todo: Error
+                // This is a pretty big issue.
+                Ordering::Less => eprintln!(
+                    "Warning: Flex offset ({}) is **behind** here ({}) by {} byte(s)!",
+                    flex_offset,
+                    here,
+                    here - flex_offset
+                ),
+
+                Ordering::Equal => (),
+
+                Ordering::Greater => eprintln!(
+                    "Warning: Flex offset ({}) is ahead of here ({}) by {} byte(s)",
+                    flex_offset,
+                    here,
+                    flex_offset - here
+                ),
+            }
+
+            reader.seek(std::io::SeekFrom::Start(flex_offset))?;
         } else {
             if self.field_flags.any_set() {
                 eprintln!(

@@ -403,7 +403,7 @@ pub struct Data {
 struct Pen {
     pen_name_id: Option<u32>,
     default_pen_name_id: Option<u32>,
-    file_id: Option<u32>,
+    style_id: Option<u32>,
 }
 
 #[derive(Debug, FromPrimitive)]
@@ -547,6 +547,9 @@ pub enum ShapeParseError {
     #[error("failed to parse template path")]
     TemplatePath(#[source] PathParseError),
 
+    #[error("template path stream was not exhausted")]
+    UnfinishedPath(#[source] UnfinishedParsingError),
+
     TextCommon(#[from] text_core::CommonParseError),
     BadTextAreaType(#[from] InvalidTextAreaTypeError),
     FillEffect(#[from] FillEffectParseError),
@@ -572,10 +575,6 @@ pub struct Shape {
     pub image: Image,
 
     control_points: Vec<Point>,
-
-    unk_32_1: Option<u32>,
-    unk_32_2: Option<u32>,
-    unk_16: Option<u16>,
 }
 
 impl Shape {
@@ -602,28 +601,36 @@ impl Shape {
         let original_rect = Rect::try_parse_f64(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
-        // Only read the template if the template size is >0.
-        let template = if let 1.. = stream.read_u32_le()? {
+        // Only read the path if its size is >0.
+        let template = if let path_bin_size @ 1.. = stream.read_u32_le()? {
+            let mut stream = (&mut stream).take(path_bin_size.into());
+            let path = Path::try_parse(&mut stream).map_err(ShapeParseError::TemplatePath)?;
+            stream
+                .ensure_eof()
+                .map_err(ShapeParseError::UnfinishedPath)?;
+
             Some(Template {
                 is_flipped_horizontally: template_is_flipped_horizontally,
                 is_flipped_vertically: template_is_flipped_vertically,
                 owner_rect: original_rect,
                 rotation: original_angle,
-                path: Path::try_parse(&mut stream).map_err(ShapeParseError::TemplatePath)?,
+                path,
             })
         } else {
             None
         };
 
-        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f32(&mut stream)?);
+        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f64(&mut stream)?);
 
-        // WCon_ObjectShape only reads this if `this.type == 7`, which happens iff it is not a
-        // subclass like a text box or image.
+        // This field exists iff the object type is 7, i.e. iff this is a pure shape object, and
+        // not a subclass (like a text box or image).
         let original_drawn_rect = is_shape_only
             .then(|| Rect::try_parse_f64(&mut stream))
             .transpose()?;
 
         let field_flags = header.init_flex(&mut stream)?;
+
+        // todo: SPen::ObjectShapeTemplateFactory::NewTemplate
 
         unpack_field_flags!(field_flags, {
             0 => text_common: text_core::Common::try_parse_with_version(
@@ -635,13 +642,14 @@ impl Shape {
 
             2 => pen_name_id: stream.read_u32_le()?;
             3 => default_pen_name_id: stream.read_u32_le()?;
-            4 => file_id: stream.read_u32_le()?;
+            4 => style_id: stream.read_u32_le()?;
 
             5 => fill_effect: FillEffect::try_parse(&mut stream)?;
 
-            6 => unk_32_1: stream.read_u32_le()?;
-            7 => unk_32_2: stream.read_u32_le()?;
-            8 => unk_16: stream.read_u16_le()?;
+            // SPen::ObjectShapeImage::ApplyBinary_BorderData
+            6 => _border_1: stream.seek_relative(4)?;
+            7 => _border_2: stream.seek_relative(4)?;
+            8 => _border_3: stream.seek_relative(2)?;
 
             9 => hint_text: stream.read_short_u16_string().map_err(ShapeParseError::HintText)?;
             10 => hint_text_colour: stream.read_4_bytes()?;
@@ -653,17 +661,20 @@ impl Shape {
             14 => ime_action_type: stream.read_u8()?.try_into()?;
             15 => text_input_type: stream.read_u8()?.try_into()?, else TextInputType::Text;
 
+            // SPen::ObjectShapeImage::ApplyBinary_Deprecated
+            16 => _dep_1: stream.seek_relative(16)?;
+            17 => _dep_2: stream.seek_relative(4)?;
+            18 => _dep_3: stream.seek_relative(16)?;
+            19 => _dep_4: stream.seek_relative(16)?;
+            20 => _dep_5: stream.seek_relative(4)?;
+
             21 => hint_text_vertical_offset: stream.read_f32_le()?;
+            // already checked 22
             23 => lined_paper_thickness: stream.read_f32_le()?;
             24 => lined_paper_colour: stream.read_4_bytes()?;
         });
 
-        if unk_32_1.is_some() || unk_32_2.is_some() || unk_16.is_some() {
-            eprintln!(
-                "Warning: Read at least one unknown shape field: {:?}/{:?}/{:?}",
-                unk_32_1, unk_32_2, unk_16
-            );
-        }
+        // todo: See SPen::ObjectShapeBinaryHandler::ApplyOwnBinary_ShapeRefresh (_document.dll)
 
         header.ensure_flags_used()?;
         stream.ensure_eof()?;
@@ -684,7 +695,7 @@ impl Shape {
             pen: Pen {
                 pen_name_id,
                 default_pen_name_id,
-                file_id,
+                style_id,
             },
             text: Text {
                 text_common,
@@ -719,9 +730,6 @@ impl Shape {
                 original_rect: None,
             },
             control_points,
-            unk_32_1,
-            unk_32_2,
-            unk_16,
         })
     }
 
