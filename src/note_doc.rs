@@ -6,6 +6,7 @@ use crate::{
     },
     impl_try_from_for_optional_from,
     page::object::text::Text,
+    read_size_and_map,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
@@ -15,6 +16,7 @@ use sha2::Digest;
 use std::{
     collections::HashMap,
     io::{self, Read, Seek, SeekFrom},
+    rc::Rc,
 };
 use thiserror::Error;
 
@@ -231,6 +233,65 @@ struct NoteDocMetadata {
     latitude_longitude: Option<(f64, f64)>,
 }
 
+#[derive(Error, Debug)]
+#[error("there is no string registered with id {0}")]
+pub struct NoSuchRegisteredStringError(u32);
+
+#[derive(Default, Debug)]
+pub struct StringRegistry {
+    /// Keys are string IDs.
+    strings: HashMap<u32, Rc<str>>,
+}
+
+#[expect(dead_code)]
+impl StringRegistry {
+    pub fn get(&self, key: u32) -> Option<Rc<str>> {
+        self.strings.get(&key).map(Rc::clone)
+    }
+
+    pub fn try_get(&self, key: u32) -> Result<Rc<str>, NoSuchRegisteredStringError> {
+        self.get(key).ok_or(NoSuchRegisteredStringError(key))
+    }
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum StringRegistryParseError {
+    Io(#[from] std::io::Error),
+    String(#[from] ReadStringError),
+    Unfinished(#[from] UnfinishedParsingError),
+}
+
+impl<R: Read> TryParse<R> for StringRegistry {
+    type ParseError = StringRegistryParseError;
+
+    fn try_parse(reader: &mut R) -> std::result::Result<StringRegistry, StringRegistryParseError> {
+        let mut reader = reader.read_u32_le().map(|v| reader.take(v.into()))?;
+
+        // If the size of the string manager is zero, there's nothing to read.
+        if reader.limit() == 0 {
+            return Ok(Default::default());
+        }
+
+        let registry = StringRegistry {
+            strings: read_size_and_map!(
+                reader,
+                u16,
+                (
+                    reader.read_u32_le()?,
+                    reader.read_short_u16_string()?.into(),
+                )
+            ),
+        };
+
+        reader.ensure_eof()?;
+
+        Ok(registry)
+    }
+}
+
+pub type NoteDocParseError = color_eyre::Report;
+
 /// `libSpen_worddoc.dll`
 #[derive(Debug)]
 #[expect(dead_code)]
@@ -254,7 +315,6 @@ pub struct NoteDoc {
     last_edited_page_index: Option<u32>,
     last_edited_page_image_id: Option<i32>,
     last_edited_page_time: Option<DateTime<Utc>>,
-    managed_strings: Option<HashMap<u32, String>>,
     body_text_font_size_delta: Option<i32>,
     compatible_last_pen_info: Option<PenInfo>,
     voice_data: Option<Vec<VoiceRecordingInfo>>,
@@ -267,10 +327,21 @@ pub struct NoteDoc {
     text_summarisation: Option<String>,
     stroke_group_size: Option<u32>,
     app_custom_data: Option<String>,
+
+    string_registry: StringRegistry,
 }
 
+#[expect(dead_code)]
 impl NoteDoc {
-    pub fn try_parse(stream: &mut (impl ByteStreamLe + Seek)) -> Result<NoteDoc> {
+    pub const fn string_registry(&self) -> &StringRegistry {
+        &self.string_registry
+    }
+}
+
+impl<R: Read + Seek> TryParse<R> for NoteDoc {
+    type ParseError = NoteDocParseError;
+
+    fn try_parse(stream: &mut R) -> Result<NoteDoc, NoteDocParseError> {
         let start_offset = stream.stream_position()?;
 
         let flexible_data_area_offset = {
@@ -356,28 +427,10 @@ impl NoteDoc {
             (None, None)
         };
 
-        let managed_strings: Option<HashMap<u32, String>> = if field_check_flags & 0x400 != 0 {
-            let string_manager_size = stream.read_u32_le()?;
-
-            if string_manager_size != 0 {
-                let string_count = stream.read_u16_le()?;
-
-                let mut ids_and_strings = HashMap::with_capacity(string_count.into());
-
-                for _ in 0..string_count {
-                    let string_id = stream.read_u32_le()?;
-                    let string = stream.read_short_u16_string()?;
-
-                    ids_and_strings.insert(string_id, string);
-                }
-
-                Some(ids_and_strings)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let string_registry = (field_check_flags & 0x400 != 0)
+            .then(|| StringRegistry::try_parse(stream))
+            .transpose()?
+            .unwrap_or_default();
 
         let body_text_font_size_delta = if field_check_flags & 0x800 != 0 {
             Some(stream.read_i32_le()?)
@@ -514,7 +567,6 @@ impl NoteDoc {
             last_edited_page_index,
             last_edited_page_image_id,
             last_edited_page_time,
-            managed_strings,
             body_text_font_size_delta,
             compatible_last_pen_info,
             voice_data,
@@ -527,6 +579,7 @@ impl NoteDoc {
             text_summarisation,
             stroke_group_size,
             app_custom_data,
+            string_registry,
         })
     }
 }

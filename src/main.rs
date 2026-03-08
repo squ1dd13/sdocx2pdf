@@ -42,9 +42,9 @@
 )]
 
 use crate::{
-    byte_stream::ByteStreamLe,
+    byte_stream::{ByteStreamLe, TryParse},
     end_tag::{ModelEndTag, NoteSdkType},
-    media_info::MediaInfo,
+    media_info::FileRegistry,
     note_doc::NoteDoc,
     page::Page,
     page_id_info::PageIdInfo,
@@ -58,6 +58,7 @@ use thiserror::Error;
 
 mod bits;
 mod byte_stream;
+// mod doc;
 mod end_tag;
 mod media_info;
 mod note_doc;
@@ -138,7 +139,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
     let dir_path = dir_path.as_ref();
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
-    let media_info = MediaInfo::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
+    let media_info = FileRegistry::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
     // println!("{}: {media_info:#?}", media_info_path.display());
 
     let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();

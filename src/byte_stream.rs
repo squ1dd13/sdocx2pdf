@@ -279,6 +279,7 @@ pub trait ByteStreamLe: Read {
             .map_err(|_| TakeInclusiveLengthPrefixedError::SizeTooSmall(frame_size))
     }
 
+    // todo: Just use `reader.read_u32_le().map(|v| reader.take(v.into()))?`
     /// Reads `size: u32` from `self` and returns a wrapper that can read at most `size` further
     /// bytes from `self`.
     fn take_exclusive_length_prefixed(mut self) -> io::Result<Take<Self>>
