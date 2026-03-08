@@ -126,7 +126,7 @@ pub enum ResizeMode {
 impl_try_from_for_optional_from!(ResizeMode, u8, from_u8, pub InvalidResizeModeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct ObjectBase {
     is_rotatable: bool,
     is_selectable: bool,

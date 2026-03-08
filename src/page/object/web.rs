@@ -32,7 +32,7 @@ pub enum WebParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Web {
     object_base: ObjectBase,
 

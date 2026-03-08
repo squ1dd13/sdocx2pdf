@@ -41,7 +41,7 @@ pub enum LineParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Line {
     shape_base: ShapeBase,
     connector_type: ConnectorType,

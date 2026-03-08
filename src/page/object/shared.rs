@@ -49,7 +49,7 @@ pub enum PathParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Path {
     segments: Vec<PathSegment>,
 }
@@ -116,7 +116,7 @@ pub enum GradientType {
 impl_try_from_for_optional_from!(GradientType, u8, from_u8, pub InvalidGradientTypeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct GradientColour {
     pub colour: [u8; 4],
     pub position: f32,

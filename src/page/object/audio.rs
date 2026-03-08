@@ -30,7 +30,7 @@ pub enum AudioParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Audio {
     object_base: ObjectBase,
 

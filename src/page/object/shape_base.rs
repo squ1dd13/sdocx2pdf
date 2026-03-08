@@ -48,7 +48,7 @@ pub enum LineColourEffectParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct LineColourEffect {
     gradient_rotatable: bool,
     colour_type: ColourType,
@@ -194,7 +194,7 @@ pub enum LineStyleEffectParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct LineStyleEffect {
     width: f32,
     compound_type: CompoundType,
@@ -234,7 +234,7 @@ impl LineStyleEffect {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct ConnectionPoint {
     point: Point,
     uuids: Vec<String>,
@@ -268,7 +268,7 @@ pub enum ShapeBaseParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct ShapeBase {
     object_base: ObjectBase,
 

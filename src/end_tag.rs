@@ -68,7 +68,7 @@ impl NoteSdkType {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct EncryptionInfo {
     size: u32,
     salt: Vec<u8>,
@@ -100,7 +100,6 @@ impl EncryptionInfo {
 }
 
 #[derive(Debug, FromPrimitive)]
-#[allow(dead_code)]
 pub enum PageModel {
     /// `PageMode.LIST`
     Paged = 0,
@@ -167,7 +166,7 @@ impl_try_from_for_optional_from!(Orientation, u32, from_u32, pub InvalidOrientat
 
 /// The structure in `end_tag.bin`.
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct ModelEndTag {
     sdk_type: NoteSdkType,
 

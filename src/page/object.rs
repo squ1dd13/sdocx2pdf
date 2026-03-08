@@ -34,7 +34,7 @@ mod web;
 pub type OpaqueObjectParseError = color_eyre::Report;
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct OpaqueObject {
     object_base: ObjectBase,
     inner: OpaqueBytes,

@@ -80,7 +80,7 @@ enum IntervalType {
 impl_try_from_for_optional_from!(IntervalType, u32, from_u32, pub InvalidIntervalTypeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct SpanBase {
     span_type: SpanType,
     start_pos: u32,
@@ -100,7 +100,7 @@ pub enum SpanParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Span {
     span_base: SpanBase,
     bytes: Vec<u8>,
@@ -146,7 +146,7 @@ enum ParagraphType {
 impl_try_from_for_optional_from!(ParagraphType, u32, from_u32, pub InvalidParagraphTypeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct ParagraphBase {
     paragraph_type: ParagraphType,
     start_pos: u32,
@@ -164,7 +164,7 @@ pub enum ParagraphParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Paragraph {
     paragraph_base: ParagraphBase,
     bytes: Vec<u8>,
@@ -193,7 +193,7 @@ impl<R: Read> TryParse<R> for Paragraph {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct InlineObject {
     position: u32,
     object: DocObject,
@@ -229,7 +229,7 @@ pub enum CommonParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Common {
     text: String,
     left_margin: f32,

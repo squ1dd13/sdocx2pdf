@@ -223,7 +223,7 @@ pub enum FillColourEffectParseError {
 
 // C.f. `LineColourEffect`, which is very similar but is serialised differently.
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct FillColourEffect {
     solid_colour: [u8; 4],
     colour_type: ColourType,
@@ -274,7 +274,7 @@ impl FillColourEffect {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct FillImageEffect {
     image_type: u8,
     image_id: i32,
@@ -318,7 +318,7 @@ pub enum FillEffectParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 enum FillEffect {
     Background {
         transparency: f32,
@@ -375,7 +375,7 @@ pub enum BorderType {
 impl_try_from_for_optional_from!(BorderType, u16, from_u16, pub InvalidBorderTypeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Template {
     is_flipped_horizontally: bool,
     is_flipped_vertically: bool,
@@ -385,7 +385,7 @@ struct Template {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Data {
     shape_type: ShapeType,
     fill_effect: Option<FillEffect>,
@@ -399,7 +399,7 @@ pub struct Data {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Pen {
     pen_name_id: Option<u32>,
     default_pen_name_id: Option<u32>,
@@ -499,7 +499,7 @@ enum TextAutoFitType {
 impl_try_from_for_optional_from!(TextAutoFitType, u8, from_u8, pub InvalidTextAutoFitTypeError);
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Text {
     text_common: Option<text_core::Common>,
     text_area_type: Option<TextAreaType>,
@@ -520,7 +520,7 @@ struct Text {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Image {
     transparency: bool,
 
@@ -566,7 +566,7 @@ pub enum ShapeParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Shape {
     shape_base: ShapeBase,
     pub data: Data,

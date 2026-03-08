@@ -26,7 +26,7 @@ pub enum PdfDataItemParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct PdfPage {
     pdf: Rc<BoundFile>,
     page_index: u32,
@@ -53,7 +53,7 @@ impl<R: Read> TryParseWithContext<R, PdfDataItemParseCtx<'_>> for PdfPage {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct CanvasCacheEntry {
     file_id: u32,
     width: u32,

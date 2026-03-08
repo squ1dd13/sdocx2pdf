@@ -311,7 +311,7 @@ pub enum StrokeParseError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct Stroke {
     object_base: ObjectBase,
 
