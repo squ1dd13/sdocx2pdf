@@ -43,6 +43,7 @@
 
 use crate::{
     byte_stream::{ByteStreamLe, TryParse},
+    context::TryParseWithContext,
     end_tag::{ModelEndTag, NoteSdkType},
     media_info::FileRegistry,
     note_doc::NoteDoc,
@@ -59,6 +60,7 @@ use thiserror::Error;
 mod bits;
 mod byte_stream;
 // mod doc;
+mod context;
 mod end_tag;
 mod media_info;
 mod note_doc;
@@ -148,7 +150,8 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
     // println!("{}: {end_tag:#?}", end_tag_path.display());
 
     let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
-    let note_note = NoteDoc::try_parse(&mut std::fs::File::open(&note_note_path)?)?;
+    let note_note =
+        NoteDoc::try_parse_with_ctx(&mut std::fs::File::open(&note_note_path)?, &media_info)?;
     // println!("{}: {note_note:#?}", note_note_path.display());
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();

@@ -1,8 +1,9 @@
+//! The file registry found in `media/mediaInfo.dat`.
+
 use crate::{
     byte_stream::{ByteStreamLe, ReadStringError, ReadTimestampError, TryParse},
     read_size_and_map,
 };
-use color_eyre::Result;
 use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},
@@ -37,7 +38,6 @@ pub struct FileRegistry {
     files: HashMap<u32, Rc<BoundFile>>,
 }
 
-#[expect(dead_code)]
 impl FileRegistry {
     pub fn get(&self, key: u32) -> Option<Rc<BoundFile>> {
         self.files.get(&key).map(Rc::clone)

@@ -1,12 +1,14 @@
 use crate::{
     AppVersion,
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, TakeInclusiveLengthPrefixedError,
-        TryParse, UnfinishedParsingError,
+        ByteStreamLe, ExactSizedStream, ReadStringError, ReadTimestampError,
+        TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
+    context::TryParseWithContext,
     impl_try_from_for_optional_from,
+    media_info::{BoundFile, FileRegistry, NoSuchRegisteredFileError},
     page::object::text::Text,
-    read_size_and_map,
+    read_size_and_map, read_size_and_vec,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::{Result, eyre::eyre};
@@ -175,10 +177,24 @@ struct VoiceEvent {
     action: VoiceAction,
 }
 
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum VoiceRecordingInfoParseError {
+    Io(#[from] std::io::Error),
+    NoSuchFile(#[from] NoSuchRegisteredFileError),
+    String(#[from] ReadStringError),
+    Timestamp(#[from] ReadTimestampError),
+    Action(#[from] InvalidVoiceActionError),
+    Unfinished(#[from] UnfinishedParsingError),
+
+    #[error("event count {0} is too large")]
+    TooManyEvents(u32),
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 struct VoiceRecordingInfo {
-    attached_file_id: u32,
+    file: Rc<BoundFile>,
     name: String,
     duration_str: String,
     date_created: DateTime<Utc>,
@@ -186,41 +202,32 @@ struct VoiceRecordingInfo {
     precise_duration: chrono::Duration,
 }
 
-impl VoiceRecordingInfo {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> Result<VoiceRecordingInfo> {
-        let mut frame = stream.take_exclusive_length_prefixed()?;
+impl<R: Read> TryParseWithContext<R, FileRegistry> for VoiceRecordingInfo {
+    type ParseError = VoiceRecordingInfoParseError;
 
-        let attached_file_id = frame.read_u32_le()?;
-        let name = frame.read_short_u16_string()?;
-        let duration_str = frame.read_short_u16_string()?;
-        let date_created = frame.read_timestamp()?;
+    fn try_parse_with_ctx(
+        reader: &mut R,
+        file_registry: &FileRegistry,
+    ) -> Result<Self, Self::ParseError> {
+        let mut reader = reader.read_u32_le().map(|n| reader.take(n.into()))?;
 
-        let events = {
-            let count: usize = frame.read_u32_le()?.try_into()?;
-            let mut events = Vec::with_capacity(count);
-
-            for _ in 0..count {
-                events.push(VoiceEvent {
-                    action: frame.read_u32_le()?.try_into()?,
-                    time: frame.read_timestamp()?,
-                });
-            }
-
-            events
+        let vri = VoiceRecordingInfo {
+            file: file_registry.try_get(reader.read_u32_le()?)?,
+            name: reader.read_short_u16_string()?,
+            duration_str: reader.read_short_u16_string()?,
+            date_created: reader.read_timestamp()?,
+            events: read_size_and_vec!(reader, u32, VoiceRecordingInfoParseError::TooManyEvents, {
+                VoiceEvent {
+                    action: reader.read_u32_le()?.try_into()?,
+                    time: reader.read_timestamp()?,
+                }
+            }),
+            precise_duration: chrono::Duration::milliseconds(reader.read_i64_le()?),
         };
 
-        let precise_duration = chrono::Duration::milliseconds(frame.read_i64_le()?);
+        reader.ensure_eof()?;
 
-        frame.ensure_eof()?;
-
-        Ok(VoiceRecordingInfo {
-            attached_file_id,
-            name,
-            duration_str,
-            date_created,
-            events,
-            precise_duration,
-        })
+        Ok(vri)
     }
 }
 
@@ -338,10 +345,13 @@ impl NoteDoc {
     }
 }
 
-impl<R: Read + Seek> TryParse<R> for NoteDoc {
+impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
     type ParseError = NoteDocParseError;
 
-    fn try_parse(stream: &mut R) -> Result<NoteDoc, NoteDocParseError> {
+    fn try_parse_with_ctx(
+        stream: &mut R,
+        file_registry: &FileRegistry,
+    ) -> Result<NoteDoc, NoteDocParseError> {
         let start_offset = stream.stream_position()?;
 
         let flexible_data_area_offset = {
@@ -449,7 +459,7 @@ impl<R: Read + Seek> TryParse<R> for NoteDoc {
 
             Some(
                 (0..voice_data_count)
-                    .map(|_| VoiceRecordingInfo::try_parse(stream))
+                    .map(|_| VoiceRecordingInfo::try_parse_with_ctx(stream, file_registry))
                     .collect::<Result<_, _>>()?,
             )
         } else {
