@@ -1,9 +1,9 @@
 use crate::{
-    OpaqueBytes,
+    OpaqueBytes, OpaqueBytesParseError,
     byte_stream::{SeekableByteStreamLe, TryParse},
     page::object::{
         audio::{Audio, AudioParseError},
-        base::{HasObjectBase, ObjectBase},
+        base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
         image::{Image, ImageParseError},
         line::{Line, LineParseError},
         painting::{Painting, PaintingParseError},
@@ -30,7 +30,12 @@ pub mod text;
 mod text_core;
 mod web;
 
-pub type OpaqueObjectParseError = color_eyre::Report;
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum OpaqueObjectParseError {
+    Base(#[from] ObjectBaseParseError),
+    Bytes(#[from] OpaqueBytesParseError),
+}
 
 #[derive(Debug)]
 #[expect(dead_code)]
@@ -42,7 +47,7 @@ pub struct OpaqueObject {
 impl<R: Read + Seek> TryParse<R> for OpaqueObject {
     type ParseError = OpaqueObjectParseError;
 
-    fn try_parse(reader: &mut R) -> Result<Self, OpaqueObjectParseError> {
+    fn try_parse(reader: &mut R) -> Result<OpaqueObject, OpaqueObjectParseError> {
         Ok(OpaqueObject {
             object_base: ObjectBase::try_parse(reader)?,
             inner: OpaqueBytes::try_parse_inclusive(reader)?,

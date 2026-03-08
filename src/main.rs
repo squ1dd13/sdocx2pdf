@@ -48,11 +48,7 @@ use crate::{
     media_info::FileRegistry,
     note_doc::NoteDoc,
     page::Page,
-    page_id_info::PageIdInfo,
-};
-use color_eyre::{
-    Result,
-    eyre::{Context, eyre},
+    page_list::PageList,
 };
 use std::{io::Read, path::PathBuf};
 use thiserror::Error;
@@ -64,7 +60,7 @@ mod end_tag;
 mod media_info;
 mod note_doc;
 mod page;
-mod page_id_info;
+mod page_list;
 
 #[derive(Error, Debug)]
 pub enum OpaqueBytesParseError {
@@ -145,7 +141,7 @@ impl<R: Read> TryParse<R> for AppVersion {
     }
 }
 
-fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
+fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<(), Box<dyn std::error::Error>> {
     let dir_path = dir_path.as_ref();
 
     let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
@@ -163,15 +159,14 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
     // println!("{}: {note_note:#?}", note_note_path.display());
 
     let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
-    let page_id_info = PageIdInfo::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
+    let page_id_info = PageList::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
     // println!("{}: {page_id_info:?}", page_id_info_path.display());
 
-    for page_info in &page_id_info.pages {
-        let mut page_path: PathBuf = [dir_path, &page_info.page_id].iter().collect();
+    for page_info in page_id_info.pages() {
+        let mut page_path: PathBuf = [dir_path, page_info.uuid()].iter().collect();
         page_path.set_extension("page");
 
-        let file = std::fs::File::open(&page_path)
-            .wrap_err_with(|| eyre!("Failed to open {}", page_path.display()))?;
+        let file = std::fs::File::open(&page_path)?;
 
         let page = Page::try_parse_with_ctx(
             &mut std::io::BufReader::new(file),
@@ -187,7 +182,7 @@ fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<()> {
     Ok(())
 }
 
-fn demo_all() -> Result<()> {
+fn demo_all() -> Result<(), Box<dyn std::error::Error>> {
     let extracted_sdocx_paths = [
         "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
         "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
@@ -227,8 +222,6 @@ fn demo_all() -> Result<()> {
 // .ssf is "snap saved file"
 // https://github.com/fschutt/printpdf
 
-fn main() -> Result<()> {
-    color_eyre::install()?;
-
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     demo_all().inspect_err(|err| println!("source error: {:?}", err.source()))
 }
