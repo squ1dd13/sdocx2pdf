@@ -1,6 +1,6 @@
 use crate::{
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, TryParse,
+        BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, TryParse,
         UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,

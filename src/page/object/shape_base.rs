@@ -1,7 +1,7 @@
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError,
+        BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError,
         TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,

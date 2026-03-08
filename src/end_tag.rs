@@ -2,7 +2,7 @@ use crate::{
     AppVersion, AppVersionParseError,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, ReadTimestampError, TryParse,
+        BoundedStream, ByteStreamLe, ReadStringError, ReadTimestampError, TryParse,
         UnfinishedParsingError,
     },
     context::TryParseWithContext,

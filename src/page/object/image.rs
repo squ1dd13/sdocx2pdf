@@ -3,7 +3,7 @@ use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
+    byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     page::{
         Rect,
         object::{

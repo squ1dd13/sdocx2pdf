@@ -5,9 +5,7 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, TryParse, UnfinishedParsingError,
-    },
+    byte_stream::{BoundedStream, ByteStreamLe, ReadStringError, TryParse, UnfinishedParsingError},
     impl_try_from_for_optional_from,
     page::object::{DocObject, DocObjectParseError},
     read_u16_sized_vec, read_u32_sized_vec,

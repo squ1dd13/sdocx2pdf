@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::Read, rc::Rc};
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, TryParse,
+        BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, TryParse,
         UnfinishedParsingError,
     },
     context::TryParseWithContext,

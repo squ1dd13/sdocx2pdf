@@ -13,7 +13,7 @@ use crate::{
     OpaqueBytes, OpaqueBytesParseError,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadStringError, ReadTimestampError, TryParse,
+        BoundedStream, ByteStreamLe, ReadStringError, ReadTimestampError, TryParse,
         UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,

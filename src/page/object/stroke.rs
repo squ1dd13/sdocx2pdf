@@ -8,7 +8,7 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{ByteStreamLe, ExactSizedStream, TryParse, UnfinishedParsingError},
+    byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     impl_try_from_for_optional_from,
     page::{
         Point,

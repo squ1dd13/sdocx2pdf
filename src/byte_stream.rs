@@ -135,13 +135,13 @@ impl<T> From<Window<T>> for BlindWindow<T> {
     }
 }
 
-impl<T> ExactSizedStream for Window<T> {
+impl<T> BoundedStream for Window<T> {
     fn n_remaining(&self) -> u64 {
         self.length.strict_sub(self.local_pos)
     }
 }
 
-impl<T> ExactSizedStream for BlindWindow<T> {
+impl<T> BoundedStream for BlindWindow<T> {
     fn n_remaining(&self) -> u64 {
         self.0.n_remaining()
     }
@@ -428,7 +428,7 @@ pub struct UnfinishedParsingError {
     remaining: u64,
 }
 
-pub trait ExactSizedStream {
+pub trait BoundedStream {
     /// Returns the number of bytes remaining before a read is guaranteed to return EOF.
     fn n_remaining(&self) -> u64;
 
@@ -445,7 +445,7 @@ pub trait ExactSizedStream {
     }
 }
 
-impl<T> ExactSizedStream for Take<T> {
+impl<T> BoundedStream for Take<T> {
     fn n_remaining(&self) -> u64 {
         self.limit()
     }

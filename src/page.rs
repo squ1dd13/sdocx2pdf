@@ -2,7 +2,7 @@ use crate::{
     OpaqueBytes, OpaqueBytesParseError,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
-        ByteStreamLe, ExactSizedStream, ReadBitfieldError, ReadStringError, ReadTimestampError,
+        BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, ReadTimestampError,
         TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
     context::{DocumentContext, TryParseWithContext},
