@@ -43,19 +43,15 @@
 
 use crate::{
     byte_stream::{ByteStreamLe, ReadStringError, TryParse},
-    context::{DocumentContext, TryParseWithContext},
-    end_tag::{EndTag, NoteSdkType},
-    media_info::FileRegistry,
-    note_doc::NoteDoc,
-    page::Page,
-    page_list::PageList,
+    doc::Document,
 };
-use std::{io::Read, path::PathBuf};
+use std::{io::Read, path::Path};
 use thiserror::Error;
 
 mod bits;
 mod byte_stream;
 mod context;
+mod doc;
 mod end_tag;
 mod media_info;
 mod note_doc;
@@ -141,79 +137,39 @@ impl<R: Read> TryParse<R> for AppVersion {
     }
 }
 
-fn demo_for_extracted_dir(dir_path: impl AsRef<str>) -> Result<(), Box<dyn std::error::Error>> {
-    let dir_path = dir_path.as_ref();
-
-    let media_info_path: PathBuf = [dir_path, "media/mediaInfo.dat"].iter().collect();
-    let media_info = FileRegistry::try_parse(&mut std::fs::File::open(&media_info_path)?)?;
-    // println!("{}: {media_info:#?}", media_info_path.display());
-
-    let end_tag_path: PathBuf = [dir_path, "end_tag.bin"].iter().collect();
-    let end_tag =
-        EndTag::try_parse_with_ctx(&mut std::fs::File::open(&end_tag_path)?, &NoteSdkType::SPen)?;
-    // println!("{}: {end_tag:#?}", end_tag_path.display());
-
-    let note_note_path: PathBuf = [dir_path, "note.note"].iter().collect();
-    let note_note =
-        NoteDoc::try_parse_with_ctx(&mut std::fs::File::open(&note_note_path)?, &media_info)?;
-    // println!("{}: {note_note:#?}", note_note_path.display());
-
-    let page_id_info_path: PathBuf = [dir_path, "pageIdInfo.dat"].iter().collect();
-    let page_id_info = PageList::try_parse(&mut std::fs::File::open(&page_id_info_path)?)?;
-    // println!("{}: {page_id_info:?}", page_id_info_path.display());
-
-    for page_info in page_id_info.pages() {
-        let mut page_path: PathBuf = [dir_path, page_info.uuid()].iter().collect();
-        page_path.set_extension("page");
-
-        let file = std::fs::File::open(&page_path)?;
-
-        let page = Page::try_parse_with_ctx(
-            &mut std::io::BufReader::new(file),
-            &DocumentContext {
-                file_registry: &media_info,
-                string_registry: note_note.string_registry(),
-            },
-        )?;
-
-        // println!("{}: {page:#?}", page_path.display());
-    }
-
-    Ok(())
-}
-
 fn demo_all() -> Result<(), Box<dyn std::error::Error>> {
-    let extracted_sdocx_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010",
-        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722",
-        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554",
-        "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052",
-        "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513",
-        "/home/alex/projects/re/sdocx/sample_docs/Shape text_260224_122639",
-        "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540",
-        "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854",
-        "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617",
-        "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930",
-        "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957",
-        "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837",
-        "/home/alex/projects/re/sdocx/sample_docs/Note replay_260304_170858",
-        "/home/alex/projects/re/sdocx/sample_docs/tilt_test___Notes_260304_194325",
-        "/home/alex/projects/re/sdocx/sample_docs/CAMDOWN__up down left right pressure inc_260304_202617",
-        "/home/alex/projects/re/sdocx/sample_docs/Up down left right CAMRIGHT_260304_203137",
-        "/home/alex/projects/re/sdocx/sample_docs/V small shapes_260305_233455",
-        "/home/alex/projects/re/sdocx/sample_docs/Normal-sized shapes_260305_234841",
-        "/home/alex/projects/re/sdocx/sample_docs/V small shapes scaled up_260306_132640",
-        "/home/alex/projects/re/sdocx/sample_docs/Large diamond_260306_135138",
-        "/home/alex/projects/re/sdocx/sample_docs/fromwindows__V small shapes_260307_000230___meeeeeeeeeeeeee",
+    let sdocx_paths = [
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Shape text_260224_122639.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Note replay_260304_170858.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/tilt_test___Notes_260304_194325.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/CAMDOWN__up down left right pressure inc_260304_202617.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Up down left right CAMRIGHT_260304_203137.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/V small shapes_260305_233455.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Normal-sized shapes_260305_234841.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/V small shapes scaled up_260306_132640.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Large diamond_260306_135138.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/fromwindows__V small shapes_260307_000230___meeeeeeeeeeeeee.sdocx",
     ];
 
-    for path in extracted_sdocx_paths {
-        demo_for_extracted_dir(path)?;
+    for path in sdocx_paths {
+        let _zipped = Document::from_zip(path)?;
+        let _extracted = Document::from_dir(Path::new(path).with_extension(""))?;
     }
 
     Ok(())

@@ -383,11 +383,17 @@ pub struct NoteDoc {
     app_custom_data: Option<String>,
 
     string_registry: StringRegistry,
+
+    hash: [u8; 32],
 }
 
 impl NoteDoc {
     pub const fn string_registry(&self) -> &StringRegistry {
         &self.string_registry
+    }
+
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
     }
 }
 
@@ -573,6 +579,7 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             stroke_group_size,
             app_custom_data,
             string_registry,
+            hash: hash_in_stream,
         })
     }
 }

@@ -9,32 +9,17 @@ use crate::{
 
 #[derive(Debug)]
 pub struct PageRef {
-    uuid: String,
-
-    #[expect(dead_code)]
-    hash: [u8; 32],
-}
-
-impl PageRef {
-    pub fn uuid(&self) -> &str {
-        &self.uuid
-    }
+    pub uuid: String,
+    pub hash: [u8; 32],
 }
 
 /// The structure in the `pageIdInfo.dat` file.
 #[derive(Debug)]
 pub struct PageList {
-    pages: Vec<PageRef>,
+    pub pages: Vec<PageRef>,
 
     /// The hash of the associated `note.note` file.
-    #[expect(dead_code)]
-    note_hash: [u8; 32],
-}
-
-impl PageList {
-    pub fn pages(&self) -> &[PageRef] {
-        &self.pages
-    }
+    pub note_hash: [u8; 32],
 }
 
 #[derive(Error, Debug)]

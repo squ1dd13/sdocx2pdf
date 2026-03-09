@@ -404,10 +404,16 @@ pub struct Page {
     current_layer_index: u16,
 
     pub layers: Vec<Layer>,
+
+    hash: [u8; 32],
 }
 
 impl Page {
     const END_STRING: &str = "Page for SAMSUNG S-Pen SDK";
+
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
@@ -569,7 +575,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
         }
 
         // todo: Validate this.
-        let _hash = {
+        let hash = {
             let mut h = [0_u8; 32];
             reader.read_exact(&mut h)?;
             h
@@ -615,6 +621,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
             custom_objects,
             current_layer_index,
             layers,
+            hash,
         })
     }
 }
