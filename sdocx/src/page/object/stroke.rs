@@ -375,6 +375,10 @@ impl Stroke {
     pub fn pen_name(&self) -> Option<&str> {
         self.pen_name.as_ref().map(AsRef::as_ref)
     }
+
+    pub fn colour(&self) -> [u8; 4] {
+        self.colour.unwrap_or([0, 0, 0, 255])
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {

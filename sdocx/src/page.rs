@@ -31,8 +31,8 @@ pub mod object;
 
 #[derive(Debug)]
 pub struct Point {
-    x: f64,
-    y: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Point {
@@ -429,6 +429,14 @@ impl Page {
 
     pub fn layers(&self) -> &[Layer] {
         &self.layers
+    }
+
+    pub const fn width_height(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub const fn origin(&self) -> (u32, u32) {
+        (self.offset_x, self.offset_y)
     }
 }
 
