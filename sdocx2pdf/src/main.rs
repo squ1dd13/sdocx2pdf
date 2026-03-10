@@ -42,7 +42,7 @@ fn main() {
     eprintln!("w = {w}, h = {h}");
 
     let mut event_count = 0_usize;
-    let mut ring_count = 0_usize;
+    let mut polygon_count = 0_usize;
     let mut discarded_event_count = 0_usize;
 
     for page in document.pages() {
@@ -53,6 +53,9 @@ fn main() {
         let mut page_contents = vec![];
 
         for layer in page.layers() {
+            // todo: Filter for strokes only, then group by pen properties so we can create
+            // an ExtendedGraphicsState for each pen and use that rather than writing out explicit
+            // properties each time.
             for object in layer.objects() {
                 let sdocx::DocObject::Stroke(stroke) = object else {
                     continue;
@@ -105,7 +108,7 @@ fn main() {
 
                 // todo: We should be able to avoid self-intersection by taking points while
                 // the distance from the start is increasing. This would be more efficient than
-                // making a ring for every pair of points.
+                // making a polygon for every pair of points.
                 let rings = deduped_events.tuple_windows().map(
                     |((start_pos, start_pressure), (end_pos, end_pressure))| {
                         let forwards = (end_pos - start_pos).normalize();
@@ -119,20 +122,38 @@ fn main() {
                         let start_spread = 0.5 * pen_size * f64::from(start_pressure);
                         let end_spread = 0.5 * pen_size * f64::from(end_pressure);
 
+                        // Approximates an illustration of a belt drive, where one pulley is
+                        // centred on the first point and has radius based on the first pressure,
+                        // and the other is centred on the second point and has radius based on the
+                        // second pressure.
                         PolygonRing {
                             points: vec![
                                 pdf_point_into_line_point(start_pos - left * start_spread),
-                                pdf_point_into_line_point(start_pos - forwards * end_spread),
+                                pdf_point_into_line_point(
+                                    start_pos - left.lerp(forwards, 0.5).normalize() * start_spread,
+                                ),
+                                pdf_point_into_line_point(start_pos - forwards * start_spread),
+                                pdf_point_into_line_point(
+                                    start_pos
+                                        + (-forwards).lerp(left, 0.5).normalize() * start_spread,
+                                ),
                                 pdf_point_into_line_point(start_pos + left * start_spread),
                                 pdf_point_into_line_point(end_pos + left * end_spread),
+                                pdf_point_into_line_point(
+                                    end_pos + left.lerp(forwards, 0.5).normalize() * end_spread,
+                                ),
                                 pdf_point_into_line_point(end_pos + forwards * end_spread),
+                                pdf_point_into_line_point(
+                                    end_pos + forwards.lerp(-left, 0.5).normalize() * end_spread,
+                                ),
                                 pdf_point_into_line_point(end_pos - left * end_spread),
                             ],
                         }
                     },
                 );
 
-                let [r, g, b, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
+                // fixme: Alpha is ignored here.
+                let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
 
                 page_contents.extend([
                     Op::SetFillColor {
@@ -141,21 +162,19 @@ fn main() {
                     Op::SetOutlineColor {
                         col: Color::Rgb(Rgb::new(r, g, b, None)),
                     },
-                    Op::SetOutlineThickness {
-                        pt: Mm(stroke.pen_size().unwrap_or(1.0) * 0.05).into(),
-                    },
-                    Op::DrawPolygon {
-                        polygon: Polygon {
-                            rings: {
-                                let rings: Vec<_> = rings.collect();
-                                ring_count += rings.len();
-                                rings
-                            },
-                            mode: PaintMode::FillStroke,
-                            winding_order: WindingOrder::default(),
-                        },
-                    },
                 ]);
+
+                let len_before = page_contents.len();
+
+                page_contents.extend(rings.map(|ring| Op::DrawPolygon {
+                    polygon: Polygon {
+                        rings: vec![ring],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::default(),
+                    },
+                }));
+
+                polygon_count += page_contents.len() - len_before;
             }
         }
 
@@ -168,7 +187,7 @@ fn main() {
         100. * (discarded_event_count as f64) / (event_count as f64)
     );
 
-    eprintln!("Creating PDF with {ring_count} polygon rings");
+    eprintln!("Creating PDF with {polygon_count} polygons");
 
     let mut warnings = vec![];
     let bytes = pdf.save(&PdfSaveOptions::default(), &mut warnings);
