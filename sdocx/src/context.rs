@@ -1,6 +1,6 @@
 use crate::{media_info::FileRegistry, note_doc::StringRegistry};
 
-#[expect(dead_code)]
+#[derive(Clone, Copy)]
 pub struct DocumentContext<'fr, 'sr> {
     pub file_registry: &'fr FileRegistry,
     pub string_registry: &'sr StringRegistry,

@@ -13,7 +13,7 @@ use crate::{
             CanvasCacheEntry, CustomPageObject, CustomPageObjectParseError, PdfDataItemParseError,
             PdfPage,
         },
-        object::{DocObject, DocObjectParseError},
+        object::{DocObject, DocObjectParseContext, DocObjectParseError},
     },
     read_size_and_vec, unpack_bool_flag, unpack_bool_flags, unpack_field_flags,
 };
@@ -30,7 +30,7 @@ mod header;
 pub mod object;
 
 #[derive(Debug)]
-struct Point {
+pub struct Point {
     x: f64,
     y: f64,
 }
@@ -141,9 +141,15 @@ pub struct Layer {
     thumbnail: Option<Rc<BoundFile>>,
     shadow_effect: Option<OpaqueBytes>,
 
-    pub objects: Vec<DocObject>,
+    pub(crate) objects: Vec<DocObject>,
 
     hash: [u8; 32],
+}
+
+impl Layer {
+    pub fn objects(&self) -> &[DocObject] {
+        &self.objects
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
@@ -151,7 +157,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
 
     fn try_parse_with_ctx(
         reader: &mut R,
-        ctx: &DocumentContext<'_, '_>,
+        &ctx: &DocumentContext<'_, '_>,
     ) -> Result<Layer, LayerParseError> {
         // Note: No `BlindWindow<_>` here, because the flex offset given by the layer is relative
         // to `reader`, not to the start of the layer data (so we want `SeekFrom::Start` to be
@@ -217,7 +223,13 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
 
             let mut reader = reader.take_exclusive_length_prefixed()?;
 
-            let object = DocObject::try_parse_with_type(&mut reader, object_type)?;
+            let object = DocObject::try_parse_with_ctx(
+                &mut reader,
+                &DocObjectParseContext {
+                    object_type,
+                    doc_ctx: ctx,
+                },
+            )?;
 
             let mut hash_read = [0_u8; 32];
             reader.read_exact(&mut hash_read)?;
@@ -403,7 +415,7 @@ pub struct Page {
     custom_objects: Vec<CustomPageObject>,
     current_layer_index: u16,
 
-    pub layers: Vec<Layer>,
+    pub(crate) layers: Vec<Layer>,
 
     hash: [u8; 32],
 }
@@ -411,8 +423,12 @@ pub struct Page {
 impl Page {
     const END_STRING: &str = "Page for SAMSUNG S-Pen SDK";
 
-    pub const fn hash(&self) -> &[u8; 32] {
+    pub(crate) const fn hash(&self) -> &[u8; 32] {
         &self.hash
+    }
+
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
     }
 }
 

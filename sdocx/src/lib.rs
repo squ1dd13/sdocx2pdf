@@ -41,12 +41,13 @@
     clippy::unneeded_field_pattern
 )]
 
-use crate::{
-    byte_stream::{ByteStreamLe, ReadStringError, TryParse},
-    doc::Document,
-};
+use byte_stream::{ByteStreamLe, ReadStringError, TryParse};
 use std::{io::Read, path::Path};
 use thiserror::Error;
+
+pub use doc::Document;
+pub use end_tag::{BackgroundTheme, DocumentType, PageModel, TextDirection};
+pub use page::object::DocObject;
 
 mod bits;
 mod byte_stream;
@@ -55,7 +56,7 @@ mod doc;
 mod end_tag;
 mod media_info;
 mod note_doc;
-mod page;
+pub mod page;
 mod page_list;
 
 #[derive(Error, Debug)]

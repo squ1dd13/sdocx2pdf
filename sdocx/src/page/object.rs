@@ -1,13 +1,14 @@
 use crate::{
     OpaqueBytes, OpaqueBytesParseError,
     byte_stream::{SeekableByteStreamLe, TryParse},
+    context::{DocumentContext, TryParseWithContext},
     page::object::{
         audio::{Audio, AudioParseError},
         base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
         image::{Image, ImageParseError},
         line::{Line, LineParseError},
         painting::{Painting, PaintingParseError},
-        shape::{Shape, ShapeParseError},
+        shape::{Shape, ShapeParseContext, ShapeParseError},
         stroke::{Stroke, StrokeParseError},
         text::{Text, TextParseError},
         web::{Web, WebParseError},
@@ -81,6 +82,11 @@ pub enum DocObjectParseError {
     BadType(u8),
 }
 
+pub(crate) struct DocObjectParseContext<'a, 'b> {
+    pub object_type: u8,
+    pub doc_ctx: DocumentContext<'a, 'b>,
+}
+
 #[derive(Debug)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
@@ -129,21 +135,42 @@ pub enum DocObject {
     Generic(OpaqueObject),
 }
 
-impl DocObject {
-    // We use dynamic dispatch for the stream because object parsing can be recursive, and we don't
-    // want to end up with recursive stream types ("Take<&mut Take<&mut Take<...>>>").
-    pub fn try_parse_with_type(
-        mut stream: &mut dyn SeekableByteStreamLe,
-        object_type: u8,
+// Only implemented for a `dyn` reader so that objects themselves can use this trait impl without
+// errors related to recursive reader types.
+impl<'a> TryParseWithContext<dyn SeekableByteStreamLe + 'a, DocObjectParseContext<'a, 'a>>
+    for DocObject
+{
+    type ParseError = DocObjectParseError;
+
+    fn try_parse_with_ctx(
+        mut stream: &mut (dyn SeekableByteStreamLe + 'a),
+        DocObjectParseContext {
+            object_type,
+            doc_ctx,
+        }: &DocObjectParseContext<'a, 'a>,
     ) -> Result<DocObject, DocObjectParseError> {
+        let object_type = *object_type;
+
         // Because `dyn SeekableByteStreamLe` is not `Sized`:
         let stream = &mut stream;
 
         Ok(match object_type {
-            1 => DocObject::Stroke(Box::new(TryParse::try_parse(stream)?)),
-            2 => DocObject::Text(Box::new(TryParse::try_parse(stream)?)),
-            3 => DocObject::Image(Box::new(TryParse::try_parse(stream)?)),
-            7 => DocObject::Shape(Box::new(Shape::try_parse_as_final(stream)?)),
+            1 => DocObject::Stroke(Box::new(Stroke::try_parse_with_ctx(
+                stream,
+                doc_ctx.string_registry,
+            )?)),
+
+            2 => DocObject::Text(Box::new(Text::try_parse_with_ctx(stream, doc_ctx)?)),
+            3 => DocObject::Image(Box::new(Image::try_parse_with_ctx(stream, doc_ctx)?)),
+
+            7 => DocObject::Shape(Box::new(Shape::try_parse_with_ctx(
+                stream,
+                &ShapeParseContext {
+                    is_shape_only: true,
+                    doc_ctx: *doc_ctx,
+                },
+            )?)),
+
             8 => DocObject::Line(Box::new(TryParse::try_parse(stream)?)),
             10 => DocObject::Audio(Box::new(TryParse::try_parse(stream)?)),
             13 => DocObject::Web(Box::new(TryParse::try_parse(stream)?)),
@@ -187,7 +214,9 @@ impl DocObject {
             }
         })
     }
+}
 
+impl DocObject {
     pub fn object_base(&self) -> &ObjectBase {
         match self {
             DocObject::Line(line_object) => line_object.object_base(),

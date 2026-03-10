@@ -1,6 +1,7 @@
 use std::{
     f32,
     io::{self, Read, Seek},
+    rc::Rc,
 };
 
 use num::FromPrimitive;
@@ -9,7 +10,9 @@ use thiserror::Error;
 
 use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
+    context::TryParseWithContext,
     impl_try_from_for_optional_from,
+    note_doc::{NoSuchRegisteredStringError, StringRegistry},
     page::{
         Point,
         object::{
@@ -24,25 +27,33 @@ use crate::{
 ///
 /// [1]: <https://developer.android.com/develop/ui/compose/touch-input/stylus-input/advanced-stylus-features#stylus_axis_data>
 #[derive(Clone, Copy, Debug)]
-struct TiltData {
-    /// Tilt angle in radians. Range is \[0, pi/2\], where 0 means the pen is parallel to the axis
-    /// coming out of the document towards the user, and pi/2 means the pen is parallel to the
+pub struct TiltData {
+    /// Tilt angle in radians. Range is \[0, π/2\], where 0 means the pen is parallel to the axis
+    /// coming out of the document towards the user, and π/2 means the pen is parallel to the
     /// plane of the document.
-    tilt: f32,
+    pub tilt: f32,
 
-    /// Orientation angle in radians, relative to the document. Range is \[-pi, pi\], where
+    /// Orientation angle in radians, relative to the document. Range is \[-π, π\], where
     ///  * 0 means the pen is oriented with its tip towards the top of the document;
-    ///  * +/- pi means the tip is towards the bottom of the document;
-    ///  * -pi/2 means ths tip is towards the left;
-    ///  * pi/2 means the tip is towards the right.
-    orientation: f32,
+    ///  * +/- π means the tip is towards the bottom of the document;
+    ///  * -π/2 means ths tip is towards the left;
+    ///  * π/2 means the tip is towards the right.
+    pub orientation: f32,
 }
 
-struct Event {
-    point: Point,
-    pressure: f32,
-    timestamp: u32,
-    tilt_data: Option<TiltData>,
+/// A single stroke event. Essentially a sample of the tool state at some point during the stroke.
+pub struct Event {
+    /// Tool position.
+    pub point: Point,
+
+    /// Pressure in \[0, 1.0\], as a fraction of the maximum pressure.
+    pub pressure: f32,
+
+    /// Time at which the event occurred, on some scale.
+    pub timestamp: u32,
+
+    /// Optional information about the angle of the tool.
+    pub tilt_data: Option<TiltData>,
 }
 
 impl Event {
@@ -235,8 +246,8 @@ impl std::fmt::Debug for Event {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
-enum ToolType {
+#[derive(Debug, FromPrimitive, Clone, Copy)]
+pub enum ToolType {
     /// `TOOL_TYPE_UNKNOWN`
     Unknown = 0,
     /// `TOOL_TYPE_FINGER`
@@ -305,6 +316,7 @@ pub enum StrokeParseError {
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
     BadToolType(#[from] InvalidToolTypeError),
+    NoSuchString(#[from] NoSuchRegisteredStringError),
     BadDashType(#[from] InvalidDashTypeError),
     BadStrokeType(#[from] InvalidStrokeTypeError),
     Unfinished(#[from] UnfinishedParsingError),
@@ -330,11 +342,11 @@ pub struct Stroke {
 
     tool_type: ToolType,
 
-    advanced_pen_settings_str_id: Option<u32>,
+    advanced_pen_settings: Option<Rc<str>>,
     colour: Option<[u8; 4]>,
     pen_size: Option<f32>,
     unk: Option<u32>,
-    pen_name_str_id: Option<u32>,
+    pen_name: Option<Rc<str>>,
     fixed_width: Option<f32>,
     size_level: Option<u32>,
     particle_density: Option<u32>,
@@ -347,10 +359,31 @@ pub struct Stroke {
     pen_repeat_distance: f32,
 }
 
-impl<R: Read + Seek> TryParse<R> for Stroke {
+impl Stroke {
+    pub const fn tool_type(&self) -> ToolType {
+        self.tool_type
+    }
+
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub const fn pen_size(&self) -> Option<f32> {
+        self.pen_size
+    }
+
+    pub fn pen_name(&self) -> Option<&str> {
+        self.pen_name.as_ref().map(AsRef::as_ref)
+    }
+}
+
+impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
     type ParseError = StrokeParseError;
 
-    fn try_parse(stream: &mut R) -> Result<Stroke, StrokeParseError> {
+    fn try_parse_with_ctx(
+        stream: &mut R,
+        string_registry: &StringRegistry,
+    ) -> Result<Stroke, StrokeParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 1)?;
@@ -396,12 +429,12 @@ impl<R: Read + Seek> TryParse<R> for Stroke {
 
         unpack_field_flags!(field_check_flags, {
             // missing 0
-            1 => advanced_pen_settings_str_id: stream.read_u32_le()?;
+            1 => advanced_pen_settings: string_registry.try_get(stream.read_u32_le()?)?;
             2 => colour: stream.read_4_bytes()?;
             3 => pen_size: stream.read_f32_le()?;
             4 => unk: stream.read_u32_le()?;
             // missing 5 and 6
-            7 => pen_name_str_id: stream.read_u32_le()?;
+            7 => pen_name: string_registry.try_get(stream.read_u32_le()?)?;
             8 => fixed_width: stream.read_f32_le()?;
             9 => size_level: stream.read_u32_le()?;
             10 => particle_density: stream.read_u32_le()?;
@@ -435,11 +468,11 @@ impl<R: Read + Seek> TryParse<R> for Stroke {
             is_generated,
             events,
             tool_type,
-            advanced_pen_settings_str_id,
+            advanced_pen_settings,
             colour,
             pen_size,
             unk,
-            pen_name_str_id,
+            pen_name,
             fixed_width,
             size_level,
             particle_density,

@@ -11,10 +11,10 @@ use zip::{HasZipMetadata, ZipArchive};
 use crate::{
     byte_stream::TryParse,
     context::{DocumentContext, TryParseWithContext},
-    end_tag::{EndTag, EndTagParseError},
+    end_tag::{EndTag, EndTagParseError, PageModel},
     media_info::{FileRegistry, FileRegistryParseError},
     note_doc::{NoteDoc, NoteDocParseError},
-    page::{Page, PageParseError},
+    page::{Page, PageParseError, object::text::Text},
     page_list::{PageList, PageListParseError, PageRef},
 };
 
@@ -33,6 +33,9 @@ pub enum DocumentError {
     #[error("'{0}' is not in the zip archive")]
     MissingArchiveEntry(Cow<'static, str>),
 
+    #[error("hash in page list does not match note file")]
+    PageListHashMismatch,
+
     #[error("incorrect hash for page '{0}'")]
     PageHashMismatch(String),
 
@@ -41,7 +44,6 @@ pub enum DocumentError {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct Document {
     note: NoteDoc,
     pages: Vec<Page>,
@@ -107,7 +109,7 @@ impl Document {
         };
 
         if &note_hash != note.hash() {
-            panic!("uh oh");
+            return Err(DocumentError::PageListHashMismatch);
         }
 
         // Parse the file corresponding to each page reference.
@@ -165,7 +167,7 @@ impl Document {
         };
 
         if &note_hash != note.hash() {
-            panic!("uh oh");
+            return Err(DocumentError::PageListHashMismatch);
         }
 
         // Parse the file corresponding to each page reference.
@@ -201,5 +203,28 @@ impl Document {
             pages,
             end_tag,
         })
+    }
+
+    pub fn pages(&self) -> &[Page] {
+        &self.pages
+    }
+
+    pub const fn page_model(&self) -> PageModel {
+        self.end_tag.page_model
+    }
+
+    pub fn width_height(&self) -> (f64, f64) {
+        (
+            self.end_tag.note_width.into(),
+            self.end_tag.note_height.into(),
+        )
+    }
+
+    pub const fn title_text(&self) -> &Text {
+        &self.note.title_text
+    }
+
+    pub const fn body_text(&self) -> &Text {
+        &self.note.body_text
     }
 }

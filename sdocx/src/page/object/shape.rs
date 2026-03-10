@@ -3,6 +3,7 @@ use crate::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, TryParse,
         UnfinishedParsingError,
     },
+    context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
     page::{
         Point, Rect,
@@ -11,7 +12,7 @@ use crate::{
             header::{ObjectHeader, ObjectHeaderError},
             shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
-            text_core,
+            text_core::{self, CommonParseContext},
         },
     },
     read_size_and_vec, unpack_bool_flags, unpack_field_flags,
@@ -386,7 +387,7 @@ struct Template {
 
 #[derive(Debug)]
 #[expect(dead_code)]
-pub struct Data {
+pub struct ShapeData {
     shape_type: ShapeType,
     fill_effect: Option<FillEffect>,
     template: Option<Template>,
@@ -500,8 +501,8 @@ impl_try_from_for_optional_from!(TextAutoFitType, u8, from_u8, pub InvalidTextAu
 
 #[derive(Debug)]
 #[expect(dead_code)]
-struct Text {
-    text_common: Option<text_core::Common>,
+pub struct TextData {
+    pub text_common: Option<text_core::Common>,
     text_area_type: Option<TextAreaType>,
     hint_text: Option<String>,
     hint_text_vertical_offset: Option<f32>,
@@ -521,7 +522,7 @@ struct Text {
 
 #[derive(Debug)]
 #[expect(dead_code)]
-pub struct Image {
+pub struct ImageData {
     transparency: bool,
 
     border_image_hash: Option<String>,
@@ -565,22 +566,32 @@ pub enum ShapeParseError {
     Unfinished(#[from] UnfinishedParsingError),
 }
 
+pub struct ShapeParseContext<'fr, 'sr> {
+    pub is_shape_only: bool,
+    pub doc_ctx: DocumentContext<'fr, 'sr>,
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct Shape {
     shape_base: ShapeBase,
-    pub data: Data,
+    pub(crate) shape_data: ShapeData,
     pen: Pen,
-    text: Text,
-    pub image: Image,
+    pub(crate) text_data: TextData,
+    pub(crate) image_data: ImageData,
 
     control_points: Vec<Point>,
 }
 
-impl Shape {
-    fn try_parse_inner<R: Read + Seek>(
+impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for Shape {
+    type ParseError = ShapeParseError;
+
+    fn try_parse_with_ctx(
         stream: &mut R,
-        is_shape_only: bool,
+        &ShapeParseContext {
+            is_shape_only,
+            doc_ctx,
+        }: &ShapeParseContext<'a, 'a>,
     ) -> Result<Shape, ShapeParseError> {
         let shape_base = ShapeBase::try_parse(stream)?;
 
@@ -633,9 +644,12 @@ impl Shape {
         // todo: SPen::ObjectShapeTemplateFactory::NewTemplate
 
         unpack_field_flags!(field_flags, {
-            0 => text_common: text_core::Common::try_parse_with_version(
+            0 => text_common: text_core::Common::try_parse_with_ctx(
                 &mut stream,
-                shape_base.object_base().format_version,
+                &CommonParseContext {
+                    format_version: shape_base.object_base().format_version,
+                    doc_ctx
+                },
             )?;
 
             1 => text_area_type: stream.read_u8()?.try_into()?;
@@ -681,7 +695,7 @@ impl Shape {
 
         Ok(Shape {
             shape_base,
-            data: Data {
+            shape_data: ShapeData {
                 shape_type,
                 fill_effect,
                 template,
@@ -697,7 +711,7 @@ impl Shape {
                 default_pen_name_id,
                 style_id,
             },
-            text: Text {
+            text_data: TextData {
                 text_common,
                 text_area_type,
                 hint_text,
@@ -715,7 +729,7 @@ impl Shape {
                 lined_paper_thickness,
                 lined_paper_colour,
             },
-            image: Image {
+            image_data: ImageData {
                 transparency: image_transparency,
 
                 border_image_hash: None,
@@ -732,13 +746,14 @@ impl Shape {
             control_points,
         })
     }
+}
 
-    pub fn try_parse_as_final<R: Read + Seek>(stream: &mut R) -> Result<Shape, ShapeParseError> {
-        Shape::try_parse_inner(stream, true)
-    }
-
-    pub fn try_parse_as_base<R: Read + Seek>(stream: &mut R) -> Result<Shape, ShapeParseError> {
-        Shape::try_parse_inner(stream, false)
+impl Shape {
+    pub fn raw_text_string(&self) -> Option<&str> {
+        self.text_data
+            .text_common
+            .as_ref()
+            .map(|tc| tc.raw_string())
     }
 }
 

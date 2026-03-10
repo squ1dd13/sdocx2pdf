@@ -3,13 +3,14 @@ use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
+    byte_stream::{BoundedStream, ByteStreamLe, UnfinishedParsingError},
+    context::{DocumentContext, TryParseWithContext},
     page::{
         Rect,
         object::{
             base::{HasObjectBase, ObjectBase},
             header::{ObjectHeader, ObjectHeaderError},
-            shape::{InvalidBorderTypeError, Shape, ShapeParseError},
+            shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
         },
     },
     unpack_field_flags,
@@ -30,11 +31,20 @@ pub struct Image {
     shape: Shape,
 }
 
-impl<R: Read + Seek> TryParse<R> for Image {
+impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {
     type ParseError = ImageParseError;
 
-    fn try_parse(stream: &mut R) -> Result<Image, ImageParseError> {
-        let mut shape = Shape::try_parse_as_base(stream)?;
+    fn try_parse_with_ctx(
+        stream: &mut R,
+        &ctx: &DocumentContext<'_, '_>,
+    ) -> Result<Image, ImageParseError> {
+        let mut shape = Shape::try_parse_with_ctx(
+            stream,
+            &ShapeParseContext {
+                is_shape_only: false,
+                doc_ctx: ctx,
+            },
+        )?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 3)?;
 
@@ -64,19 +74,19 @@ impl<R: Read + Seek> TryParse<R> for Image {
             18 => original_image_bind_id: stream.read_u32_le()?;
         });
 
-        shape.image.crop_rect = crop_rect;
+        shape.image_data.crop_rect = crop_rect;
 
-        shape.data.border_colour = border_colour;
-        shape.data.border_width = border_width;
-        shape.data.border_type = border_type;
+        shape.shape_data.border_colour = border_colour;
+        shape.shape_data.border_width = border_width;
+        shape.shape_data.border_type = border_type;
 
-        shape.image.border_image_bind_id = border_image_bind_id;
-        shape.image.border_image_nine_patch_rect = border_image_nine_patch_rect;
-        shape.image.border_line_width = border_line_width;
-        shape.image.border_image_nine_patch_width = border_image_nine_patch_width;
+        shape.image_data.border_image_bind_id = border_image_bind_id;
+        shape.image_data.border_image_nine_patch_rect = border_image_nine_patch_rect;
+        shape.image_data.border_line_width = border_line_width;
+        shape.image_data.border_image_nine_patch_width = border_image_nine_patch_width;
 
-        shape.image.original_rect = original_rect;
-        shape.image.original_image_id = original_image_bind_id;
+        shape.image_data.original_rect = original_rect;
+        shape.image_data.original_image_id = original_image_bind_id;
 
         header.ensure_flags_used()?;
         stream.ensure_eof()?;

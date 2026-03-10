@@ -86,7 +86,7 @@ impl<R: Read> TryParse<R> for EncryptionInfo {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug, FromPrimitive, Clone, Copy)]
 pub enum PageModel {
     /// `PageMode.LIST`
     Paged = 0,
@@ -183,14 +183,14 @@ pub struct EndTag {
     last_modified_time: DateTime<Utc>,
     is_landscape: bool,
     cover_image: String,
-    note_width: u32,
-    note_height: f32,
+    pub note_width: u32,
+    pub note_height: f32,
     app_name: String,
     app_version: AppVersion,
     min_format_version: u32,
     created_time: DateTime<Utc>,
     last_viewed_page_index: u32,
-    page_model: PageModel,
+    pub page_model: PageModel,
     document_type: DocumentType,
     owner_id: String,
     encryption_info: Option<EncryptionInfo>,

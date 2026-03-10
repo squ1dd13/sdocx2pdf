@@ -5,7 +5,7 @@ use crate::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, ReadTimestampError,
         TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
-    context::TryParseWithContext,
+    context::{DocumentContext, TryParseWithContext},
     end_tag::{
         BackgroundTheme, InvalidBackgroundThemeError, InvalidTextDirectionError, TextDirection,
     },
@@ -20,7 +20,7 @@ use num_derive::FromPrimitive;
 use sha2::Digest;
 use std::{
     collections::HashMap,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Cursor, Read, Seek, SeekFrom},
     rc::Rc,
 };
 use thiserror::Error;
@@ -262,7 +262,6 @@ pub struct StringRegistry {
     strings: HashMap<u32, Rc<str>>,
 }
 
-#[expect(dead_code)]
 impl StringRegistry {
     pub fn get(&self, key: u32) -> Option<Rc<str>> {
         self.strings.get(&key).map(Rc::clone)
@@ -340,8 +339,8 @@ pub enum NoteDocParseError {
     #[error("bytes left over after parsing text object")]
     TextObject(#[source] UnfinishedParsingError),
 
-    #[error("too many entries ({0})")]
-    TooManyEntries(u32),
+    #[error("{0} too large for `usize`")]
+    UsizeTooSmall(u32),
 
     #[error("computed hash does not match hash in stream")]
     HashMismatch,
@@ -362,8 +361,8 @@ pub struct NoteDoc {
     page_horizontal_padding: u32,
     page_vertical_padding: u32,
     min_format_version: u32,
-    title_text: Text,
-    body_text: Text,
+    pub title_text: Text,
+    pub body_text: Text,
     metadata: NoteDocMetadata,
     template_uri: Option<String>,
     last_edited_page_index: Option<u32>,
@@ -434,22 +433,23 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
         let page_vertical_padding = reader.read_u32_le()?;
         let min_format_version = reader.read_u32_le()?;
 
-        let title_text = {
-            let mut reader = reader.take_exclusive_length_prefixed()?;
-
-            let text = Text::try_parse(&mut reader)?;
-            reader.ensure_eof().map_err(NoteDocParseError::TextObject)?;
-
-            text
+        // The text objects need file and string registries for parsing. We have the file registry,
+        // but we haven't yet parsed the string registry, so we read the bytes only and defer the
+        // parsing until after we have the string registry.
+        let title_text_bytes = {
+            let n = reader.read_u32_le()?;
+            reader.read_u8s(
+                n.try_into()
+                    .map_err(|_| NoteDocParseError::UsizeTooSmall(n))?,
+            )?
         };
 
-        let body_text = {
-            let mut reader = reader.take_exclusive_length_prefixed()?;
-
-            let text = Text::try_parse(&mut reader)?;
-            reader.ensure_eof().map_err(NoteDocParseError::TextObject)?;
-
-            text
+        let body_text_bytes = {
+            let n = reader.read_u32_le()?;
+            reader.read_u8s(
+                n.try_into()
+                    .map_err(|_| NoteDocParseError::UsizeTooSmall(n))?,
+            )?
         };
 
         // fixme: Sometimes there's an eight-byte underread here.
@@ -490,7 +490,7 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             13 => voice_data: read_size_and_vec!(
                 reader,
                 u32,
-                NoteDocParseError::TooManyEntries,
+                NoteDocParseError::UsizeTooSmall,
                 VoiceRecording::try_parse_with_ctx(reader, file_registry)?,
             );
 
@@ -512,6 +512,15 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             21 => stroke_group_size: reader.read_u32_le()?;
             22 => app_custom_data: reader.read_long_u16_string()?;
         });
+
+        // Now that we have the string registry, we can parse the text objects.
+        let doc_ctx = DocumentContext {
+            file_registry,
+            string_registry: &string_registry,
+        };
+
+        let title_text = Text::try_parse_with_ctx(&mut Cursor::new(title_text_bytes), &doc_ctx)?;
+        let body_text = Text::try_parse_with_ctx(&mut Cursor::new(body_text_bytes), &doc_ctx)?;
 
         field_flags
             .ensure_none_set_unchecked()

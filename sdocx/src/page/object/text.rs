@@ -3,11 +3,12 @@ use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
+    byte_stream::{BoundedStream, ByteStreamLe, UnfinishedParsingError},
+    context::{DocumentContext, TryParseWithContext},
     page::object::{
         base::{HasObjectBase, ObjectBase},
         header::{ObjectHeader, ObjectHeaderError},
-        shape::{InvalidBorderTypeError, Shape, ShapeParseError},
+        shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
     },
     unpack_field_flags,
 };
@@ -27,11 +28,26 @@ pub struct Text {
     shape: Shape,
 }
 
-impl<R: Read + Seek> TryParse<R> for Text {
+impl Text {
+    pub fn raw_string(&self) -> Option<&str> {
+        self.shape.raw_text_string()
+    }
+}
+
+impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Text {
     type ParseError = TextParseError;
 
-    fn try_parse(stream: &mut R) -> Result<Text, TextParseError> {
-        let mut shape = Shape::try_parse_as_base(stream)?;
+    fn try_parse_with_ctx(
+        stream: &mut R,
+        &doc_ctx: &DocumentContext<'_, '_>,
+    ) -> Result<Text, TextParseError> {
+        let mut shape = Shape::try_parse_with_ctx(
+            stream,
+            &ShapeParseContext {
+                is_shape_only: false,
+                doc_ctx,
+            },
+        )?;
 
         let (mut header, mut stream) = ObjectHeader::try_parse(stream, 2)?;
 
@@ -43,9 +59,9 @@ impl<R: Read + Seek> TryParse<R> for Text {
             3 => border_type: stream.read_u16_le()?.try_into()?;
         });
 
-        shape.data.border_colour = border_colour;
-        shape.data.border_width = border_width;
-        shape.data.border_type = border_type;
+        shape.shape_data.border_colour = border_colour;
+        shape.shape_data.border_width = border_width;
+        shape.shape_data.border_type = border_type;
 
         header.ensure_flags_used()?;
         stream.ensure_eof()?;

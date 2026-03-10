@@ -6,8 +6,9 @@ use thiserror::Error;
 
 use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, ReadStringError, TryParse, UnfinishedParsingError},
+    context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
-    page::object::{DocObject, DocObjectParseError},
+    page::object::{DocObject, DocObjectParseContext, DocObjectParseError},
     read_u16_sized_vec, read_u32_sized_vec,
 };
 
@@ -226,6 +227,11 @@ pub enum CommonParseError {
     Unfinished(#[from] UnfinishedParsingError),
 }
 
+pub struct CommonParseContext<'fr, 'sr> {
+    pub format_version: u32,
+    pub doc_ctx: DocumentContext<'fr, 'sr>,
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct Common {
@@ -245,9 +251,20 @@ pub struct Common {
 }
 
 impl Common {
-    pub fn try_parse_with_version(
-        stream: &mut (impl ByteStreamLe + Seek),
-        format_version: u32,
+    pub fn raw_string(&self) -> &str {
+        &self.text
+    }
+}
+
+impl<'a, R: Read + Seek> TryParseWithContext<R, CommonParseContext<'a, 'a>> for Common {
+    type ParseError = CommonParseError;
+
+    fn try_parse_with_ctx(
+        stream: &mut R,
+        &CommonParseContext {
+            format_version,
+            doc_ctx,
+        }: &CommonParseContext<'a, 'a>,
     ) -> Result<Common, CommonParseError> {
         let mut stream = stream.take_exclusive_length_prefixed()?;
 
@@ -302,8 +319,14 @@ impl Common {
                 };
 
                 // `_obj_size` is exactly the size of this:
-                let object = DocObject::try_parse_with_type(&mut obj_stream, object_type)
-                    .map_err(Box::new)?;
+                let object = DocObject::try_parse_with_ctx(
+                    &mut obj_stream,
+                    &DocObjectParseContext {
+                        object_type,
+                        doc_ctx,
+                    },
+                )
+                .map_err(Box::new)?;
 
                 let span = InlineObject {
                     position: obj_stream.read_u32_le()?,
