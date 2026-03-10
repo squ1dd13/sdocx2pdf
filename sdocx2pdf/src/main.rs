@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use printpdf::{
     Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
     PolygonRing, Rgb, WindingOrder,
@@ -6,6 +7,16 @@ use printpdf::{
 struct PdfSpace;
 type PdfPoint = euclid::Point2D<f64, PdfSpace>;
 type PdfVector = euclid::Vector2D<f64, PdfSpace>;
+
+fn pdf_point_into_line_point(point: PdfPoint) -> LinePoint {
+    LinePoint {
+        p: printpdf::Point {
+            x: Mm(point.x as f32).into(),
+            y: Mm(point.y as f32).into(),
+        },
+        bezier: false,
+    }
+}
 
 fn main() {
     let document = sdocx::Document::from_zip(
@@ -31,6 +42,8 @@ fn main() {
     eprintln!("w = {w}, h = {h}");
 
     let mut event_count = 0_usize;
+    let mut ring_count = 0_usize;
+    let mut discarded_event_count = 0_usize;
 
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
@@ -52,72 +65,72 @@ fn main() {
 
                 event_count += stroke.events().len();
 
-                // let mut total_pressure = 0_f32;
+                let pen_size = stroke.pen_size().map(f64::from).unwrap_or(1.0);
 
-                let events = stroke.events();
-                let pen_size = stroke.pen_size().unwrap_or(1.0);
-
-                let event_points: Vec<PdfPoint> = stroke
+                let chunked_events = stroke
                     .events()
                     .iter()
-                    .map(|e| PdfPoint::new(e.point.x, f64::from(h) - e.point.y))
-                    .collect();
-
-                let mut boundary_points = vec![printpdf::LinePoint::default(); events.len() * 2];
-
-                for i in 0..events.len() {
-                    let pos_here = event_points[i];
-
-                    // Calculate "forwards" direction by averaging the directions from the previous
-                    // N points to here and the directions from here to the next M points.
-                    let window_pre_first = i.saturating_sub(75);
-                    let window_post_end = (i + 11).min(events.len());
-
-                    let mut forwards = event_points[window_pre_first..i]
-                        .iter()
-                        .map(|&before| (pos_here - before).normalize())
-                        .chain(
-                            event_points[(i + 1)..window_post_end]
-                                .iter()
-                                .map(|&after| (after - pos_here).normalize()),
+                    .map(|e| {
+                        (
+                            // Convert from `Document`-space, with y=0 at the top, to PDF space,
+                            // with y=0 at the bottom.
+                            PdfPoint::new(e.point.x, f64::from(h) - e.point.y),
+                            e.pressure,
                         )
-                        .filter(|v| v.is_finite())
-                        .sum::<PdfVector>()
-                        .normalize();
+                    })
+                    // Group consecutive events with the same position.
+                    .chunk_by(|(pt, _)| *pt);
 
-                    // If none of the directions were finite or all the finite ones were zero, the
-                    // average will be zero.
-                    if forwards.square_length() == 0.0 {
-                        // Best guess for left-to-right writing systems.
-                        forwards = PdfVector::new(1.0, 0.0);
-                    }
+                // Merge each group into a single event that uses the common position and the
+                // maximum pressure. After this, any two consecutive events are guaranteed to
+                // differ in position. We use the largest pressure value when merging events
+                // because when several events cover the same position, only the one with the
+                // largest pressure needs to be drawn, as it will cover the others. (At least,
+                // in the theoretical model where each event is drawn as a disc.)
+                let deduped_events = chunked_events.into_iter().map(|(pos, events)| {
+                    (pos, {
+                        // One of the events isn't discarded, so take that one off.
+                        discarded_event_count = discarded_event_count.wrapping_sub(1);
 
-                    // fixme: This system will never produce nice-looking text because inevitably
-                    // we will create points that are contained within the polygon, which messes up
-                    // the fill and leaves ugly gaps in places.
+                        events
+                            .map(|(_, pressure)| {
+                                discarded_event_count = discarded_event_count.wrapping_add(1);
+                                pressure
+                            })
+                            .max_by(|a, b| a.total_cmp(b))
+                            // There is guaranteed to be at least one pressure value.
+                            .unwrap()
+                    })
+                });
 
-                    let left_dir = PdfVector::new(-forwards.y, forwards.x);
+                // todo: We should be able to avoid self-intersection by taking points while
+                // the distance from the start is increasing. This would be more efficient than
+                // making a ring for every pair of points.
+                let rings = deduped_events.tuple_windows().map(
+                    |((start_pos, start_pressure), (end_pos, end_pressure))| {
+                        let forwards = (end_pos - start_pos).normalize();
 
-                    // Square-rooting the pressure prevents low pressure values making stuff
-                    // stupidly small, while also keeping it in [0,1]. We halve the pen size so
-                    // that the distance between the left and right points is equal to the pen
-                    // size, not double.
-                    let spread_left =
-                        left_dir * f64::from(pen_size) * 0.5 * f64::from(events[i].pressure).sqrt();
+                        // Should not fail, because no pair of consecutive events have a common
+                        // position.
+                        debug_assert!(forwards.is_finite());
 
-                    let left_point = pos_here + spread_left;
-                    let right_point = pos_here - spread_left;
+                        let left = PdfVector::new(-forwards.y, forwards.x);
 
-                    boundary_points[i] = LinePoint {
-                        p: printpdf::Point::new(Mm(left_point.x as f32), Mm(left_point.y as f32)),
-                        bezier: false,
-                    };
+                        let start_spread = 0.5 * pen_size * f64::from(start_pressure);
+                        let end_spread = 0.5 * pen_size * f64::from(end_pressure);
 
-                    boundary_points[2 * events.len() - i - 1] = LinePoint {
-                        p: printpdf::Point::new(Mm(right_point.x as f32), Mm(right_point.y as f32)),
-                        bezier: false,
-                    };
-                }
+                        PolygonRing {
+                            points: vec![
+                                pdf_point_into_line_point(start_pos - left * start_spread),
+                                pdf_point_into_line_point(start_pos - forwards * end_spread),
+                                pdf_point_into_line_point(start_pos + left * start_spread),
+                                pdf_point_into_line_point(end_pos + left * end_spread),
+                                pdf_point_into_line_point(end_pos + forwards * end_spread),
+                                pdf_point_into_line_point(end_pos - left * end_spread),
+                            ],
+                        }
+                    },
+                );
 
                 let [r, g, b, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
 
@@ -133,9 +146,11 @@ fn main() {
                     },
                     Op::DrawPolygon {
                         polygon: Polygon {
-                            rings: vec![PolygonRing {
-                                points: boundary_points,
-                            }],
+                            rings: {
+                                let rings: Vec<_> = rings.collect();
+                                ring_count += rings.len();
+                                rings
+                            },
                             mode: PaintMode::FillStroke,
                             winding_order: WindingOrder::default(),
                         },
@@ -148,7 +163,12 @@ fn main() {
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
 
-    eprintln!("Document contains {event_count} stroke events");
+    eprintln!(
+        "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
+        100. * (discarded_event_count as f64) / (event_count as f64)
+    );
+
+    eprintln!("Creating PDF with {ring_count} polygon rings");
 
     let mut warnings = vec![];
     let bytes = pdf.save(&PdfSaveOptions::default(), &mut warnings);
