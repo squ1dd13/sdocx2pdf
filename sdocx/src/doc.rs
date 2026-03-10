@@ -213,11 +213,20 @@ impl Document {
         self.end_tag.page_model
     }
 
-    pub fn width_height(&self) -> (f64, f64) {
-        (
-            self.end_tag.note_width.into(),
-            self.end_tag.note_height.into(),
-        )
+    /// Returns the width and height of the document.
+    ///
+    /// # Panics
+    /// Panics if the different components of the document disagree on the values.
+    pub fn width_height(&self) -> (u32, u32) {
+        // Width is always stored as an integer, so we can check for exact equality.
+        assert_eq!(self.end_tag.note_width, self.note.width);
+
+        // Height is stored in the end tag as `f32` and in the note doc as `u32`. Assert that they
+        // agree up to floor/ceil/round.
+        let h_diff = (f64::from(self.end_tag.note_height) - f64::from(self.note.height)).abs();
+        assert!(h_diff < 1.0);
+
+        (self.note.width, self.note.height)
     }
 
     pub const fn title_text(&self) -> &Text {

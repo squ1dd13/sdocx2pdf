@@ -14,6 +14,9 @@ fn main() {
         sdocx::PageModel::Pageless => eprintln!("This is a pageless document"),
     };
 
+    let (w, h) = document.width_height();
+    eprintln!("w = {w}, h = {h}");
+
     let mut event_count = 0_usize;
 
     for page in document.pages() {
