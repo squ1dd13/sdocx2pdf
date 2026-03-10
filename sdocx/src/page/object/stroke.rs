@@ -352,6 +352,7 @@ pub struct Stroke {
     particle_density: Option<u32>,
     rendering_level: Option<u32>,
     original_width: Option<u32>,
+    // Note: If grepping, this is misspelt as "toloerance" in libs
     initial_tolerance: Option<f32>,
     dash_type: Option<DashType>,
     dash_offset: Option<f32>,
