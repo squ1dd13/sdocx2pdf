@@ -1,4 +1,5 @@
-use itertools::Itertools;
+use itertools::{Itertools, Position};
+use lerp::Lerp;
 use printpdf::{
     Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
     PolygonRing, Rgb, WindingOrder,
@@ -43,7 +44,8 @@ fn main() {
 
     let mut event_count = 0_usize;
     let mut polygon_count = 0_usize;
-    let mut discarded_event_count = 0_usize;
+    let mut discarded_duplicate_event_count = 0_usize;
+    let mut discarded_monotone_event_count = 0_usize;
 
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
@@ -70,7 +72,7 @@ fn main() {
 
                 let pen_size = stroke.pen_size().map(f64::from).unwrap_or(1.0);
 
-                let chunked_events = stroke
+                let deduped_events = stroke
                     .events()
                     .iter()
                     .map(|e| {
@@ -81,30 +83,49 @@ fn main() {
                             e.pressure,
                         )
                     })
-                    // Group consecutive events with the same position.
-                    .chunk_by(|(pt, _)| *pt);
+                    .tuple_windows()
+                    .coalesce(|(a, b), (_, c)| {
+                        let ab = b.0 - a.0;
+                        let ac = c.0 - a.0;
 
-                // Merge each group into a single event that uses the common position and the
-                // maximum pressure. After this, any two consecutive events are guaranteed to
-                // differ in position. We use the largest pressure value when merging events
-                // because when several events cover the same position, only the one with the
-                // largest pressure needs to be drawn, as it will cover the others. (At least,
-                // in the theoretical model where each event is drawn as a disc.)
-                let deduped_events = chunked_events.into_iter().map(|(pos, events)| {
-                    (pos, {
-                        // One of the events isn't discarded, so take that one off.
-                        discarded_event_count = discarded_event_count.wrapping_sub(1);
+                        let ac_sql = ac.square_length();
 
-                        events
-                            .map(|(_, pressure)| {
-                                discarded_event_count = discarded_event_count.wrapping_add(1);
-                                pressure
-                            })
-                            .max_by(|a, b| a.total_cmp(b))
-                            // There is guaranteed to be at least one pressure value.
-                            .unwrap()
+                        // If the pressure at `b` is roughly equal to what it would be if we just
+                        // linearly interpolated between the pressures at `a` and `b` by distance,
+                        // and if `b` is roughly on the line between `a` and `c`, then we can
+                        // discard `b` with minimal visual effect.
+                        if ac_sql != 0.0
+                            && ((a.1.lerp(c.1, ab.length() as f32 / (ac_sql as f32).sqrt())) - b.1)
+                                / b.1
+                                <= 0.0001
+                            && ab.angle_to(ac).to_degrees().abs() <= 0.5
+                        {
+                            discarded_monotone_event_count += 1;
+                            Ok((a, c))
+                        } else {
+                            Err(((a, b), (b, c)))
+                        }
                     })
-                });
+                    .with_position()
+                    .flat_map(|(p, (x1, x2))| match p {
+                        Position::First => [Some(x1), None],
+                        Position::Middle | Position::Last => [Some(x2), None],
+                        Position::Only => [Some(x1), Some(x2)],
+                    })
+                    .flatten()
+                    // Merge consecutive events with the same position. We use the largest pressure
+                    // value when merging events because when several events cover the same
+                    // position, only the one with the largest pressure needs to be drawn, since it
+                    // will cover the others. (At least, in the theoretical model where each event
+                    // is drawn as a disc.)
+                    .coalesce(|a, b| {
+                        if a.0 == b.0 {
+                            discarded_duplicate_event_count += 1;
+                            Ok((a.0, a.1.max(b.1)))
+                        } else {
+                            Err((a, b))
+                        }
+                    });
 
                 // todo: We should be able to avoid self-intersection by taking points while
                 // the distance from the start is increasing. This would be more efficient than
@@ -119,8 +140,15 @@ fn main() {
 
                         let left = PdfVector::new(-forwards.y, forwards.x);
 
-                        let start_spread = 0.5 * pen_size * f64::from(start_pressure);
-                        let end_spread = 0.5 * pen_size * f64::from(end_pressure);
+                        let start_spread = 0.5
+                            * pen_size
+                            * f64::from(start_pressure.sqrt().lerp(start_pressure, start_pressure))
+                                .max(0.05);
+
+                        let end_spread = 0.5
+                            * pen_size
+                            * f64::from(end_pressure.sqrt().lerp(end_pressure, end_pressure))
+                                .max(0.05);
 
                         // Approximates an illustration of a belt drive, where one pulley is
                         // centred on the first point and has radius based on the first pressure,
@@ -159,9 +187,12 @@ fn main() {
                     Op::SetFillColor {
                         col: Color::Rgb(Rgb::new(r, g, b, None)),
                     },
-                    Op::SetOutlineColor {
-                        col: Color::Rgb(Rgb::new(r, g, b, None)),
-                    },
+                    // Op::SetOutlineColor {
+                    //     col: Color::Rgb(Rgb::new(r, g, b, None)),
+                    // },
+                    // Op::SetOutlineThickness {
+                    //     pt: Mm(0.01).into(),
+                    // },
                 ]);
 
                 let len_before = page_contents.len();
@@ -182,8 +213,12 @@ fn main() {
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
 
+    let discarded_event_count = discarded_duplicate_event_count + discarded_monotone_event_count;
+
     eprintln!(
-        "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
+        "Discarded {discarded_event_count} ({} + {}) of {event_count} stroke events ({:.1}%).",
+        discarded_duplicate_event_count,
+        discarded_monotone_event_count,
         100. * (discarded_event_count as f64) / (event_count as f64)
     );
 
