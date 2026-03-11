@@ -45,7 +45,7 @@ fn main() {
     let mut event_count = 0_usize;
     let mut polygon_count = 0_usize;
     let mut discarded_duplicate_event_count = 0_usize;
-    let mut discarded_monotone_event_count = 0_usize;
+    let mut discarded_middle_event_count = 0_usize;
 
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
@@ -100,7 +100,7 @@ fn main() {
                                 <= 0.0001
                             && ab.angle_to(ac).to_degrees().abs() <= 0.5
                         {
-                            discarded_monotone_event_count += 1;
+                            discarded_middle_event_count += 1;
                             Ok((a, c))
                         } else {
                             Err(((a, b), (b, c)))
@@ -213,12 +213,12 @@ fn main() {
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
 
-    let discarded_event_count = discarded_duplicate_event_count + discarded_monotone_event_count;
+    let discarded_event_count = discarded_duplicate_event_count + discarded_middle_event_count;
 
     eprintln!(
         "Discarded {discarded_event_count} ({} + {}) of {event_count} stroke events ({:.1}%).",
         discarded_duplicate_event_count,
-        discarded_monotone_event_count,
+        discarded_middle_event_count,
         100. * (discarded_event_count as f64) / (event_count as f64)
     );
 
