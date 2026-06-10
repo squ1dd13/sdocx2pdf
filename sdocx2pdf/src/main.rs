@@ -99,6 +99,48 @@ fn bezier_arc_control_points<T: num::Float, U>(
     Some([(x2, y2).into(), (x3, y3).into()])
 }
 
+fn clean_events(events: &mut Vec<(PdfPoint, f32)>) {
+    while events.len() >= 3 {
+        let mut any_removed = false;
+
+        let mut i = 1;
+
+        while i + 1 < events.len() {
+            let (last_pt, last_pres) = events[i - 1];
+            let (this_pt, this_pres) = events[i];
+            let (next_pt, next_pres) = events[i + 1];
+
+            let this_i = i;
+            i += 2;
+
+            let to_here = this_pt.to_vector() - last_pt.to_vector();
+            let from_here = next_pt.to_vector() - this_pt.to_vector();
+
+            let abs_angle = Angle::radians(to_here.angle_to(from_here).get().abs());
+
+            if abs_angle > Angle::frac_pi_4() / 2.5 {
+                continue;
+            }
+
+            let length_ratio = to_here.length() / (to_here.length() + from_here.length());
+            let pres_guess = last_pres.lerp(next_pres, length_ratio as f32);
+
+            if (pres_guess - this_pres).abs() / this_pres > 0.1 {
+                // Actual pressure is not close to what we might guess.
+                continue;
+            }
+
+            any_removed = true;
+            events.remove(this_i);
+            i -= 1;
+        }
+
+        if !any_removed {
+            break;
+        }
+    }
+}
+
 fn main() {
     // sdocx::test_all();
 
@@ -207,10 +249,13 @@ fn main() {
                         }
                     });
 
+                let mut deduped_events = deduped_events.collect_vec();
+                clean_events(&mut deduped_events);
+
                 // todo: We should be able to avoid self-intersection by taking points while
                 // the distance from the start is increasing. This would be more efficient than
                 // making a polygon for every pair of points.
-                let rings = deduped_events.tuple_windows().flat_map(
+                let rings = deduped_events.into_iter().tuple_windows().flat_map(
                     |((start_pos, start_pressure), (end_pos, end_pressure))| {
                         let forwards = (end_pos - start_pos).normalize();
 
@@ -312,9 +357,9 @@ fn main() {
                 let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
 
                 page_contents.extend([
-                    // Op::SetFillColor {
-                    //     col: Color::Rgb(Rgb::new(r, g, b, None)),
-                    // },
+                    Op::SetFillColor {
+                        col: Color::Rgb(Rgb::new(r, g, b, None)),
+                    },
                     Op::SetOutlineColor {
                         col: Color::Rgb(Rgb::new(r, g, b, None)),
                     },
@@ -328,7 +373,7 @@ fn main() {
                 page_contents.extend(rings.map(|ring| Op::DrawPolygon {
                     polygon: Polygon {
                         rings: vec![ring],
-                        mode: PaintMode::Stroke,
+                        mode: PaintMode::Fill,
                         winding_order: WindingOrder::default(),
                     },
                 }));
