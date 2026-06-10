@@ -26,7 +26,7 @@ mod painting;
 mod shape;
 mod shape_base;
 mod shared;
-mod stroke;
+pub mod stroke;
 pub mod text;
 mod text_core;
 mod web;

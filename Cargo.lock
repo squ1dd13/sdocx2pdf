@@ -1381,6 +1381,7 @@ dependencies = [
  "euclid",
  "itertools 0.14.0",
  "lerp",
+ "num",
  "printpdf",
  "sdocx",
 ]

@@ -7,5 +7,6 @@ edition = "2024"
 euclid = "0.22"
 itertools = "0.14.0"
 lerp = "0.5.0"
+num = "0.4.3"
 printpdf = "0.9"
 sdocx = { path = "../sdocx" }

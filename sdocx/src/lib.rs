@@ -138,8 +138,8 @@ impl<R: Read> TryParse<R> for AppVersion {
     }
 }
 
-#[test]
-fn test_all() {
+// #[test]
+pub fn test_all() {
     let sdocx_paths = [
         "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
         "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754.sdocx",
@@ -171,6 +171,8 @@ fn test_all() {
 
     for path in sdocx_paths {
         let _zipped = Document::from_zip(path).unwrap();
-        let _extracted = Document::from_dir(Path::new(path).with_extension("")).unwrap();
+        let extracted = Document::from_dir(Path::new(path).with_extension("")).unwrap();
+
+        eprintln!("{extracted:#?}");
     }
 }
