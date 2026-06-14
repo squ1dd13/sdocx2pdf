@@ -366,8 +366,7 @@ fn main() {
 
     let mut event_count = 0_usize;
     let mut polygon_count = 0_usize;
-    let mut discarded_duplicate_event_count = 0_usize;
-    let mut discarded_middle_event_count = 0_usize;
+    let mut used_event_count = 0_usize;
 
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
@@ -394,73 +393,7 @@ fn main() {
 
                 event_count += stroke.events().len();
 
-                // let deltas = stroke
-                //     .events()
-                //     .iter()
-                //     .map(|e| e.timestamp)
-                //     .tuple_windows()
-                //     .map(|(t1, t2)| t2.checked_sub(t1).unwrap())
-                //     .counts();
-
-                // assert!(deltas.len() == 1, "deltas: {deltas:?}");
-
                 let pen_size = stroke.pen_size().map(f64::from).unwrap_or(1.0);
-
-                // let deduped_events = stroke
-                //     .events()
-                //     .iter()
-                //     .map(|e| {
-                //         (
-                //             // Convert from `Document`-space, with y=0 at the top, to PDF space,
-                //             // with y=0 at the bottom.
-                //             PdfPoint::new(e.point.x, f64::from(h) - e.point.y),
-                //             e.pressure,
-                //         )
-                //     })
-                //     // .tuple_windows()
-                //     // .coalesce(|(a, b), (_, c)| {
-                //     //     let ab = b.0 - a.0;
-                //     //     let ac = c.0 - a.0;
-                //     //     let ac_sql = ac.square_length();
-                //     //     // If the pressure at `b` is roughly equal to what it would be if we just
-                //     //     // linearly interpolated between the pressures at `a` and `b` by distance,
-                //     //     // and if `b` is roughly on the line between `a` and `c`, then we can
-                //     //     // discard `b` with minimal visual effect.
-                //     //     if ac_sql != 0.0
-                //     //         && ((a.1.lerp(c.1, ab.length() as f32 / (ac_sql as f32).sqrt())) - b.1)
-                //     //             / b.1
-                //     //             <= 10.0
-                //     //         && ab.angle_to(ac).to_degrees().abs() <= 0.5
-                //     //     {
-                //     //         discarded_middle_event_count += 1;
-                //     //         Ok((a, c))
-                //     //     } else {
-                //     //         Err(((a, b), (b, c)))
-                //     //     }
-                //     // })
-                //     // .with_position()
-                //     // .flat_map(|(p, (x1, x2))| match p {
-                //     //     Position::First => [Some(x1), None],
-                //     //     Position::Middle | Position::Last => [Some(x2), None],
-                //     //     Position::Only => [Some(x1), Some(x2)],
-                //     // })
-                //     // .flatten()
-                //     // Merge consecutive events with the same position. We use the largest pressure
-                //     // value when merging events because when several events cover the same
-                //     // position, only the one with the largest pressure needs to be drawn, since it
-                //     // will cover the others. (At least, in the theoretical model where each event
-                //     // is drawn as a disc.)
-                //     .coalesce(|a, b| {
-                //         if a.0 == b.0 {
-                //             discarded_duplicate_event_count += 1;
-                //             Ok((a.0, a.1.max(b.1)))
-                //         } else {
-                //             Err((a, b))
-                //         }
-                //     });
-
-                // let mut deduped_events = deduped_events.collect_vec();
-                // clean_events(&mut deduped_events);
 
                 // Convert from document space, with y=0 at the top, to PDF space, with y=0 at the
                 // bottom.
@@ -490,15 +423,7 @@ fn main() {
                         _ => (ma, mp),
                     });
 
-                page_contents.push(Op::SetOutlineThickness {
-                    pt: Mm(0.05).into(),
-                });
-
-                eprintln!("mp2m is {max_pres_2nd_mag:?}");
-
-                // let rings_and_colours =
-                //     fn_pts.into_iter().tuple_windows().flat_map(|(start, end)| {
-                for (start, end) in fn_pts
+                let rings = fn_pts
                     .into_iter()
                     .filter(|pt| {
                         pt.acceleration().is_none_or(|accn| {
@@ -508,160 +433,89 @@ fn main() {
                         })
                     })
                     .tuple_windows()
-                {
-                    let start_pos = tx.transform_point(start.position());
-                    let end_pos = tx.transform_point(end.position());
-                    let start_pressure = start.pressure();
-                    let end_pressure = end.pressure();
+                    .flat_map(|(start, end)| {
+                        // A single event, ish
+                        used_event_count += 1;
 
-                    let forwards = (end_pos - start_pos).normalize();
+                        let start_pos = tx.transform_point(start.position());
+                        let end_pos = tx.transform_point(end.position());
+                        let start_pressure = start.pressure();
+                        let end_pressure = end.pressure();
 
-                    // // Should not fail, because no pair of consecutive events have a common
-                    // // position.
-                    // debug_assert!(forwards.is_finite());
+                        let forwards = (end_pos - start_pos).normalize();
 
-                    if !forwards.is_finite() {
-                        continue;
-                    }
+                        if !forwards.is_finite() {
+                            return None;
+                        }
 
-                    // let left = PdfVector::new(-forwards.y, forwards.x);
+                        let start_spread =
+                            0.5 * pen_size * f64::from(start_pressure.powf(0.7)).clamp(0.05, 0.3);
+                        let end_spread =
+                            0.5 * pen_size * f64::from(end_pressure.powf(0.7)).clamp(0.05, 0.3);
 
-                    let start_spread =
-                        0.5 * pen_size * f64::from(start_pressure.powf(0.7)).clamp(0.05, 0.3);
-                    let end_spread =
-                        0.5 * pen_size * f64::from(end_pressure.powf(0.7)).clamp(0.05, 0.3);
+                        // fixme: Lots of rejections here...
+                        let [r1, r2, l1, l2] = calc_pulley_line_points_acw(
+                            start_pos,
+                            start_spread,
+                            end_pos,
+                            end_spread,
+                        )?;
 
-                    // fixme: Lots of rejections here...
-                    let Some([r1, r2, l1, l2]) =
-                        calc_pulley_line_points_acw(start_pos, start_spread, end_pos, end_spread)
-                    else {
-                        continue;
-                    };
+                        let top = end_pos + forwards * end_spread;
+                        let bot = start_pos - forwards * end_spread;
 
-                    let top = end_pos + forwards * end_spread;
-                    let bot = start_pos - forwards * end_spread;
+                        // fixme: ...and here.
+                        let [r2_top_c1, r2_top_c2] = bezier_arc_control_points(r2, top, end_pos)?;
+                        let [top_l1_c1, top_l1_c2] = bezier_arc_control_points(top, l1, end_pos)?;
+                        let [l2_bot_c1, l2_bot_c2] = bezier_arc_control_points(l2, bot, start_pos)?;
+                        let [bot_r1_c1, bot_r1_c2] = bezier_arc_control_points(bot, r1, start_pos)?;
 
-                    // fixme: ...and here.
-                    let (
-                        Some([r2_top_c1, r2_top_c2]),
-                        Some([top_l1_c1, top_l1_c2]),
-                        Some([l2_bot_c1, l2_bot_c2]),
-                        Some([bot_r1_c1, bot_r1_c2]),
-                    ) = (
-                        bezier_arc_control_points(r2, top, end_pos),
-                        bezier_arc_control_points(top, l1, end_pos),
-                        bezier_arc_control_points(l2, bot, start_pos),
-                        bezier_arc_control_points(bot, r1, start_pos),
-                    )
-                    else {
-                        continue;
-                    };
+                        let points = vec![
+                            pdf_point_into_line_point(r2),
+                            pdf_point_into_control_point(r2_top_c1),
+                            pdf_point_into_control_point(r2_top_c2),
+                            pdf_point_into_line_point(top),
+                            pdf_point_into_control_point(top_l1_c1),
+                            pdf_point_into_control_point(top_l1_c2),
+                            pdf_point_into_line_point(l1),
+                            pdf_point_into_line_point(l2),
+                            pdf_point_into_control_point(l2_bot_c1),
+                            pdf_point_into_control_point(l2_bot_c2),
+                            pdf_point_into_line_point(bot),
+                            pdf_point_into_control_point(bot_r1_c1),
+                            pdf_point_into_control_point(bot_r1_c2),
+                            pdf_point_into_line_point(r1),
+                        ];
 
-                    let points = vec![
-                        pdf_point_into_line_point(r2),
-                        pdf_point_into_control_point(r2_top_c1),
-                        pdf_point_into_control_point(r2_top_c2),
-                        pdf_point_into_line_point(top),
-                        pdf_point_into_control_point(top_l1_c1),
-                        pdf_point_into_control_point(top_l1_c2),
-                        pdf_point_into_line_point(l1),
-                        pdf_point_into_line_point(l2),
-                        pdf_point_into_control_point(l2_bot_c1),
-                        pdf_point_into_control_point(l2_bot_c2),
-                        pdf_point_into_line_point(bot),
-                        pdf_point_into_control_point(bot_r1_c1),
-                        pdf_point_into_control_point(bot_r1_c2),
-                        pdf_point_into_line_point(r1),
-                    ];
+                        Some(PolygonRing { points })
+                    });
 
-                    // let rgb_accn = Vector3D::<f32, ()>::new(
-                    //     1.0 - start
-                    //         .acceleration()
-                    //         .zip(max_accel_mag)
-                    //         .map(|(a, b)| (a.length() / b) as f32)
-                    //         .unwrap_or_default(),
-                    //     1.0,
-                    //     1.0 - end
-                    //         .acceleration()
-                    //         .zip(max_accel_mag)
-                    //         .map(|(a, b)| (a.length() / b) as f32)
-                    //         .unwrap_or_default(),
-                    // );
+                // fixme: Alpha is ignored here.
+                let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
 
-                    // let rgb_pres = Vector3D::<f32, ()>::new(
-                    //     1.0 - start
-                    //         .pressure_2nd()
-                    //         .zip(max_pres_2nd_mag)
-                    //         .map(|(a, b)| (a.abs() / b) as f32)
-                    //         .unwrap_or_default()
-                    //         .cbrt(),
-                    //     1.0,
-                    //     1.0 - end
-                    //         .pressure_2nd()
-                    //         .zip(max_pres_2nd_mag)
-                    //         .map(|(a, b)| (a.abs() / b) as f32)
-                    //         .unwrap_or_default()
-                    //         .cbrt(),
-                    // );
+                page_contents.extend([
+                    Op::SetFillColor {
+                        col: Color::Rgb(Rgb::new(r, g, b, None)),
+                    },
+                    Op::SetOutlineColor {
+                        col: Color::Rgb(Rgb::new(r, g, b, None)),
+                    },
+                    Op::SetOutlineThickness {
+                        pt: Mm(0.05).into(),
+                    },
+                ]);
 
-                    // let rgb_accn_pres_mean = rgb_accn; //(rgb_accn + rgb_pres) / 2.0;
+                let len_before = page_contents.len();
 
-                    // let col = Color::Rgb(Rgb::new(
-                    //     rgb_accn_pres_mean.x,
-                    //     rgb_accn_pres_mean.y,
-                    //     rgb_accn_pres_mean.z,
-                    //     None,
-                    // ));
+                page_contents.extend(rings.map(|ring| Op::DrawPolygon {
+                    polygon: Polygon {
+                        rings: vec![ring],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::default(),
+                    },
+                }));
 
-                    let col = Color::Rgb(Rgb::new(0., 0., 0., None));
-
-                    page_contents.extend([
-                        Op::SetFillColor { col: col.clone() },
-                        Op::SetOutlineColor { col },
-                        Op::DrawPolygon {
-                            polygon: Polygon {
-                                rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Fill,
-                                winding_order: WindingOrder::default(),
-                            },
-                        },
-                    ]);
-
-                    polygon_count += 1;
-
-                    // // Approximates an illustration of a belt drive, where one pulley is
-                    // // centred on the first point and has radius based on the first pressure,
-                    // // and the other is centred on the second point and has radius based on the
-                    // // second pressure.
-                    // Some((PolygonRing { points }, Color::Rgb(Rgb::new())))
-                }
-
-                // // fixme: Alpha is ignored here.
-                // let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
-
-                // page_contents.extend([
-                //     Op::SetFillColor {
-                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
-                //     },
-                //     Op::SetOutlineColor {
-                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
-                //     },
-                //     Op::SetOutlineThickness {
-                //         pt: Mm(0.05).into(),
-                //     },
-                // ]);
-
-                // let len_before = page_contents.len();
-
-                // page_contents.extend(rings.map(|ring| Op::DrawPolygon {
-                //     polygon: Polygon {
-                //         rings: vec![ring],
-                //         mode: PaintMode::Fill,
-                //         winding_order: WindingOrder::default(),
-                //     },
-                // }));
-
-                // polygon_count += page_contents.len() - len_before;
+                polygon_count += page_contents.len() - len_before;
             }
         }
 
@@ -669,12 +523,10 @@ fn main() {
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
 
-    let discarded_event_count = discarded_duplicate_event_count + discarded_middle_event_count;
+    let discarded_event_count = event_count - used_event_count;
 
     eprintln!(
-        "Discarded {discarded_event_count} ({} + {}) of {event_count} stroke events ({:.1}%).",
-        discarded_duplicate_event_count,
-        discarded_middle_event_count,
+        "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
         100. * (discarded_event_count as f64) / (event_count as f64)
     );
 
