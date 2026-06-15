@@ -29,7 +29,7 @@ use thiserror::Error;
 mod header;
 pub mod object;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Point {
     pub x: f64,
     pub y: f64,

@@ -9,9 +9,13 @@ use printpdf::{
 };
 use sdocx::page::object::stroke::{Event, Stroke};
 
+use crate::stroke::{DerivativesX, InterpolatedStroke};
+
 struct PdfSpace;
 type PdfPoint = Point2D<f64, PdfSpace>;
 type PdfVector = Vector2D<f64, PdfSpace>;
+
+mod stroke;
 
 fn pdf_point_into_line_point(point: PdfPoint) -> LinePoint {
     LinePoint {
@@ -384,12 +388,24 @@ fn main() {
                     continue;
                 };
 
-                let fn_pts = StrokeFnPoint::points_from(stroke);
+                let interpolated = InterpolatedStroke::from_events(stroke.events());
 
-                // eprintln!(
-                //     "Stroke pen is {}",
-                //     stroke.pen_name().unwrap_or("(unspecified)")
-                // );
+                let derivs = DerivativesX::new(
+                    &interpolated,
+                    0.9,
+                    0.9,
+                    f64::from(stroke.events()[0].timestamp),
+                    f64::from(stroke.events().last().unwrap().timestamp),
+                    25,
+                )
+                .unwrap();
+
+                // let fn_pts = StrokeFnPoint::points_from(stroke);
+
+                // // eprintln!(
+                // //     "Stroke pen is {}",
+                // //     stroke.pen_name().unwrap_or("(unspecified)")
+                // // );
 
                 event_count += stroke.events().len();
 
@@ -400,47 +416,19 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, DocumentSpace, PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let (max_accel_mag, max_pres_2nd_mag) =
-                    fn_pts.iter().fold((None, None), |(ma, mp), pt| match pt {
-                        StrokeFnPoint::Middle {
-                            accn, pressure_2nd, ..
-                        } => {
-                            let accn_mag = accn.length();
-                            let pres_2nd_mag = pressure_2nd.abs();
-
-                            (
-                                match ma {
-                                    None => Some(accn_mag),
-                                    Some(max_accn) => Some(max_accn.max(accn_mag)),
-                                },
-                                match mp {
-                                    None => Some(pres_2nd_mag),
-                                    Some(max_pres_2nd) => Some(max_pres_2nd.max(pres_2nd_mag)),
-                                },
-                            )
-                        }
-
-                        _ => (ma, mp),
-                    });
-
-                let rings = fn_pts
-                    .into_iter()
-                    .filter(|pt| {
-                        pt.acceleration().is_none_or(|accn| {
-                            max_accel_mag.is_none_or(|mam| accn.length() < 0.025 * mam)
-                        }) || pt.pressure_2nd().is_none_or(|pres_2nd| {
-                            max_pres_2nd_mag.is_none_or(|mp2m| pres_2nd.abs() < 0.001 * mp2m)
-                        })
-                    })
+                let rings = (0..derivs.t.len())
                     .tuple_windows()
-                    .flat_map(|(start, end)| {
+                    .flat_map(|(i_start, i_end)| {
                         // A single event, ish
                         used_event_count += 1;
 
-                        let start_pos = tx.transform_point(start.position());
-                        let end_pos = tx.transform_point(end.position());
-                        let start_pressure = start.pressure();
-                        let end_pressure = end.pressure();
+                        let start_pos =
+                            tx.transform_point((derivs.x[i_start], derivs.y[i_start]).into());
+
+                        let end_pos = tx.transform_point((derivs.x[i_end], derivs.y[i_end]).into());
+
+                        let start_pressure = derivs.pressure[i_start];
+                        let end_pressure = derivs.pressure[i_end];
 
                         let forwards = (end_pos - start_pos).normalize();
 
@@ -449,9 +437,8 @@ fn main() {
                         }
 
                         let start_spread =
-                            0.5 * pen_size * f64::from(start_pressure.powf(0.7)).clamp(0.05, 0.3);
-                        let end_spread =
-                            0.5 * pen_size * f64::from(end_pressure.powf(0.7)).clamp(0.05, 0.3);
+                            0.5 * pen_size * start_pressure.powf(0.7).clamp(0.05, 0.3);
+                        let end_spread = 0.5 * pen_size * end_pressure.powf(0.7).clamp(0.05, 0.3);
 
                         // fixme: Lots of rejections here...
                         let [r1, r2, l1, l2] = calc_pulley_line_points_acw(
