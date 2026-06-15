@@ -400,12 +400,14 @@ fn main() {
                 )
                 .unwrap();
 
-                // let fn_pts = StrokeFnPoint::points_from(stroke);
+                let (min_curvature, max_curvature) = derivs
+                    .curvature
+                    .iter()
+                    .minmax_by(|a, b| a.total_cmp(b))
+                    .into_option()
+                    .unwrap();
 
-                // // eprintln!(
-                // //     "Stroke pen is {}",
-                // //     stroke.pen_name().unwrap_or("(unspecified)")
-                // // );
+                let curvature_span = max_curvature - min_curvature;
 
                 event_count += stroke.events().len();
 
@@ -416,93 +418,129 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, DocumentSpace, PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let rings = (0..derivs.t.len())
-                    .tuple_windows()
-                    .flat_map(|(i_start, i_end)| {
-                        // A single event, ish
-                        used_event_count += 1;
+                // let rings = (0..derivs.t.len())
+                for (i_start, i_end) in (0..derivs.t.len()).tuple_windows() {
+                    // .flat_map(|(i_start, i_end)| {
+                    // A single event, ish
+                    used_event_count += 1;
 
-                        let start_pos =
-                            tx.transform_point((derivs.x[i_start], derivs.y[i_start]).into());
+                    let start_pos =
+                        tx.transform_point((derivs.x[i_start], derivs.y[i_start]).into());
 
-                        let end_pos = tx.transform_point((derivs.x[i_end], derivs.y[i_end]).into());
+                    let end_pos = tx.transform_point((derivs.x[i_end], derivs.y[i_end]).into());
 
-                        let start_pressure = derivs.pressure[i_start];
-                        let end_pressure = derivs.pressure[i_end];
+                    let start_pressure = derivs.pressure[i_start];
+                    let end_pressure = derivs.pressure[i_end];
 
-                        let forwards = (end_pos - start_pos).normalize();
+                    let forwards = (end_pos - start_pos).normalize();
 
-                        if !forwards.is_finite() {
-                            return None;
-                        }
+                    if !forwards.is_finite() {
+                        continue;
+                        // return None;
+                    }
 
-                        let start_spread =
-                            0.5 * pen_size * start_pressure.powf(0.7).clamp(0.05, 0.3);
-                        let end_spread = 0.5 * pen_size * end_pressure.powf(0.7).clamp(0.05, 0.3);
+                    let start_spread = 0.5 * pen_size * start_pressure.powf(0.7).clamp(0.05, 0.3);
+                    let end_spread = 0.5 * pen_size * end_pressure.powf(0.7).clamp(0.05, 0.3);
 
-                        // fixme: Lots of rejections here...
-                        let [r1, r2, l1, l2] = calc_pulley_line_points_acw(
-                            start_pos,
-                            start_spread,
-                            end_pos,
-                            end_spread,
-                        )?;
+                    // fixme: Lots of rejections here...
+                    let Some([r1, r2, l1, l2]) =
+                        calc_pulley_line_points_acw(start_pos, start_spread, end_pos, end_spread)
+                    else {
+                        continue;
+                    };
 
-                        let top = end_pos + forwards * end_spread;
-                        let bot = start_pos - forwards * end_spread;
+                    let top = end_pos + forwards * end_spread;
+                    let bot = start_pos - forwards * end_spread;
 
-                        // fixme: ...and here.
-                        let [r2_top_c1, r2_top_c2] = bezier_arc_control_points(r2, top, end_pos)?;
-                        let [top_l1_c1, top_l1_c2] = bezier_arc_control_points(top, l1, end_pos)?;
-                        let [l2_bot_c1, l2_bot_c2] = bezier_arc_control_points(l2, bot, start_pos)?;
-                        let [bot_r1_c1, bot_r1_c2] = bezier_arc_control_points(bot, r1, start_pos)?;
+                    // fixme: ...and here.
+                    let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
+                    else {
+                        continue;
+                    };
+                    let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
+                    else {
+                        continue;
+                    };
+                    let Some([l2_bot_c1, l2_bot_c2]) =
+                        bezier_arc_control_points(l2, bot, start_pos)
+                    else {
+                        continue;
+                    };
+                    let Some([bot_r1_c1, bot_r1_c2]) =
+                        bezier_arc_control_points(bot, r1, start_pos)
+                    else {
+                        continue;
+                    };
 
-                        let points = vec![
-                            pdf_point_into_line_point(r2),
-                            pdf_point_into_control_point(r2_top_c1),
-                            pdf_point_into_control_point(r2_top_c2),
-                            pdf_point_into_line_point(top),
-                            pdf_point_into_control_point(top_l1_c1),
-                            pdf_point_into_control_point(top_l1_c2),
-                            pdf_point_into_line_point(l1),
-                            pdf_point_into_line_point(l2),
-                            pdf_point_into_control_point(l2_bot_c1),
-                            pdf_point_into_control_point(l2_bot_c2),
-                            pdf_point_into_line_point(bot),
-                            pdf_point_into_control_point(bot_r1_c1),
-                            pdf_point_into_control_point(bot_r1_c2),
-                            pdf_point_into_line_point(r1),
-                        ];
+                    let points = vec![
+                        pdf_point_into_line_point(r2),
+                        pdf_point_into_control_point(r2_top_c1),
+                        pdf_point_into_control_point(r2_top_c2),
+                        pdf_point_into_line_point(top),
+                        pdf_point_into_control_point(top_l1_c1),
+                        pdf_point_into_control_point(top_l1_c2),
+                        pdf_point_into_line_point(l1),
+                        pdf_point_into_line_point(l2),
+                        pdf_point_into_control_point(l2_bot_c1),
+                        pdf_point_into_control_point(l2_bot_c2),
+                        pdf_point_into_line_point(bot),
+                        pdf_point_into_control_point(bot_r1_c1),
+                        pdf_point_into_control_point(bot_r1_c2),
+                        pdf_point_into_line_point(r1),
+                    ];
 
-                        Some(PolygonRing { points })
-                    });
+                    let curvature_ratio = ((derivs.curvature[i_start] + derivs.curvature[i_end]
+                        - min_curvature * 2.0)
+                        / (curvature_span * 2.0)) as f32;
 
-                // fixme: Alpha is ignored here.
-                let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
+                    assert!(curvature_ratio.is_finite());
 
-                page_contents.extend([
-                    Op::SetFillColor {
-                        col: Color::Rgb(Rgb::new(r, g, b, None)),
-                    },
-                    Op::SetOutlineColor {
-                        col: Color::Rgb(Rgb::new(r, g, b, None)),
-                    },
-                    Op::SetOutlineThickness {
-                        pt: Mm(0.05).into(),
-                    },
-                ]);
+                    let col = Color::Rgb(Rgb::new(curvature_ratio, 0.0, 0.0, None));
 
-                let len_before = page_contents.len();
+                    page_contents.extend([
+                        Op::SetFillColor { col: col.clone() },
+                        Op::SetOutlineColor { col },
+                        Op::SetOutlineThickness {
+                            pt: Mm(0.05 + 0.4 * curvature_ratio).into(),
+                        },
+                        Op::DrawPolygon {
+                            polygon: Polygon {
+                                rings: vec![PolygonRing { points }],
+                                mode: PaintMode::Stroke,
+                                winding_order: WindingOrder::default(),
+                            },
+                        },
+                    ]);
 
-                page_contents.extend(rings.map(|ring| Op::DrawPolygon {
-                    polygon: Polygon {
-                        rings: vec![ring],
-                        mode: PaintMode::Fill,
-                        winding_order: WindingOrder::default(),
-                    },
-                }));
+                    // Some(PolygonRing { points })
+                }
 
-                polygon_count += page_contents.len() - len_before;
+                // // fixme: Alpha is ignored here.
+                // let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
+
+                // page_contents.extend([
+                //     Op::SetFillColor {
+                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
+                //     },
+                //     Op::SetOutlineColor {
+                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
+                //     },
+                //     Op::SetOutlineThickness {
+                //         pt: Mm(0.05).into(),
+                //     },
+                // ]);
+
+                // let len_before = page_contents.len();
+
+                // page_contents.extend(rings.map(|ring| Op::DrawPolygon {
+                //     polygon: Polygon {
+                //         rings: vec![ring],
+                //         mode: PaintMode::Fill,
+                //         winding_order: WindingOrder::default(),
+                //     },
+                // }));
+
+                // polygon_count += page_contents.len() - len_before;
             }
         }
 

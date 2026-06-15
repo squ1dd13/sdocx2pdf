@@ -1,3 +1,5 @@
+use std::ops::Add;
+
 use itertools::Itertools;
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
@@ -100,7 +102,7 @@ pub struct DerivativesX {
     y2: Array1<f64>,
 
     /// Curvature of the stroke. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
-    curvature: Array1<f64>,
+    pub curvature: Array1<f64>,
 
     /// d(pressure)/dt
     pressure1: Array1<f64>,
@@ -141,8 +143,8 @@ impl DerivativesX {
         let tv = times.view();
 
         // Sample the interpolated stroke data uniformly so the filtering makes sense. The raw
-        // stroke data is not in general sampled uniformly (that is, the time delta is not always
-        // the same) which is why we have to interpolate in the first place.
+        // stroke data is not sampled uniformly (that is, the time delta is not always the same)
+        // which is why we have to interpolate in the first place.
         let x_interp = stroke.x.evaluate_array(&tv)?;
         let y_interp = stroke.y.evaluate_array(&tv)?;
         let p_interp = stroke.pressure.evaluate_array(&tv)?;
@@ -155,8 +157,41 @@ impl DerivativesX {
         let y2 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
         let pressure1 = gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
 
-        // https://en.wikipedia.org/wiki/Curvature#Plane_curves
-        let curvature = (&x1 * &y2 - &y1 * &x2).abs() * (x1.pow2() + y1.pow2()).powf(-3.0 / 2.0);
+        let curvature = {
+            // https://en.wikipedia.org/wiki/Curvature#Plane_curves
+            // For more accurate calculation using floats, we rearrange the formula to
+            //   |(x'/r)y'' - (y'/r)x''|/r^2
+            // with r = sqrt(x'^2 + y'^2) calculated using `hypot` in order to avoid over/underflow
+            // when we square the derivatives. We can use fused multiply-add for the numerator.
+            // Note that x'/r and y'/r are the components of the unit tangent vector, and are
+            // therefore in [-1,1].
+
+            let mut c = x2.clone();
+
+            // There is no vectorised `hypot` or FMA, so we need to loop anyway. We might as well
+            // perform the whole calculation in that one loop.
+            ndarray::azip!((c in &mut c, &y2 in &y2, &x1 in &x1, &y1 in &y1) {
+                let x2 = *c;
+
+                let r = x1.hypot(y1);
+
+                // Tangent vector components.
+                let tx = x1 / r;
+                let ty = y1 / r;
+
+                // todo: Kahan?
+                *c = x2.mul_add(-ty, tx * y2).abs() / (r * r);
+
+                // The curvature will be NaN if the division by r^2 fails. This means that x' and
+                // y' are very small. In general this also means the numerator is very small, so we
+                // deal with NaNs by replacing them with zeros.
+                if !c.is_finite() {
+                    *c = 0.0;
+                }
+            });
+
+            c
+        };
 
         let x = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
         let y = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
