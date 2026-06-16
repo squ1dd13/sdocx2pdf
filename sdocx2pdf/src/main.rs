@@ -9,7 +9,7 @@ use printpdf::{
 };
 use sdocx::page::object::stroke::{Event, Stroke};
 
-use crate::stroke::{DerivativesX, InterpolatedStroke};
+use crate::stroke::{FilteredStroke, InterpolatedStroke};
 
 struct PdfSpace;
 type PdfPoint = Point2D<f64, PdfSpace>;
@@ -390,24 +390,17 @@ fn main() {
 
                 let interpolated = InterpolatedStroke::from_events(stroke.events());
 
-                let derivs = DerivativesX::new(
-                    &interpolated,
-                    0.9,
-                    0.9,
-                    f64::from(stroke.events()[0].timestamp),
-                    f64::from(stroke.events().last().unwrap().timestamp),
-                    25,
-                )
-                .unwrap();
+                // fixme: Number of samples here should be chosen with regard to the length, etc.
+                let derivs = FilteredStroke::new(&interpolated, 0.9, 0.9, 100).unwrap();
 
-                let (min_curvature, max_curvature) = derivs
-                    .curvature
-                    .iter()
-                    .minmax_by(|a, b| a.total_cmp(b))
-                    .into_option()
-                    .unwrap();
+                // let (min_curvature, max_curvature) = derivs
+                //     .curvature
+                //     .iter()
+                //     .minmax_by(|a, b| a.total_cmp(b))
+                //     .into_option()
+                //     .unwrap();
 
-                let curvature_span = max_curvature - min_curvature;
+                // let curvature_span = max_curvature - min_curvature;
 
                 event_count += stroke.events().len();
 
@@ -418,19 +411,34 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, DocumentSpace, PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
+                let sample_times = derivs.compute_sample_times(f64::to_radians(40.0), 2.0, 25.0);
+
                 // let rings = (0..derivs.t.len())
-                for (i_start, i_end) in (0..derivs.t.len()).tuple_windows() {
+                for (t_start, t_end) in sample_times.tuple_windows() {
+                    // eprintln!("dt = {}", t_end - t_start);
+
                     // .flat_map(|(i_start, i_end)| {
                     // A single event, ish
                     used_event_count += 1;
 
-                    let start_pos =
-                        tx.transform_point((derivs.x[i_start], derivs.y[i_start]).into());
+                    let start_pos = tx.transform_point(
+                        (
+                            derivs.x.evaluate(t_start).unwrap(),
+                            derivs.y.evaluate(t_start).unwrap(),
+                        )
+                            .into(),
+                    );
 
-                    let end_pos = tx.transform_point((derivs.x[i_end], derivs.y[i_end]).into());
+                    let end_pos = tx.transform_point(
+                        (
+                            derivs.x.evaluate(t_end).unwrap(),
+                            derivs.y.evaluate(t_end).unwrap(),
+                        )
+                            .into(),
+                    );
 
-                    let start_pressure = derivs.pressure[i_start];
-                    let end_pressure = derivs.pressure[i_end];
+                    let start_pressure = derivs.pressure.evaluate(t_start).unwrap();
+                    let end_pressure = derivs.pressure.evaluate(t_end).unwrap();
 
                     let forwards = (end_pos - start_pos).normalize();
 
@@ -489,19 +497,19 @@ fn main() {
                         pdf_point_into_line_point(r1),
                     ];
 
-                    let curvature_ratio = ((derivs.curvature[i_start] + derivs.curvature[i_end]
-                        - min_curvature * 2.0)
-                        / (curvature_span * 2.0)) as f32;
+                    // let curvature_ratio = ((derivs.curvature[i_start] + derivs.curvature[i_end]
+                    //     - min_curvature * 2.0)
+                    //     / (curvature_span * 2.0)) as f32;
 
-                    assert!(curvature_ratio.is_finite());
+                    // assert!(curvature_ratio.is_finite());
 
-                    let col = Color::Rgb(Rgb::new(curvature_ratio, 0.0, 0.0, None));
+                    let col = Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None));
 
                     page_contents.extend([
                         Op::SetFillColor { col: col.clone() },
                         Op::SetOutlineColor { col },
                         Op::SetOutlineThickness {
-                            pt: Mm(0.05 + 0.4 * curvature_ratio).into(),
+                            pt: Mm(0.05).into(),
                         },
                         Op::DrawPolygon {
                             polygon: Polygon {
@@ -548,12 +556,12 @@ fn main() {
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
 
-    let discarded_event_count = event_count - used_event_count;
+    // let discarded_event_count = event_count - used_event_count;
 
-    eprintln!(
-        "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
-        100. * (discarded_event_count as f64) / (event_count as f64)
-    );
+    // eprintln!(
+    //     "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
+    //     100. * (discarded_event_count as f64) / (event_count as f64)
+    // );
 
     eprintln!("Creating PDF with {polygon_count} polygons");
 

@@ -1,15 +1,28 @@
-use std::ops::Add;
-
 use itertools::Itertools;
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
-use scirs2_interpolate::{InterpolateResult, PchipInterpolator};
+use scirs2_interpolate::{
+    Interp1d, InterpolateResult, InterpolationMethod, PchipInterpolator, interp1d::ExtrapolateMode,
+};
 
 /// Interpolates between samples of stroke data to create a continuous mapping from time to
 /// position and pressure.
 pub struct InterpolatedStroke {
+    /// Time of the first sample used for interpolation. The interpolated stroke is undefined at
+    /// times strictly less than this.
+    t_first: f64,
+
+    /// Time of the last sample used for interpolation. The interpolated stroke is undefined at
+    /// times strictly greater than this.
+    t_last: f64,
+
+    /// Interpolator for x values.
     x: PchipInterpolator<f64>,
+
+    /// Interpolator for y values.
     y: PchipInterpolator<f64>,
+
+    /// Interpolator for pressure values.
     pressure: PchipInterpolator<f64>,
 }
 
@@ -26,6 +39,8 @@ impl InterpolatedStroke {
         p: &ArrayView1<f64>,
     ) -> InterpolateResult<InterpolatedStroke> {
         Ok(InterpolatedStroke {
+            t_first: *t.first().unwrap(),
+            t_last: *t.last().unwrap(),
             x: PchipInterpolator::new(t, x, false)?,
             y: PchipInterpolator::new(t, y, false)?,
             pressure: PchipInterpolator::new(t, p, false)?,
@@ -76,66 +91,102 @@ impl InterpolatedStroke {
 }
 
 /// Smoothed stroke data and various time derivatives.
-pub struct DerivativesX {
-    /// Times corresponding to the other data.
-    pub t: Array1<f64>,
+pub struct FilteredStroke {
+    /// The times at which the samples of the original unsmoothed interpolated curve were taken.
+    pub times: Array1<f64>,
 
-    /// Smoothed x data.
-    pub x: Array1<f64>,
+    /// Filtered x data.
+    pub x: Interp1d<f64>,
 
-    /// Smoothed y data.
-    pub y: Array1<f64>,
+    /// Filtered dx/dt.
+    x1: Interp1d<f64>,
 
-    /// Smoothed pressure data.
-    pub pressure: Array1<f64>,
+    /// Filtered d^2x/dt^2.
+    x2: Interp1d<f64>,
 
-    /// dx/dt
-    x1: Array1<f64>,
+    /// Filtered y data.
+    pub y: Interp1d<f64>,
 
-    /// d^2x/dt^2
-    x2: Array1<f64>,
+    /// Filtered dy/dt.
+    y1: Interp1d<f64>,
 
-    /// dy/dt
-    y1: Array1<f64>,
+    /// Filtered d^2y/dt^2.
+    y2: Interp1d<f64>,
 
-    /// d^2y/dt^2
-    y2: Array1<f64>,
+    /// sqrt((dx/dt)^2 + (dy/dt)^2) for the filtered data.
+    speed: Interp1d<f64>,
 
-    /// Curvature of the stroke. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
-    pub curvature: Array1<f64>,
+    /// Curvature of the filtered data. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
+    pub curvature: Interp1d<f64>,
 
-    /// d(pressure)/dt
-    pressure1: Array1<f64>,
+    /// Filtered pressure data.
+    pub pressure: Interp1d<f64>,
+
+    /// Filtered d(pressure)/dt.
+    pressure1: Interp1d<f64>,
+
+    /// Arc length as a function of time.
+    arc_length_by_time: Interp1d<f64>,
+
+    /// Time as a function of arc length.
+    time_by_arc_length: Interp1d<f64>,
 }
 
-impl DerivativesX {
+impl FilteredStroke {
+    fn calc_speed_curvature(x1: f64, y1: f64, x2: f64, y2: f64) -> (f64, f64) {
+        // https://en.wikipedia.org/wiki/Curvature#Plane_curves
+        // For more accurate calculation using floats, we rearrange the formula to
+        //   |(x'/s)y'' - (y'/s)x''|/s^2
+        // with s = sqrt(x'^2 + y'^2), the speed of the stroke, calculated using `hypot` in
+        // order to avoid over/underflow when we square the derivatives. We can use fused
+        // multiply-add for the numerator. Note that x'/s and y'/s are the components of the
+        // unit tangent vector, and are therefore in [-1,1].
+
+        let speed = x1.hypot(y1);
+
+        // Tangent vector components.
+        let tx = x1 / speed;
+        let ty = y1 / speed;
+
+        // todo: Kahan?
+        let curvature = x2.mul_add(-ty, tx * y2).abs() / (speed * speed);
+
+        // The curvature will be NaN if the division by speed^2 fails. This means that x'
+        // and y' are very small. In general this also means the numerator is very small,
+        // so we deal with NaNs by replacing them with zeros.
+        (
+            speed,
+            if curvature.is_finite() {
+                curvature
+            } else {
+                0.0
+            },
+        )
+    }
+
     /// Calculates various time derivatives of the components of `stroke` after filtering. Gaussian
     /// filtering is applied independently to the x, y and pressure data after sampling from
-    /// `stroke` at `n_samples` times, with the first of these equal to `first_time` and the last
-    /// equal to `last_time`. The standard deviation for the x and y filters is `xy_sd`, and the
-    /// standard deviation for the pressure filter is `p_sd`.
-    ///
-    /// The unfiltered samples of the interpolated function are not consumed during the calculation
-    /// of the derivatives, so are returned in case they are useful to the caller.
+    /// `stroke` at `n_samples` times, with the first of these precisely at the start of the
+    /// interpolated stroke, and the last precisely at the end of the interpolated stroke. The
+    /// standard deviation for the x and y filters is `xy_sd`, and the standard deviation for the
+    /// pressure filter is `p_sd`.
     pub fn new(
         stroke: &InterpolatedStroke,
         xy_sd: f64,
         p_sd: f64,
-        first_time: f64,
-        last_time: f64,
         n_samples: usize,
-    ) -> InterpolateResult<DerivativesX> {
+    ) -> InterpolateResult<FilteredStroke> {
         /// Number of standard deviations wide the Gaussian kernels are.
         const TRUNC: usize = 4;
 
         let times = {
-            let mut t = scirs2_core::Array1::linspace(first_time, last_time, n_samples);
+            let mut t = scirs2_core::Array1::linspace(stroke.t_first, stroke.t_last, n_samples);
 
             // `linspace` calculates the final value instead of setting it exactly, so sometimes
             // it is slightly greater than `last_time`. This causes an error when fed into
             // the interpolator because we do not have extrapolation enabled, so we set the
             // last time exactly here.
-            *t.last_mut().unwrap() = last_time;
+            *t.last_mut().unwrap() = stroke.t_last;
 
             t
         };
@@ -157,57 +208,169 @@ impl DerivativesX {
         let y2 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
         let pressure1 = gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
 
-        let curvature = {
-            // https://en.wikipedia.org/wiki/Curvature#Plane_curves
-            // For more accurate calculation using floats, we rearrange the formula to
-            //   |(x'/r)y'' - (y'/r)x''|/r^2
-            // with r = sqrt(x'^2 + y'^2) calculated using `hypot` in order to avoid over/underflow
-            // when we square the derivatives. We can use fused multiply-add for the numerator.
-            // Note that x'/r and y'/r are the components of the unit tangent vector, and are
-            // therefore in [-1,1].
-
+        let (speed, curvature) = {
+            let mut s = x1.clone();
             let mut c = x2.clone();
 
-            // There is no vectorised `hypot` or FMA, so we need to loop anyway. We might as well
-            // perform the whole calculation in that one loop.
-            ndarray::azip!((c in &mut c, &y2 in &y2, &x1 in &x1, &y1 in &y1) {
-                let x2 = *c;
-
-                let r = x1.hypot(y1);
-
-                // Tangent vector components.
-                let tx = x1 / r;
-                let ty = y1 / r;
-
-                // todo: Kahan?
-                *c = x2.mul_add(-ty, tx * y2).abs() / (r * r);
-
-                // The curvature will be NaN if the division by r^2 fails. This means that x' and
-                // y' are very small. In general this also means the numerator is very small, so we
-                // deal with NaNs by replacing them with zeros.
-                if !c.is_finite() {
-                    *c = 0.0;
-                }
+            // There is no vectorised `hypot` or FMA, so we need to loop. We might as well perform
+            // the whole calculation in that one loop. We can also use the loop to build the speed
+            // array.
+            ndarray::azip!((s in &mut s, c in &mut c, &y1 in &y1, &y2 in &y2) {
+                (*s, *c) = Self::calc_speed_curvature(*s, y1, *c, y2);
             });
 
-            c
+            (s, c)
         };
 
         let x = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
         let y = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
         let pressure = gaussian_filter1d(&p_interp, p_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
 
-        Ok(DerivativesX {
-            t: times,
-            x,
-            y,
-            pressure,
-            x1,
-            x2,
-            y1,
-            y2,
-            curvature,
-            pressure1,
+        // todo: Use ndarray methods
+        let (arc_length, times_with_distinct_arc_lengths): (Vec<f64>, Vec<f64>) =
+            std::iter::once(0.0)
+                .chain(
+                    x.iter()
+                        .zip(&y)
+                        .tuple_windows()
+                        .map(|((&xa, &ya), (&xb, &yb))| (xa - xb).hypot(ya - yb))
+                        .scan(0.0, |arc_length, dist| {
+                            *arc_length += dist;
+                            Some(*arc_length)
+                        }),
+                )
+                .zip(&tv)
+                .dedup_by(|(al0, t0), (al1, t1)| al0 == al1)
+                .unzip();
+
+        let arc_length = Array1::from_vec(arc_length);
+        let times_with_distinct_arc_lengths = Array1::from_vec(times_with_distinct_arc_lengths);
+
+        let time_by_arc_length = Interp1d::new(
+            &arc_length.view(),
+            &times_with_distinct_arc_lengths.view(),
+            InterpolationMethod::Linear,
+            ExtrapolateMode::Error,
+        )
+        .unwrap();
+
+        let arc_length_by_time = Interp1d::new(
+            &times_with_distinct_arc_lengths.view(),
+            &arc_length.view(),
+            InterpolationMethod::Linear,
+            ExtrapolateMode::Error,
+        )
+        .unwrap();
+
+        let interp = |v: Array1<f64>| {
+            Interp1d::new(
+                &tv,
+                &v.view(),
+                InterpolationMethod::Linear,
+                ExtrapolateMode::Error,
+            )
+            // The data should all be valid for interpolation.
+            .unwrap()
+        };
+
+        Ok(FilteredStroke {
+            x: interp(x),
+            x1: interp(x1),
+            x2: interp(x2),
+            y: interp(y),
+            y1: interp(y1),
+            y2: interp(y2),
+            speed: interp(speed),
+            curvature: interp(curvature),
+            pressure: interp(pressure),
+            pressure1: interp(pressure1),
+            arc_length_by_time,
+            time_by_arc_length,
+            times,
         })
+    }
+
+    /// Returns the delta from `now` to the time at which the next sample of the filtered data
+    /// should be taken in order to achieve an approximate absolute angle change of
+    /// `abs_angle_delta`. The returned timestep is not clamped and may not be finite.
+    fn compute_raw_timestep(&self, now: f64, abs_angle_delta: f64) -> InterpolateResult<f64> {
+        // It can be shown that the curvature is equal to the magnitude of the rate of change
+        // of the angle of the unit vector tangent to the stroke with respect to arc length.
+        // That is, κ = |dT/ds| = |dθ/ds|, where T is the unit tangent, and θ is the angle of the
+        // unit tangent. Since |dθ/ds| = |dθ/dt||dt/ds| and |dt/ds| = 1/u, where u is the speed
+        // of the stroke, it follows that κ = |dθ/dt|/u. For sufficiently small Δt, then,
+        // we have κ ≈ Δθ/(uΔt), where Δθ > 0 is the absolute angle change between the samples at t
+        // and t + Δt. Therefore, to (approximately) achieve a given Δθ between the samples at
+        // t and t + Δt, we can use Δt = Δθ/(κu).
+        Ok(abs_angle_delta / (self.curvature.evaluate(now)? * self.speed.evaluate(now)?))
+    }
+
+    /// Returns a timestep in `[min_step, max_step]` that will approximately achieve an absolute
+    /// angle change of `abs_angle_data` between the samples at `now` and `now + timestep`.
+    /// If `now + max_step` is beyond the end of the interpolated stroke data, `now + timestep`
+    /// may be as well.
+    fn compute_timestep(
+        &self,
+        now: f64,
+        abs_angle_delta: f64,
+        min_step: f64,
+        max_step: f64,
+    ) -> InterpolateResult<f64> {
+        self.compute_raw_timestep(now, abs_angle_delta).map(|dt| {
+            if !dt.is_finite() {
+                max_step
+            } else {
+                dt.clamp(min_step, max_step)
+            }
+        })
+    }
+
+    /// Returns an iterator yielding sample times such that the approximate stroke tangent angle
+    /// change between consecutive samples is approximately `target_angle`. The first time is
+    /// guaranteed to be the beginning of the interpolated stroke data, and the last time is
+    /// guaranteed to be the end of it.
+    ///
+    /// The delta between any sample time and the next is guaranteed to be in `[min_step,
+    /// max_step]` except for the step to the end time, which may be less than the minimum or
+    /// greater than the maximum.
+    pub fn compute_sample_times(
+        &self,
+        target_angle: f64,
+        min_step: f64,
+        max_step: f64,
+    ) -> impl Iterator<Item = f64> {
+        let t_first = *self.times.first().unwrap();
+        let t_last = *self.times.last().unwrap();
+
+        let mut t = t_first;
+
+        std::iter::once(t).chain(std::iter::from_fn(move || {
+            if t == t_last {
+                return None;
+            }
+
+            t += self
+                .compute_timestep(t, target_angle, min_step, max_step)
+                // Unwrapping is OK here because `t` is guaranteed to be within the interpolated
+                // range.
+                .unwrap()
+                .min(t_last);
+
+            if t == t_last {
+                return Some(t);
+            }
+
+            if t + min_step > t_last {
+                // We are not at the end of the stroke, but we are so close to it that taking the
+                // minimum timestep to the next sample would take us past the end. The usual `min`
+                // strategy on the next step would then result in a timestep less than `min_step`,
+                // and possibly so much so that the segment length would be numerically
+                // problematic. It is better to risk slightly exceeding `max_step` here by stepping
+                // directly to the final point.
+                t = t_last;
+            }
+
+            Some(t)
+        }))
     }
 }
