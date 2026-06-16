@@ -99,7 +99,7 @@ pub struct FilteredStroke {
     pub x: Interp1d<f64>,
 
     /// Filtered dx/dt.
-    x1: Interp1d<f64>,
+    x1: PchipInterpolator<f64>,
 
     /// Filtered d^2x/dt^2.
     x2: Interp1d<f64>,
@@ -108,16 +108,16 @@ pub struct FilteredStroke {
     pub y: Interp1d<f64>,
 
     /// Filtered dy/dt.
-    y1: Interp1d<f64>,
+    y1: PchipInterpolator<f64>,
 
     /// Filtered d^2y/dt^2.
     y2: Interp1d<f64>,
 
     /// sqrt((dx/dt)^2 + (dy/dt)^2) for the filtered data.
-    speed: Interp1d<f64>,
+    speed: PchipInterpolator<f64>,
 
     /// Curvature of the filtered data. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
-    pub curvature: Interp1d<f64>,
+    pub curvature: PchipInterpolator<f64>,
 
     /// Filtered pressure data.
     pub pressure: Interp1d<f64>,
@@ -202,11 +202,12 @@ impl FilteredStroke {
 
         use ndarray_ndimage::gaussian_filter1d;
 
-        let x1 = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
+        // hack: For some reason, when `order = 1`, the results are negated...? (Even vs. Python.)
+        let x1 = -gaussian_filter1d(&x_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
         let x2 = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
-        let y1 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
+        let y1 = -gaussian_filter1d(&y_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
         let y2 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
-        let pressure1 = gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
+        let pressure1 = -gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
 
         let (speed, curvature) = {
             let mut s = x1.clone();
@@ -275,13 +276,13 @@ impl FilteredStroke {
 
         Ok(FilteredStroke {
             x: interp(x),
-            x1: interp(x1),
+            x1: PchipInterpolator::new(&tv, &x1.view(), false)?,
             x2: interp(x2),
             y: interp(y),
-            y1: interp(y1),
+            y1: PchipInterpolator::new(&tv, &y1.view(), false)?,
             y2: interp(y2),
-            speed: interp(speed),
-            curvature: interp(curvature),
+            speed: PchipInterpolator::new(&tv, &speed.view(), false)?,
+            curvature: PchipInterpolator::new(&tv, &curvature.view(), false)?,
             pressure: interp(pressure),
             pressure1: interp(pressure1),
             arc_length_by_time,
@@ -333,6 +334,11 @@ impl FilteredStroke {
             - t
     }
 
+    fn time_step_to_space_step(&self, t: f64, time_step: f64) -> f64 {
+        self.arc_length_by_time.evaluate(t + time_step).unwrap()
+            - self.arc_length_by_time.evaluate(t).unwrap()
+    }
+
     /// Returns an iterator yielding sample times such that the approximate stroke tangent angle
     /// change between consecutive samples is approximately `target_angle`. The first time is
     /// guaranteed to be the beginning of the interpolated stroke data, and the last time is
@@ -379,5 +385,24 @@ impl FilteredStroke {
 
             Some(t)
         }))
+    }
+
+    pub fn arc_length_third_times(&self, t_start: f64, t_end: f64) -> (f64, f64) {
+        let space_step = self.time_step_to_space_step(t_start, t_end - t_start);
+
+        (
+            t_start + self.space_step_to_time_step(t_start, space_step / 3.0),
+            t_end + self.space_step_to_time_step(t_end, -space_step / 3.0),
+        )
+    }
+
+    /// Returns the stroke velocity at time `t`.
+    pub fn velocity(&self, t: f64) -> InterpolateResult<(f64, f64)> {
+        Ok((self.x1.evaluate(t)?, self.y1.evaluate(t)?))
+    }
+
+    /// Returns the stroke position at time `t`.
+    pub fn position(&self, t: f64) -> InterpolateResult<(f64, f64)> {
+        Ok((self.x.evaluate(t)?, self.y.evaluate(t)?))
     }
 }

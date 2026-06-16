@@ -4,7 +4,7 @@ use euclid::{Angle, Point2D, Vector2D, Vector3D};
 use itertools::{Either, Itertools, Position};
 use lerp::Lerp;
 use printpdf::{
-    Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
+    Color, Line, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
     PolygonRing, Rgb, WindingOrder,
 };
 use sdocx::page::object::stroke::{Event, Stroke};
@@ -17,7 +17,7 @@ type PdfVector = Vector2D<f64, PdfSpace>;
 
 mod stroke;
 
-fn pdf_point_into_line_point(point: PdfPoint) -> LinePoint {
+fn pdf_point_to_line_point(point: PdfPoint) -> LinePoint {
     LinePoint {
         p: printpdf::Point {
             x: Mm(point.x as f32).into(),
@@ -27,210 +27,13 @@ fn pdf_point_into_line_point(point: PdfPoint) -> LinePoint {
     }
 }
 
-fn pdf_point_into_control_point(point: PdfPoint) -> LinePoint {
+fn pdf_point_to_control_point(point: PdfPoint) -> LinePoint {
     LinePoint {
         p: printpdf::Point {
             x: Mm(point.x as f32).into(),
             y: Mm(point.y as f32).into(),
         },
         bezier: true,
-    }
-}
-
-struct DocumentSpace;
-type DocPoint = Point2D<f64, DocumentSpace>;
-type DocVec = Vector2D<f64, DocumentSpace>;
-
-#[derive(Debug, Clone, Copy)]
-enum StrokeFnPoint {
-    First {
-        pos: DocPoint,
-        pressure: f32,
-        time: u32,
-    },
-
-    Last {
-        pos: DocPoint,
-        pressure: f32,
-        time: u32,
-        path_dist: f64,
-    },
-
-    Middle {
-        pos: DocPoint,
-        pressure: f32,
-        time: u32,
-        path_dist: f64,
-
-        /// Second derivative of position with respect to time.
-        accn: DocVec,
-
-        /// Second derivative of pressure with respect to path distance.
-        pressure_2nd: f64,
-    },
-}
-
-impl StrokeFnPoint {
-    fn position(&self) -> DocPoint {
-        match self {
-            StrokeFnPoint::First { pos, .. } => *pos,
-            StrokeFnPoint::Last { pos, .. } => *pos,
-            StrokeFnPoint::Middle { pos, .. } => *pos,
-        }
-    }
-
-    fn path_dist(&self) -> f64 {
-        match self {
-            StrokeFnPoint::First { .. } => 0.0,
-            StrokeFnPoint::Last {
-                path_dist: dist, ..
-            } => *dist,
-            StrokeFnPoint::Middle {
-                path_dist: dist, ..
-            } => *dist,
-        }
-    }
-
-    fn time(&self) -> u32 {
-        match self {
-            StrokeFnPoint::First { time, .. } => *time,
-            StrokeFnPoint::Last { time, .. } => *time,
-            StrokeFnPoint::Middle { time, .. } => *time,
-        }
-    }
-
-    fn pressure(&self) -> f32 {
-        match self {
-            StrokeFnPoint::First { pressure, .. } => *pressure,
-            StrokeFnPoint::Last { pressure, .. } => *pressure,
-            StrokeFnPoint::Middle { pressure, .. } => *pressure,
-        }
-    }
-
-    fn acceleration(&self) -> Option<&DocVec> {
-        match self {
-            StrokeFnPoint::Middle { accn, .. } => Some(accn),
-            _ => None,
-        }
-    }
-
-    fn pressure_2nd(&self) -> Option<f64> {
-        match self {
-            StrokeFnPoint::Middle { pressure_2nd, .. } => Some(*pressure_2nd),
-            _ => None,
-        }
-    }
-
-    fn points_from(stroke: &Stroke) -> Vec<StrokeFnPoint> {
-        let events = stroke.events();
-
-        if events.is_empty() {
-            return Vec::new();
-        }
-
-        let mut last_pos: DocPoint = (events[0].point.x, events[0].point.y).into();
-        let mut path_dist = 0.0;
-        let mut last_time = None;
-
-        let mut fn_pts = stroke
-            .events()
-            .iter()
-            .with_position()
-            .flat_map(|(it_pos, event)| {
-                let pos: DocPoint = (event.point.x, event.point.y).into();
-                let pressure = event.pressure;
-                let time = event.timestamp;
-
-                if last_time == Some(time) {
-                    // Two events at once. Often, the second event is an exact duplicate of the
-                    // first.
-                    // todo: This could cause issues if the second event is different.
-                    return None;
-                }
-
-                last_time = Some(time);
-
-                let dist_to_last = pos.distance_to(last_pos);
-
-                // Ignore this event if it is too close in position to the previous one.
-                // todo: Pick a sensible epsilon here.
-                if dist_to_last < 0.01 {
-                    return None;
-                }
-
-                path_dist += dist_to_last;
-                last_pos = pos;
-
-                Some(match it_pos {
-                    Position::First | Position::Only => StrokeFnPoint::First {
-                        pos,
-                        pressure,
-                        time,
-                    },
-
-                    Position::Middle => StrokeFnPoint::Middle {
-                        pos,
-                        pressure,
-                        time,
-                        path_dist,
-                        accn: DocVec::zero(),
-                        pressure_2nd: 0.0,
-                    },
-
-                    Position::Last => StrokeFnPoint::Last {
-                        pos,
-                        pressure,
-                        time,
-                        path_dist,
-                    },
-                })
-            })
-            .collect_vec();
-
-        for i in 1..(fn_pts.len() - 1) {
-            let time_bwd = fn_pts[i].time() - fn_pts[i - 1].time();
-            let time_fwd = fn_pts[i + 1].time() - fn_pts[i].time();
-
-            let pos_weight_bwd = 2.0 / f64::from(time_bwd * (time_bwd + time_fwd));
-            let pos_weight_cur = -2.0 / f64::from(time_bwd * time_fwd);
-            let pos_weight_fwd = 2.0 / f64::from(time_fwd * (time_bwd + time_fwd));
-
-            // Central finite difference approximation to the second time derivative of position.
-            // For non-equal forward/backward time deltas, this is only first-order accurate.
-            // If the two are equal, this is second order.
-            let accn_approx = fn_pts[i - 1].position().to_vector() * pos_weight_bwd
-                + fn_pts[i].position().to_vector() * pos_weight_cur
-                + fn_pts[i + 1].position().to_vector() * pos_weight_fwd;
-
-            let dist_bwd = fn_pts[i].path_dist() - fn_pts[i - 1].path_dist();
-            let dist_fwd = fn_pts[i + 1].path_dist() - fn_pts[i].path_dist();
-
-            let pres_weight_bwd = 2.0 / (dist_bwd * (dist_bwd + dist_fwd));
-            let pres_weight_cur = -2.0 / (dist_bwd * dist_fwd);
-            let pres_weight_fwd = 2.0 / (dist_fwd * (dist_bwd + dist_fwd));
-
-            // Same scheme, but now for the second path distance derivative of pressure.
-            let pres_2nd_approx = f64::from(fn_pts[i - 1].pressure()) * pres_weight_bwd
-                + f64::from(fn_pts[i].pressure()) * pres_weight_cur
-                + f64::from(fn_pts[i + 1].pressure()) * pres_weight_fwd;
-
-            let StrokeFnPoint::Middle {
-                accn, pressure_2nd, ..
-            } = &mut fn_pts[i]
-            else {
-                unreachable!()
-            };
-
-            assert!(
-                accn_approx.is_finite() && pres_2nd_approx.is_finite(),
-                "time bwd = {time_bwd}; time fwd = {time_fwd}; acceleration = {accn_approx:?}; pressure 2nd = {pres_2nd_approx}"
-            );
-
-            *accn = accn_approx;
-            *pressure_2nd = pres_2nd_approx;
-        }
-
-        fn_pts
     }
 }
 
@@ -301,46 +104,26 @@ fn bezier_arc_control_points<T: num::Float, U>(
     Some([(x2, y2).into(), (x3, y3).into()])
 }
 
-fn clean_events(events: &mut Vec<(PdfPoint, f32)>) {
-    while events.len() >= 3 {
-        let mut any_removed = false;
+/// Returns the control points `(p1, p2)` for a cubic Bézier from `p0` to `p3` that passes through
+/// `a` at `t = 1/3` and `b` at `t = 2/3`.
+fn bezier_control_pts_for_intersections<U>(
+    p0: Point2D<f64, U>,
+    p3: Point2D<f64, U>,
+    a: Point2D<f64, U>,
+    b: Point2D<f64, U>,
+) -> (Point2D<f64, U>, Point2D<f64, U>) {
+    let (p0, p3, a, b) = (p0.to_vector(), p3.to_vector(), a.to_vector(), b.to_vector());
 
-        let mut i = 1;
+    // Solution to the linear system formed by `f(1/3) = a` and `f(2/3) = b` where f is the
+    // function describing the cubic Bézier from `p0` to `p3`.
+    let p2 = (b * 18.0 - a * 9.0 + p0 * 2.0 - p3 * 5.0) / 6.0;
+    let p1 = (a * 27.0 - p0 * 8.0 - p3 - p2 * 6.0) / 12.0;
 
-        while i + 1 < events.len() {
-            let (last_pt, last_pres) = events[i - 1];
-            let (this_pt, this_pres) = events[i];
-            let (next_pt, next_pres) = events[i + 1];
+    (p1.to_point(), p2.to_point())
+}
 
-            let this_i = i;
-            i += 2;
-
-            let to_here = this_pt.to_vector() - last_pt.to_vector();
-            let from_here = next_pt.to_vector() - this_pt.to_vector();
-
-            let abs_angle = Angle::radians(to_here.angle_to(from_here).get().abs());
-
-            if abs_angle > Angle::frac_pi_4() / 2.5 {
-                continue;
-            }
-
-            let length_ratio = to_here.length() / (to_here.length() + from_here.length());
-            let pres_guess = last_pres.lerp(next_pres, length_ratio as f32);
-
-            if (pres_guess - this_pres).abs() / this_pres > 0.1 {
-                // Actual pressure is not close to what we might guess.
-                continue;
-            }
-
-            any_removed = true;
-            events.remove(this_i);
-            i -= 1;
-        }
-
-        if !any_removed {
-            break;
-        }
-    }
+fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
+    0.5 * pen_size * pressure.powf(0.7).clamp(0.05, 0.3)
 }
 
 fn main() {
@@ -390,8 +173,9 @@ fn main() {
 
                 let interpolated = InterpolatedStroke::from_events(stroke.events());
 
-                // fixme: Number of samples here should be chosen with regard to the length, etc.
-                let derivs = FilteredStroke::new(&interpolated, 0.9, 0.9, 100).unwrap();
+                // fixme: Think carefully about how many samples to take here
+                let smooth =
+                    FilteredStroke::new(&interpolated, 1.0, 1.9, stroke.events().len()).unwrap();
 
                 // let (min_curvature, max_curvature) = derivs
                 //     .curvature
@@ -408,10 +192,10 @@ fn main() {
 
                 // Convert from document space, with y=0 at the top, to PDF space, with y=0 at the
                 // bottom.
-                let tx = euclid::Transform2D::<f64, DocumentSpace, PdfSpace>::scale(1.0, -1.0)
+                let tx = euclid::Transform2D::<f64, (), PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let sample_times = derivs.compute_sample_times(f64::to_radians(5.0), 1.5, 15.0);
+                let sample_times = smooth.compute_sample_times(f64::to_radians(15.0), 5.0, 50.0);
 
                 // let rings = (0..derivs.t.len())
                 for (t_start, t_end) in sample_times.tuple_windows() {
@@ -423,79 +207,318 @@ fn main() {
 
                     let start_pos = tx.transform_point(
                         (
-                            derivs.x.evaluate(t_start).unwrap(),
-                            derivs.y.evaluate(t_start).unwrap(),
+                            smooth.x.evaluate(t_start).unwrap(),
+                            smooth.y.evaluate(t_start).unwrap(),
                         )
                             .into(),
                     );
 
                     let end_pos = tx.transform_point(
                         (
-                            derivs.x.evaluate(t_end).unwrap(),
-                            derivs.y.evaluate(t_end).unwrap(),
+                            smooth.x.evaluate(t_end).unwrap(),
+                            smooth.y.evaluate(t_end).unwrap(),
                         )
                             .into(),
                     );
 
-                    let start_pressure = derivs.pressure.evaluate(t_start).unwrap();
-                    let end_pressure = derivs.pressure.evaluate(t_end).unwrap();
+                    let start_pressure = smooth.pressure.evaluate(t_start).unwrap();
+                    let end_pressure = smooth.pressure.evaluate(t_end).unwrap();
 
-                    let forwards = (end_pos - start_pos).normalize();
+                    let (t_first_third, t_second_third) =
+                        smooth.arc_length_third_times(t_start, t_end);
 
-                    if !forwards.is_finite() {
-                        continue;
-                        // return None;
-                    }
+                    let (pressure_first_third, pressure_second_third) = (
+                        smooth.pressure.evaluate(t_first_third).unwrap(),
+                        smooth.pressure.evaluate(t_second_third).unwrap(),
+                    );
 
-                    let start_spread = 0.5 * pen_size * start_pressure.powf(0.7).clamp(0.05, 0.3);
-                    let end_spread = 0.5 * pen_size * end_pressure.powf(0.7).clamp(0.05, 0.3);
+                    // let forwards = (end_pos - start_pos).normalize();
 
-                    // fixme: Lots of rejections here...
-                    let Some([r1, r2, l1, l2]) =
-                        calc_pulley_line_points_acw(start_pos, start_spread, end_pos, end_spread)
-                    else {
-                        continue;
-                    };
+                    // if !forwards.is_finite() {
+                    //     continue;
+                    //     // return None;
+                    // }
 
-                    let top = end_pos + forwards * end_spread;
-                    let bot = start_pos - forwards * end_spread;
+                    let start_spread = pressure_to_circle_radius(start_pressure, pen_size);
+                    let spread_first_third =
+                        pressure_to_circle_radius(pressure_first_third, pen_size);
+                    let spread_second_third =
+                        pressure_to_circle_radius(pressure_second_third, pen_size);
+                    let end_spread = pressure_to_circle_radius(end_pressure, pen_size);
 
-                    // fixme: ...and here.
-                    let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
-                    else {
-                        continue;
-                    };
-                    let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
-                    else {
-                        continue;
-                    };
-                    let Some([l2_bot_c1, l2_bot_c2]) =
-                        bezier_arc_control_points(l2, bot, start_pos)
-                    else {
-                        continue;
-                    };
-                    let Some([bot_r1_c1, bot_r1_c2]) =
-                        bezier_arc_control_points(bot, r1, start_pos)
-                    else {
-                        continue;
-                    };
+                    let mut used_fallback_start_tangent = false;
+                    let mut used_fallback_end_tangent = false;
+
+                    let (
+                        scaled_tangent_start,
+                        scaled_tangent_first_third,
+                        scaled_tangent_second_third,
+                        scaled_tangent_end,
+                    ) = (
+                        {
+                            let tangent = tx
+                                .transform_vector(Vector2D::<_, ()>::from(
+                                    smooth.velocity(t_start).unwrap(),
+                                ))
+                                .normalize();
+
+                            if tangent.is_finite() {
+                                tangent
+                            } else {
+                                used_fallback_start_tangent = true;
+                                (end_pos - start_pos).normalize()
+                            }
+                        } * start_spread,
+                        Vector2D::<_, ()>::from(smooth.velocity(t_first_third).unwrap())
+                            .normalize()
+                            * spread_first_third,
+                        Vector2D::<_, ()>::from(smooth.velocity(t_second_third).unwrap())
+                            .normalize()
+                            * spread_second_third,
+                        {
+                            let tangent = tx
+                                .transform_vector(Vector2D::<_, ()>::from(
+                                    smooth.velocity(t_end).unwrap(),
+                                ))
+                                .normalize();
+
+                            if tangent.is_finite() {
+                                tangent
+                            } else {
+                                used_fallback_end_tangent = true;
+                                (end_pos - start_pos).normalize()
+                            }
+                        } * end_spread,
+                    );
+
+                    // todo: Handle the case where this assertion fails.
+                    assert!(
+                        scaled_tangent_start.is_finite()
+                            && scaled_tangent_first_third.is_finite()
+                            && scaled_tangent_second_third.is_finite()
+                            && scaled_tangent_end.is_finite()
+                    );
+
+                    let (pos_first_third, pos_second_third) = (
+                        Point2D::<f64, ()>::from(smooth.position(t_first_third).unwrap()),
+                        Point2D::<f64, ()>::from(smooth.position(t_second_third).unwrap()),
+                    );
+
+                    let scaled_tangent_first_third =
+                        tx.transform_vector(scaled_tangent_first_third);
+
+                    let scaled_tangent_second_third =
+                        tx.transform_vector(scaled_tangent_second_third);
+
+                    let pos_first_third = tx.transform_point(pos_first_third);
+                    let pos_second_third = tx.transform_point(pos_second_third);
+
+                    // page_contents.extend([
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(1.0, 0.5, 0.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_to_line_point(start_pos),
+                    //                 pdf_point_to_line_point(start_pos + scaled_tangent_start),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(0.0, 0.5, 1.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_to_line_point(pos_first_third),
+                    //                 pdf_point_to_line_point(
+                    //                     pos_first_third + scaled_tangent_first_third,
+                    //                 ),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    // ]);
+
+                    let left_start =
+                        start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
+
+                    let right_start =
+                        start_pos + Vector2D::new(scaled_tangent_start.y, -scaled_tangent_start.x);
+
+                    let left_first_third = pos_first_third
+                        + Vector2D::new(
+                            -scaled_tangent_first_third.y,
+                            scaled_tangent_first_third.x,
+                        );
+
+                    let right_first_third = pos_first_third
+                        + Vector2D::new(
+                            scaled_tangent_first_third.y,
+                            -scaled_tangent_first_third.x,
+                        );
+
+                    let left_second_third = pos_second_third
+                        + Vector2D::new(
+                            -scaled_tangent_second_third.y,
+                            scaled_tangent_second_third.x,
+                        );
+
+                    let right_second_third = pos_second_third
+                        + Vector2D::new(
+                            scaled_tangent_second_third.y,
+                            -scaled_tangent_second_third.x,
+                        );
+
+                    let left_end =
+                        end_pos + Vector2D::new(-scaled_tangent_end.y, scaled_tangent_end.x);
+
+                    let right_end =
+                        end_pos + Vector2D::new(scaled_tangent_end.y, -scaled_tangent_end.x);
+
+                    let (left_p1, left_p2) = bezier_control_pts_for_intersections(
+                        left_start,
+                        left_end,
+                        left_first_third,
+                        left_second_third,
+                    );
+
+                    let (right_p1, right_p2) = bezier_control_pts_for_intersections(
+                        right_start,
+                        right_end,
+                        right_first_third,
+                        right_second_third,
+                    );
+
+                    // eprintln!(
+                    //     "fitting {right_first_third:?} and {right_second_third:?} into curve from {right_start:?} to {right_end:?}"
+                    // );
+
+                    // eprintln!(
+                    //     "ls = {left_start:?}, le = {left_end:?}, lp1 = {left_p1:?}, lp2 = {left_p2:?}, rp1 = {right_p1:?}, rp2 = {right_p2:?}"
+                    // );
 
                     let points = vec![
-                        pdf_point_into_line_point(r2),
-                        pdf_point_into_control_point(r2_top_c1),
-                        pdf_point_into_control_point(r2_top_c2),
-                        pdf_point_into_line_point(top),
-                        pdf_point_into_control_point(top_l1_c1),
-                        pdf_point_into_control_point(top_l1_c2),
-                        pdf_point_into_line_point(l1),
-                        pdf_point_into_line_point(l2),
-                        pdf_point_into_control_point(l2_bot_c1),
-                        pdf_point_into_control_point(l2_bot_c2),
-                        pdf_point_into_line_point(bot),
-                        pdf_point_into_control_point(bot_r1_c1),
-                        pdf_point_into_control_point(bot_r1_c2),
-                        pdf_point_into_line_point(r1),
+                        pdf_point_to_line_point(left_start),
+                        pdf_point_to_control_point(left_p1),
+                        pdf_point_to_control_point(left_p2),
+                        pdf_point_to_line_point(left_end),
+                        pdf_point_to_line_point(right_end),
+                        pdf_point_to_control_point(right_p2),
+                        pdf_point_to_control_point(right_p1),
+                        pdf_point_to_line_point(right_start),
                     ];
+
+                    // let points = vec![
+                    //     pdf_point_into_line_point(left_start),
+                    //     // pdf_point_into_line_point(left_first_third),
+                    //     // pdf_point_into_line_point(left_second_third),
+                    //     pdf_point_into_line_point(left_end),
+                    //     pdf_point_into_line_point(right_end),
+                    //     // pdf_point_into_line_point(right_second_third),
+                    //     // pdf_point_into_line_point(right_first_third),
+                    //     pdf_point_into_line_point(right_start),
+                    // ];
+
+                    // page_contents.extend([
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(1.0, 0.0, 0.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_into_line_point(left_start),
+                    //                 pdf_point_into_line_point(left_end),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_into_line_point(left_end),
+                    //                 pdf_point_into_line_point(right_end),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(0.0, 0.0, 1.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_into_line_point(right_end),
+                    //                 pdf_point_into_line_point(right_start),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    //     Op::SetOutlineColor {
+                    //         col: Color::Rgb(Rgb::new(1.0, 0.0, 1.0, None)),
+                    //     },
+                    //     Op::DrawLine {
+                    //         line: Line {
+                    //             points: vec![
+                    //                 pdf_point_into_line_point(right_start),
+                    //                 pdf_point_into_line_point(left_start),
+                    //             ],
+                    //             is_closed: false,
+                    //         },
+                    //     },
+                    // ]);
+
+                    // // fixme: Lots of rejections here...
+                    // let Some([r1, r2, l1, l2]) =
+                    //     calc_pulley_line_points_acw(start_pos, start_spread, end_pos, end_spread)
+                    // else {
+                    //     continue;
+                    // };
+
+                    // let top = end_pos + forwards * end_spread;
+                    // let bot = start_pos - forwards * end_spread;
+
+                    // // fixme: ...and here.
+                    // let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([l2_bot_c1, l2_bot_c2]) =
+                    //     bezier_arc_control_points(l2, bot, start_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([bot_r1_c1, bot_r1_c2]) =
+                    //     bezier_arc_control_points(bot, r1, start_pos)
+                    // else {
+                    //     continue;
+                    // };
+
+                    // let points = vec![
+                    //     pdf_point_into_line_point(r2),
+                    //     pdf_point_into_control_point(r2_top_c1),
+                    //     pdf_point_into_control_point(r2_top_c2),
+                    //     pdf_point_into_line_point(top),
+                    //     pdf_point_into_control_point(top_l1_c1),
+                    //     pdf_point_into_control_point(top_l1_c2),
+                    //     pdf_point_into_line_point(l1),
+                    //     pdf_point_into_line_point(l2),
+                    //     pdf_point_into_control_point(l2_bot_c1),
+                    //     pdf_point_into_control_point(l2_bot_c2),
+                    //     pdf_point_into_line_point(bot),
+                    //     pdf_point_into_control_point(bot_r1_c1),
+                    //     pdf_point_into_control_point(bot_r1_c2),
+                    //     pdf_point_into_line_point(r1),
+                    // ];
 
                     // let curvature_ratio = ((derivs.curvature[i_start] + derivs.curvature[i_end]
                     //     - min_curvature * 2.0)
@@ -503,7 +526,16 @@ fn main() {
 
                     // assert!(curvature_ratio.is_finite());
 
-                    let col = Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None));
+                    let col = Color::Rgb(Rgb::new(
+                        if used_fallback_start_tangent {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                        if used_fallback_end_tangent { 1.0 } else { 0.0 },
+                        None,
+                    ));
 
                     page_contents.extend([
                         Op::SetFillColor { col: col.clone() },
@@ -514,7 +546,7 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Fill,
+                                mode: PaintMode::Stroke,
                                 winding_order: WindingOrder::default(),
                             },
                         },
