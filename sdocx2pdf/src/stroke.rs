@@ -240,7 +240,7 @@ impl FilteredStroke {
                         }),
                 )
                 .zip(&tv)
-                .dedup_by(|(al0, t0), (al1, t1)| al0 == al1)
+                .dedup_by(|(al0, _t0), (al1, _t1)| al0 == al1)
                 .unzip();
 
         let arc_length = Array1::from_vec(arc_length);
@@ -250,7 +250,7 @@ impl FilteredStroke {
             &arc_length.view(),
             &times_with_distinct_arc_lengths.view(),
             InterpolationMethod::Linear,
-            ExtrapolateMode::Error,
+            ExtrapolateMode::Extrapolate,
         )
         .unwrap();
 
@@ -258,7 +258,7 @@ impl FilteredStroke {
             &times_with_distinct_arc_lengths.view(),
             &arc_length.view(),
             InterpolationMethod::Linear,
-            ExtrapolateMode::Error,
+            ExtrapolateMode::Extrapolate,
         )
         .unwrap();
 
@@ -325,19 +325,23 @@ impl FilteredStroke {
         })
     }
 
+    fn space_step_to_time_step(&self, t: f64, space_step: f64) -> f64 {
+        // hack: This is nasty
+        self.time_by_arc_length
+            .evaluate(self.arc_length_by_time.evaluate(t).unwrap() + space_step)
+            .unwrap()
+            - t
+    }
+
     /// Returns an iterator yielding sample times such that the approximate stroke tangent angle
     /// change between consecutive samples is approximately `target_angle`. The first time is
     /// guaranteed to be the beginning of the interpolated stroke data, and the last time is
     /// guaranteed to be the end of it.
-    ///
-    /// The delta between any sample time and the next is guaranteed to be in `[min_step,
-    /// max_step]` except for the step to the end time, which may be less than the minimum or
-    /// greater than the maximum.
     pub fn compute_sample_times(
         &self,
         target_angle: f64,
-        min_step: f64,
-        max_step: f64,
+        min_space_step: f64,
+        max_space_step: f64,
     ) -> impl Iterator<Item = f64> {
         let t_first = *self.times.first().unwrap();
         let t_last = *self.times.last().unwrap();
@@ -349,8 +353,11 @@ impl FilteredStroke {
                 return None;
             }
 
+            let min_time_step = self.space_step_to_time_step(t, min_space_step);
+            let max_time_step = self.space_step_to_time_step(t, max_space_step);
+
             t += self
-                .compute_timestep(t, target_angle, min_step, max_step)
+                .compute_timestep(t, target_angle, min_time_step, max_time_step)
                 // Unwrapping is OK here because `t` is guaranteed to be within the interpolated
                 // range.
                 .unwrap()
@@ -360,7 +367,7 @@ impl FilteredStroke {
                 return Some(t);
             }
 
-            if t + min_step > t_last {
+            if t + min_time_step > t_last {
                 // We are not at the end of the stroke, but we are so close to it that taking the
                 // minimum timestep to the next sample would take us past the end. The usual `min`
                 // strategy on the next step would then result in a timestep less than `min_step`,

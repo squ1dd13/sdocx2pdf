@@ -411,7 +411,7 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, DocumentSpace, PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let sample_times = derivs.compute_sample_times(f64::to_radians(40.0), 2.0, 25.0);
+                let sample_times = derivs.compute_sample_times(f64::to_radians(5.0), 1.5, 15.0);
 
                 // let rings = (0..derivs.t.len())
                 for (t_start, t_end) in sample_times.tuple_windows() {
@@ -514,7 +514,7 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Stroke,
+                                mode: PaintMode::Fill,
                                 winding_order: WindingOrder::default(),
                             },
                         },
