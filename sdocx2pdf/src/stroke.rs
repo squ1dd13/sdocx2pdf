@@ -1,3 +1,4 @@
+use euclid::default::Vector2D;
 use itertools::Itertools;
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
@@ -99,7 +100,7 @@ pub struct FilteredStroke {
     pub x: Interp1d<f64>,
 
     /// Filtered dx/dt.
-    x1: PchipInterpolator<f64>,
+    x1: Interp1d<f64>,
 
     /// Filtered d^2x/dt^2.
     x2: Interp1d<f64>,
@@ -108,16 +109,16 @@ pub struct FilteredStroke {
     pub y: Interp1d<f64>,
 
     /// Filtered dy/dt.
-    y1: PchipInterpolator<f64>,
+    y1: Interp1d<f64>,
 
     /// Filtered d^2y/dt^2.
     y2: Interp1d<f64>,
 
     /// sqrt((dx/dt)^2 + (dy/dt)^2) for the filtered data.
-    speed: PchipInterpolator<f64>,
+    speed: Interp1d<f64>,
 
     /// Curvature of the filtered data. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
-    pub curvature: PchipInterpolator<f64>,
+    pub curvature: Interp1d<f64>,
 
     /// Filtered pressure data.
     pub pressure: Interp1d<f64>,
@@ -177,7 +178,7 @@ impl FilteredStroke {
         n_samples: usize,
     ) -> InterpolateResult<FilteredStroke> {
         /// Number of standard deviations wide the Gaussian kernels are.
-        const TRUNC: usize = 4;
+        const TRUNC: usize = 6;
 
         let times = {
             let mut t = scirs2_core::Array1::linspace(stroke.t_first, stroke.t_last, n_samples);
@@ -191,6 +192,8 @@ impl FilteredStroke {
             t
         };
 
+        let time_step = times[1] - times[0];
+
         let tv = times.view();
 
         // Sample the interpolated stroke data uniformly so the filtering makes sense. The raw
@@ -202,12 +205,27 @@ impl FilteredStroke {
 
         use ndarray_ndimage::gaussian_filter1d;
 
+        // `gaussian_filter1d` with `order = k` gives us the kth derivative of the input with
+        // respect to the index. Since n = t/Δt we have dn/dt = 1/Δt, so by the chain rule,
+        // du/dt = (du/dn)/Δt and d^2u/du^2 = (d^2u/dn^2)/(Δt^2).
+        // fixme: The denominators cancel in the curvature, so we should only include them after
+        // calculating that.
+
         // hack: For some reason, when `order = 1`, the results are negated...? (Even vs. Python.)
-        let x1 = -gaussian_filter1d(&x_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
-        let x2 = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
-        let y1 = -gaussian_filter1d(&y_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
-        let y2 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC);
-        let pressure1 = -gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC);
+        let x1 = -gaussian_filter1d(&x_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC)
+            / time_step;
+
+        let x2 = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC)
+            / (time_step * time_step);
+
+        let y1 = -gaussian_filter1d(&y_interp, xy_sd, Axis(0), 1, BorderMode::Nearest, TRUNC)
+            / time_step;
+
+        let y2 = gaussian_filter1d(&y_interp, xy_sd, Axis(0), 2, BorderMode::Nearest, TRUNC)
+            / (time_step * time_step);
+
+        let pressure1 =
+            -gaussian_filter1d(&p_interp, p_sd, Axis(0), 1, BorderMode::Nearest, TRUNC) / time_step;
 
         let (speed, curvature) = {
             let mut s = x1.clone();
@@ -276,13 +294,13 @@ impl FilteredStroke {
 
         Ok(FilteredStroke {
             x: interp(x),
-            x1: PchipInterpolator::new(&tv, &x1.view(), false)?,
+            x1: interp(x1),
             x2: interp(x2),
             y: interp(y),
-            y1: PchipInterpolator::new(&tv, &y1.view(), false)?,
+            y1: interp(y1),
             y2: interp(y2),
-            speed: PchipInterpolator::new(&tv, &speed.view(), false)?,
-            curvature: PchipInterpolator::new(&tv, &curvature.view(), false)?,
+            speed: interp(speed),
+            curvature: interp(curvature),
             pressure: interp(pressure),
             pressure1: interp(pressure1),
             arc_length_by_time,
@@ -317,16 +335,59 @@ impl FilteredStroke {
         min_step: f64,
         max_step: f64,
     ) -> InterpolateResult<f64> {
-        self.compute_raw_timestep(now, abs_angle_delta).map(|dt| {
-            if !dt.is_finite() {
-                max_step
-            } else {
-                dt.clamp(min_step, max_step)
-            }
-        })
+        let raw = self.compute_raw_timestep(now, abs_angle_delta)?;
+
+        if !raw.is_finite() {
+            return Ok(max_step);
+        }
+
+        if raw >= max_step {
+            return Ok(max_step);
+        }
+
+        if raw <= min_step {
+            return Ok(min_step);
+        }
+
+        // The calculated step is strictly within the bounds, so there is room to adjust it either
+        // way to achieve a better approximation of the target angle.
+        let mut current_step = raw;
+
+        let vel_now = Vector2D::from(self.velocity(now)?);
+
+        let angle_diff_with_step = |step: f64| {
+            self.velocity(now + step).map(|vel_after| {
+                (vel_now.angle_to(Vector2D::from(vel_after)).radians.abs() - abs_angle_delta).abs()
+            })
+        };
+
+        for _ in 0..5 {
+            let possible_steps = [
+                current_step,
+                0.5 * (current_step + max_step),
+                0.5 * (current_step + min_step),
+            ];
+
+            // todo: Reuse angle calculated for the best step on the previous iteration.
+
+            // Find the step which minimises the difference between the target angle and the
+            // realised angle.
+            let Some((best_step, _)) = possible_steps
+                .iter()
+                .flat_map(|&step| angle_diff_with_step(step).map(|a| (step, a)))
+                .min_by(|(_, a1), (_, a2)| a1.total_cmp(a2))
+            else {
+                // Failed to calculate the angle for any of the steps. Give up.
+                return Ok(current_step);
+            };
+
+            current_step = best_step;
+        }
+
+        Ok(current_step)
     }
 
-    fn space_step_to_time_step(&self, t: f64, space_step: f64) -> f64 {
+    pub fn space_step_to_time_step(&self, t: f64, space_step: f64) -> f64 {
         // hack: This is nasty
         self.time_by_arc_length
             .evaluate(self.arc_length_by_time.evaluate(t).unwrap() + space_step)
@@ -347,7 +408,7 @@ impl FilteredStroke {
         &self,
         target_angle: f64,
         min_space_step: f64,
-        max_space_step: f64,
+        max_time_step: f64,
     ) -> impl Iterator<Item = f64> {
         let t_first = *self.times.first().unwrap();
         let t_last = *self.times.last().unwrap();
@@ -360,14 +421,17 @@ impl FilteredStroke {
             }
 
             let min_time_step = self.space_step_to_time_step(t, min_space_step);
-            let max_time_step = self.space_step_to_time_step(t, max_space_step);
 
-            t += self
-                .compute_timestep(t, target_angle, min_time_step, max_time_step)
-                // Unwrapping is OK here because `t` is guaranteed to be within the interpolated
-                // range.
-                .unwrap()
-                .min(t_last);
+            let clamped_time_step = if min_time_step >= max_time_step {
+                min_time_step
+            } else {
+                self.compute_timestep(t, target_angle, min_time_step, max_time_step)
+                    // Unwrapping is OK here because `t` is guaranteed to be within the
+                    // interpolated range.
+                    .unwrap()
+            };
+
+            t += clamped_time_step.min(t_last);
 
             if t == t_last {
                 return Some(t);

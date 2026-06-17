@@ -123,7 +123,7 @@ fn bezier_control_pts_for_intersections<U>(
 }
 
 fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
-    0.5 * pen_size * pressure.powf(0.7).clamp(0.05, 0.3)
+    0.5 * pen_size * pressure.clamp(0.4, 0.7)
 }
 
 fn main() {
@@ -163,10 +163,20 @@ fn main() {
         let mut page_contents = vec![];
 
         for layer in page.layers() {
+            let objects = layer.objects();
+            let obj_count = objects.len() as f64;
+
             // todo: Filter for strokes only, then group by pen properties so we can create
             // an ExtendedGraphicsState for each pen and use that rather than writing out explicit
             // properties each time.
-            for object in layer.objects() {
+            for (obj_i, object) in layer.objects().iter().enumerate() {
+                eprintln!(
+                    "Processing objects: {:.1}% ({} of {})",
+                    ((obj_i + 1) as f64 / obj_count) * 100.0,
+                    obj_i + 1,
+                    obj_count
+                );
+
                 let sdocx::DocObject::Stroke(stroke) = object else {
                     continue;
                 };
@@ -175,7 +185,8 @@ fn main() {
 
                 // fixme: Think carefully about how many samples to take here
                 let smooth =
-                    FilteredStroke::new(&interpolated, 1.0, 1.9, stroke.events().len()).unwrap();
+                    FilteredStroke::new(&interpolated, 5.5, 7.9, stroke.events().len() * 2)
+                        .unwrap();
 
                 // let (min_curvature, max_curvature) = derivs
                 //     .curvature
@@ -195,7 +206,12 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, (), PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let sample_times = smooth.compute_sample_times(f64::to_radians(15.0), 5.0, 50.0);
+                let target_angle = f64::to_radians(10.0);
+                let min_space_step = 1.0;
+                let max_time_step = 50.0;
+
+                let sample_times =
+                    smooth.compute_sample_times(target_angle, min_space_step, max_time_step);
 
                 // let rings = (0..derivs.t.len())
                 for (t_start, t_end) in sample_times.tuple_windows() {
@@ -312,6 +328,22 @@ fn main() {
 
                     let pos_first_third = tx.transform_point(pos_first_third);
                     let pos_second_third = tx.transform_point(pos_second_third);
+
+                    let start_to_first_third = (pos_first_third - start_pos).normalize();
+
+                    // If the computed start direction is in opposition to the direction to the
+                    // first third position, use the latter for the tangent so we aren't going back
+                    // on ourselves. `start_to_first_third` should be finite, but we check the
+                    // partial ordering so that if it is not, we retain the current finite tangent.
+                    let scaled_tangent_start = if let Some(std::cmp::Ordering::Less) =
+                        scaled_tangent_start
+                            .dot(start_to_first_third)
+                            .partial_cmp(&0.0)
+                    {
+                        start_to_first_third * start_spread
+                    } else {
+                        scaled_tangent_start
+                    };
 
                     // page_contents.extend([
                     //     Op::SetOutlineColor {
@@ -526,14 +558,28 @@ fn main() {
 
                     // assert!(curvature_ratio.is_finite());
 
+                    let true_angle = scaled_tangent_start
+                        .angle_to(scaled_tangent_end)
+                        .radians
+                        .abs();
+
                     let col = Color::Rgb(Rgb::new(
+                        // 0.0, 0.0, 0.0,
                         if used_fallback_start_tangent {
                             1.0
                         } else {
                             0.0
                         },
-                        0.0,
-                        if used_fallback_end_tangent { 1.0 } else { 0.0 },
+                        if true_angle > 1.5 * target_angle {
+                            0.5
+                        } else {
+                            0.0
+                        },
+                        if true_angle < 0.5 * target_angle {
+                            1.0
+                        } else {
+                            0.0
+                        },
                         None,
                     ));
 
@@ -546,11 +592,53 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Stroke,
-                                winding_order: WindingOrder::default(),
+                                mode: PaintMode::Fill,
+                                winding_order: WindingOrder::NonZero,
                             },
                         },
                     ]);
+
+                    // if let Ok(max_end_point) = smooth
+                    //     .position(t_start + smooth.space_step_to_time_step(t_start, max_space_step))
+                    // {
+                    //     page_contents.extend([
+                    //         Op::SetOutlineColor {
+                    //             col: Color::Rgb(Rgb::new(1.0, 0.0, 0.0, None)),
+                    //         },
+                    //         Op::DrawLine {
+                    //             line: Line {
+                    //                 points: vec![
+                    //                     pdf_point_to_line_point(start_pos),
+                    //                     pdf_point_to_line_point(
+                    //                         tx.transform_point(max_end_point.into()),
+                    //                     ),
+                    //                 ],
+                    //                 is_closed: false,
+                    //             },
+                    //         },
+                    //     ])
+                    // }
+
+                    // if let Ok(min_end_point) = smooth
+                    //     .position(t_start + smooth.space_step_to_time_step(t_start, min_space_step))
+                    // {
+                    //     page_contents.extend([
+                    //         Op::SetOutlineColor {
+                    //             col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
+                    //         },
+                    //         Op::DrawLine {
+                    //             line: Line {
+                    //                 points: vec![
+                    //                     pdf_point_to_line_point(start_pos),
+                    //                     pdf_point_to_line_point(
+                    //                         tx.transform_point(min_end_point.into()),
+                    //                     ),
+                    //                 ],
+                    //                 is_closed: false,
+                    //             },
+                    //         },
+                    //     ])
+                    // }
 
                     // Some(PolygonRing { points })
                 }
