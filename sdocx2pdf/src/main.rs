@@ -1,13 +1,11 @@
-use std::{ops::Div, os::unix::fs::MetadataExt};
+use std::os::unix::fs::MetadataExt;
 
-use euclid::{Angle, Point2D, Vector2D, Vector3D};
-use itertools::{Either, Itertools, Position};
-use lerp::Lerp;
+use euclid::{Point2D, Vector2D};
+use itertools::Itertools;
 use printpdf::{
-    Color, Line, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
+    Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
     PolygonRing, Rgb, WindingOrder,
 };
-use sdocx::page::object::stroke::{Event, Stroke};
 
 use crate::stroke::{FilteredStroke, InterpolatedStroke};
 
@@ -35,42 +33,6 @@ fn pdf_point_to_control_point(point: PdfPoint) -> LinePoint {
         },
         bezier: true,
     }
-}
-
-fn calc_pulley_line_points_acw<T: num::Float + euclid::Trig, U>(
-    c1: Point2D<T, U>,
-    r1: T,
-    c2: Point2D<T, U>,
-    r2: T,
-) -> Option<[Point2D<T, U>; 4]> {
-    let d = c1.distance_to(c2);
-
-    if d.is_zero() {
-        return None;
-    }
-
-    let alpha = (c2 - c1).angle_from_x_axis();
-    let beta = Angle::radians(((r1 - r2) / d).acos());
-
-    if !beta.is_finite() {
-        // (r1-r2)/d is not in [-1,1], i.e. one circle is inside the other.
-        // todo: Draw such events as single circles.
-        return None;
-    }
-
-    let (apb_s, apb_c) = (alpha + beta).sin_cos();
-    let (amb_s, amb_c) = (alpha - beta).sin_cos();
-
-    let apb = Vector2D::<T, U>::new(apb_c, apb_s);
-    let amb = Vector2D::<T, U>::new(amb_c, amb_s);
-
-    let right_start = c1 + amb * r1;
-    let right_end = c2 + amb * r2;
-
-    let left_start = c2 + apb * r2;
-    let left_end = c1 + apb * r1;
-
-    Some([right_start, right_end, left_start, left_end])
 }
 
 fn bezier_arc_control_points<T: num::Float, U>(
@@ -345,35 +307,6 @@ fn main() {
                         scaled_tangent_start
                     };
 
-                    // page_contents.extend([
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(1.0, 0.5, 0.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_to_line_point(start_pos),
-                    //                 pdf_point_to_line_point(start_pos + scaled_tangent_start),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(0.0, 0.5, 1.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_to_line_point(pos_first_third),
-                    //                 pdf_point_to_line_point(
-                    //                     pos_first_third + scaled_tangent_first_third,
-                    //                 ),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    // ]);
-
                     let bottom_left =
                         start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
 
@@ -425,33 +358,6 @@ fn main() {
                             upper_mid_right,
                             lower_mid_right,
                         );
-
-                    // eprintln!(
-                    //     "fitting {right_first_third:?} and {right_second_third:?} into curve from {right_start:?} to {right_end:?}"
-                    // );
-
-                    // eprintln!(
-                    //     "ls = {left_start:?}, le = {left_end:?}, lp1 = {left_p1:?}, lp2 = {left_p2:?}, rp1 = {right_p1:?}, rp2 = {right_p2:?}"
-                    // );
-
-                    // let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([l2_bot_c1, l2_bot_c2]) =
-                    //     bezier_arc_control_points(l2, bot, start_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([bot_r1_c1, bot_r1_c2]) =
-                    //     bezier_arc_control_points(bot, r1, start_pos)
-                    // else {
-                    //     continue;
-                    // };
 
                     let bottom_to_top_left_points = [
                         pdf_point_to_line_point(bottom_left),
@@ -512,121 +418,6 @@ fn main() {
                             .collect_vec()
                     };
 
-                    // let points = vec![
-                    //     pdf_point_into_line_point(left_start),
-                    //     // pdf_point_into_line_point(left_first_third),
-                    //     // pdf_point_into_line_point(left_second_third),
-                    //     pdf_point_into_line_point(left_end),
-                    //     pdf_point_into_line_point(right_end),
-                    //     // pdf_point_into_line_point(right_second_third),
-                    //     // pdf_point_into_line_point(right_first_third),
-                    //     pdf_point_into_line_point(right_start),
-                    // ];
-
-                    // page_contents.extend([
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(1.0, 0.0, 0.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_into_line_point(left_start),
-                    //                 pdf_point_into_line_point(left_end),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_into_line_point(left_end),
-                    //                 pdf_point_into_line_point(right_end),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(0.0, 0.0, 1.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_into_line_point(right_end),
-                    //                 pdf_point_into_line_point(right_start),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    //     Op::SetOutlineColor {
-                    //         col: Color::Rgb(Rgb::new(1.0, 0.0, 1.0, None)),
-                    //     },
-                    //     Op::DrawLine {
-                    //         line: Line {
-                    //             points: vec![
-                    //                 pdf_point_into_line_point(right_start),
-                    //                 pdf_point_into_line_point(left_start),
-                    //             ],
-                    //             is_closed: false,
-                    //         },
-                    //     },
-                    // ]);
-
-                    // // fixme: Lots of rejections here...
-                    // let Some([r1, r2, l1, l2]) =
-                    //     calc_pulley_line_points_acw(start_pos, start_spread, end_pos, end_spread)
-                    // else {
-                    //     continue;
-                    // };
-
-                    // let top = end_pos + forwards * end_spread;
-                    // let bot = start_pos - forwards * end_spread;
-
-                    // // fixme: ...and here.
-                    // let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([l2_bot_c1, l2_bot_c2]) =
-                    //     bezier_arc_control_points(l2, bot, start_pos)
-                    // else {
-                    //     continue;
-                    // };
-                    // let Some([bot_r1_c1, bot_r1_c2]) =
-                    //     bezier_arc_control_points(bot, r1, start_pos)
-                    // else {
-                    //     continue;
-                    // };
-
-                    // let points = vec![
-                    //     pdf_point_into_line_point(r2),
-                    //     pdf_point_into_control_point(r2_top_c1),
-                    //     pdf_point_into_control_point(r2_top_c2),
-                    //     pdf_point_into_line_point(top),
-                    //     pdf_point_into_control_point(top_l1_c1),
-                    //     pdf_point_into_control_point(top_l1_c2),
-                    //     pdf_point_into_line_point(l1),
-                    //     pdf_point_into_line_point(l2),
-                    //     pdf_point_into_control_point(l2_bot_c1),
-                    //     pdf_point_into_control_point(l2_bot_c2),
-                    //     pdf_point_into_line_point(bot),
-                    //     pdf_point_into_control_point(bot_r1_c1),
-                    //     pdf_point_into_control_point(bot_r1_c2),
-                    //     pdf_point_into_line_point(r1),
-                    // ];
-
-                    // let curvature_ratio = ((derivs.curvature[i_start] + derivs.curvature[i_end]
-                    //     - min_curvature * 2.0)
-                    //     / (curvature_span * 2.0)) as f32;
-
-                    // assert!(curvature_ratio.is_finite());
-
                     let true_angle = scaled_tangent_start
                         .angle_to(scaled_tangent_end)
                         .radians
@@ -666,91 +457,13 @@ fn main() {
                             },
                         },
                     ]);
-
-                    // if let Ok(max_end_point) = smooth
-                    //     .position(t_start + smooth.space_step_to_time_step(t_start, max_space_step))
-                    // {
-                    //     page_contents.extend([
-                    //         Op::SetOutlineColor {
-                    //             col: Color::Rgb(Rgb::new(1.0, 0.0, 0.0, None)),
-                    //         },
-                    //         Op::DrawLine {
-                    //             line: Line {
-                    //                 points: vec![
-                    //                     pdf_point_to_line_point(start_pos),
-                    //                     pdf_point_to_line_point(
-                    //                         tx.transform_point(max_end_point.into()),
-                    //                     ),
-                    //                 ],
-                    //                 is_closed: false,
-                    //             },
-                    //         },
-                    //     ])
-                    // }
-
-                    // if let Ok(min_end_point) = smooth
-                    //     .position(t_start + smooth.space_step_to_time_step(t_start, min_space_step))
-                    // {
-                    //     page_contents.extend([
-                    //         Op::SetOutlineColor {
-                    //             col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
-                    //         },
-                    //         Op::DrawLine {
-                    //             line: Line {
-                    //                 points: vec![
-                    //                     pdf_point_to_line_point(start_pos),
-                    //                     pdf_point_to_line_point(
-                    //                         tx.transform_point(min_end_point.into()),
-                    //                     ),
-                    //                 ],
-                    //                 is_closed: false,
-                    //             },
-                    //         },
-                    //     ])
-                    // }
-
-                    // Some(PolygonRing { points })
                 }
-
-                // // fixme: Alpha is ignored here.
-                // let [b, g, r, _a] = stroke.colour().map(|u| f32::from(u) / 255.0);
-
-                // page_contents.extend([
-                //     Op::SetFillColor {
-                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
-                //     },
-                //     Op::SetOutlineColor {
-                //         col: Color::Rgb(Rgb::new(r, g, b, None)),
-                //     },
-                //     Op::SetOutlineThickness {
-                //         pt: Mm(0.05).into(),
-                //     },
-                // ]);
-
-                // let len_before = page_contents.len();
-
-                // page_contents.extend(rings.map(|ring| Op::DrawPolygon {
-                //     polygon: Polygon {
-                //         rings: vec![ring],
-                //         mode: PaintMode::Fill,
-                //         winding_order: WindingOrder::default(),
-                //     },
-                // }));
-
-                // polygon_count += page_contents.len() - len_before;
             }
         }
 
         pdf.pages
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
-
-    // let discarded_event_count = event_count - used_event_count;
-
-    // eprintln!(
-    //     "Discarded {discarded_event_count} of {event_count} stroke events ({:.1}%).",
-    //     100. * (discarded_event_count as f64) / (event_count as f64)
-    // );
 
     eprintln!("Creating PDF with {polygon_count} polygons");
 
