@@ -1,9 +1,13 @@
 use euclid::default::Vector2D;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
 use scirs2_interpolate::{
-    Interp1d, InterpolateResult, InterpolationMethod, PchipInterpolator, interp1d::ExtrapolateMode,
+    CubicSpline, Interp1d, InterpolateResult, InterpolationMethod, PchipInterpolator,
+    interp1d::ExtrapolateMode,
+    symbolic_derivative,
+    traits::{ExtremaType, SplineInterpolator},
+    utils::{find_multiple_roots, find_roots_bisection},
 };
 
 /// Interpolates between samples of stroke data to create a continuous mapping from time to
@@ -143,6 +147,25 @@ impl InterpolatedStroke {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum KeyTime {
+    Start(f64),
+    CurvatureExtremum(f64),
+    PressureExtremum(f64),
+    End(f64),
+}
+
+impl KeyTime {
+    pub fn to_time(self) -> f64 {
+        match self {
+            KeyTime::Start(t)
+            | KeyTime::CurvatureExtremum(t)
+            | KeyTime::PressureExtremum(t)
+            | KeyTime::End(t) => t,
+        }
+    }
+}
+
 /// Smoothed stroke data and various time derivatives.
 pub struct FilteredStroke {
     /// The times at which the samples of the original unsmoothed interpolated curve were taken.
@@ -170,7 +193,9 @@ pub struct FilteredStroke {
     speed: Interp1d<f64>,
 
     /// Curvature of the filtered data. See https://en.wikipedia.org/wiki/Curvature#Plane_curves.
-    pub curvature: Interp1d<f64>,
+    ///
+    /// We use a cubic spline for this so that we can easily find extrema via differentiation.
+    curvature: CubicSpline<f64>,
 
     /// Filtered pressure data.
     pub pressure: Interp1d<f64>,
@@ -189,7 +214,7 @@ impl FilteredStroke {
     fn calc_speed_curvature(x1: f64, y1: f64, x2: f64, y2: f64) -> (f64, f64) {
         // https://en.wikipedia.org/wiki/Curvature#Plane_curves
         // For more accurate calculation using floats, we rearrange the formula to
-        //   |(x'/s)y'' - (y'/s)x''|/s^2
+        //   ((x'/s)y'' - (y'/s)x'')/s^2
         // with s = sqrt(x'^2 + y'^2), the speed of the stroke, calculated using `hypot` in
         // order to avoid over/underflow when we square the derivatives. We can use fused
         // multiply-add for the numerator. Note that x'/s and y'/s are the components of the
@@ -202,7 +227,7 @@ impl FilteredStroke {
         let ty = y1 / speed;
 
         // todo: Kahan?
-        let curvature = x2.mul_add(-ty, tx * y2).abs() / (speed * speed);
+        let curvature = x2.mul_add(-ty, tx * y2) / (speed * speed);
 
         // The curvature will be NaN if the division by speed^2 fails. This means that x'
         // and y' are very small. In general this also means the numerator is very small,
@@ -223,6 +248,8 @@ impl FilteredStroke {
     /// interpolated stroke, and the last precisely at the end of the interpolated stroke. The
     /// standard deviation for the x and y filters is `xy_sd`, and the standard deviation for the
     /// pressure filter is `p_sd`.
+    ///
+    /// `n_samples` must be at least 3.
     pub fn new(
         stroke: &InterpolatedStroke,
         xy_sd: f64,
@@ -231,6 +258,8 @@ impl FilteredStroke {
     ) -> InterpolateResult<FilteredStroke> {
         /// Number of standard deviations wide the Gaussian kernels are.
         const TRUNC: usize = 6;
+
+        assert!(n_samples >= 3);
 
         let times = {
             let mut t = scirs2_core::Array1::linspace(stroke.t_first, stroke.t_last, n_samples);
@@ -281,16 +310,16 @@ impl FilteredStroke {
 
         let (speed, curvature) = {
             let mut s = x1.clone();
-            let mut c = x2.clone();
+            let mut sc = x2.clone();
 
             // There is no vectorised `hypot` or FMA, so we need to loop. We might as well perform
             // the whole calculation in that one loop. We can also use the loop to build the speed
             // array.
-            ndarray::azip!((s in &mut s, c in &mut c, &y1 in &y1, &y2 in &y2) {
-                (*s, *c) = Self::calc_speed_curvature(*s, y1, *c, y2);
+            ndarray::azip!((s in &mut s, sc in &mut sc, &y1 in &y1, &y2 in &y2) {
+                (*s, *sc) = Self::calc_speed_curvature(*s, y1, *sc, y2);
             });
 
-            (s, c)
+            (s, sc)
         };
 
         let x = gaussian_filter1d(&x_interp, xy_sd, Axis(0), 0, BorderMode::Nearest, TRUNC);
@@ -352,7 +381,7 @@ impl FilteredStroke {
             y1: interp(y1),
             y2: interp(y2),
             speed: interp(speed),
-            curvature: interp(curvature),
+            curvature: CubicSpline::new(&tv, &curvature.view()).unwrap(),
             pressure: interp(pressure),
             pressure1: interp(pressure1),
             arc_length_by_time,
@@ -373,7 +402,7 @@ impl FilteredStroke {
         // we have κ ≈ Δθ/(uΔt), where Δθ > 0 is the absolute angle change between the samples at t
         // and t + Δt. Therefore, to (approximately) achieve a given Δθ between the samples at
         // t and t + Δt, we can use Δt = Δθ/(κu).
-        Ok(abs_angle_delta / (self.curvature.evaluate(now)? * self.speed.evaluate(now)?))
+        Ok(abs_angle_delta / (self.curvature.evaluate(now)?.abs() * self.speed.evaluate(now)?))
     }
 
     /// Returns a timestep in `[min_step, max_step]` that will approximately achieve an absolute
@@ -534,5 +563,57 @@ impl FilteredStroke {
     /// Returns the stroke position at time `t`.
     pub fn position(&self, t: f64) -> InterpolateResult<(f64, f64)> {
         Ok((self.x.evaluate(t)?, self.y.evaluate(t)?))
+    }
+
+    pub fn key_times(&self) -> impl Iterator<Item = KeyTime> {
+        let t_start = self.times[0];
+        let t_end = *self.times.last().unwrap();
+
+        let t_delta = self.times[1] - t_start;
+
+        let extremum_tolerance = t_delta * 10.0;
+
+        // To avoid duplicating `t_start` and `t_end`, we do not look for extrema within one time
+        // step of either end of the stroke. The tolerance is the minimum interval width for the
+        // bisection method.
+        let curvature_extrema = self
+            .curvature
+            .find_extrema(&[(t_start + t_delta, t_end - t_delta)], extremum_tolerance)
+            .unwrap();
+
+        // let last_curvature_extremum = curvature_extrema
+        //     .last()
+        //     .map(|(t, _, _)| KeyTime::CurvatureExtremum(*t));
+
+        // let extrema = curvature_extrema
+        //     .into_iter()
+        //     .tuple_windows()
+        //     // Look for pressure extrema between each pair of curvature extrema.
+        //     .flat_map(move |((left, _, _), (right, _, _))| {
+        //         find_multiple_roots(
+        //             left + (right - left) * 0.3,
+        //             right - (right - left) * 0.3,
+        //             t_delta * extremum_tolerance_in_deltas,
+        //             3, // subdivision count - needs more careful consideration than this
+        //             |t| self.pressure1.evaluate(t),
+        //         )
+        //         .map(|pressure_extrema| {
+        //             std::iter::once(KeyTime::CurvatureExtremum(left))
+        //                 .chain(pressure_extrema.into_iter().map(KeyTime::PressureExtremum))
+        //         })
+        //     })
+        //     .flatten()
+        //     // The map on `tuple_windows` only yields the first curvature extremum, never the
+        //     // second, of a pair (and won't yield anything if there are not two curvature extrema).
+        //     // Thus, the last curvature extremum has not yet been yielded.
+        //     .chain(last_curvature_extremum);
+
+        std::iter::once(KeyTime::Start(t_start))
+            .chain(
+                curvature_extrema
+                    .into_iter()
+                    .map(|(t, _, _)| KeyTime::CurvatureExtremum(t)),
+            )
+            .chain(std::iter::once(KeyTime::End(t_end)))
     }
 }

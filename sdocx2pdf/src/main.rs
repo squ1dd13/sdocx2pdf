@@ -367,7 +367,7 @@ fn main() {
                     let bottom_arc_lowest = start_pos - scaled_tangent_start;
                     let top_arc_highest = end_pos + scaled_tangent_end;
 
-                    let use_arcs = false;
+                    let use_arcs = true;
 
                     let points = if let Some((
                         top_left_to_arc_highest_cps,
@@ -432,10 +432,10 @@ fn main() {
                             .collect_vec()
                     };
 
-                    let true_angle = scaled_tangent_start
-                        .angle_to(scaled_tangent_end)
-                        .radians
-                        .abs();
+                    // let true_angle = scaled_tangent_start
+                    //     .angle_to(scaled_tangent_end)
+                    //     .radians
+                    //     .abs();
 
                     let col = Color::Rgb(Rgb::new(
                         0.0, 0.0, 0.0,
@@ -470,7 +470,50 @@ fn main() {
                                 winding_order: WindingOrder::NonZero,
                             },
                         },
+                        // Set things up for drawing the points of interest.
+                        Op::SetLineCapStyle {
+                            cap: printpdf::LineCapStyle::Round,
+                        },
                     ]);
+
+                    page_contents.extend(smooth.key_times().flat_map(|key_time| {
+                        let t = key_time.to_time();
+
+                        let pos = tx.transform_point(smooth.position(t).unwrap().into());
+
+                        [
+                            Op::SetOutlineColor {
+                                col: Color::Rgb(match key_time {
+                                    stroke::KeyTime::Start(_) => Rgb::new(1.0, 0.5, 0.0, None),
+                                    stroke::KeyTime::CurvatureExtremum(_) => {
+                                        Rgb::new(0.0, 1.0, 0.0, None)
+                                    }
+                                    stroke::KeyTime::PressureExtremum(_) => {
+                                        Rgb::new(1.0, 0.0, 0.0, None)
+                                    }
+                                    stroke::KeyTime::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
+                                }),
+                            },
+                            Op::SetOutlineThickness {
+                                pt: Mm(pressure_to_circle_radius(
+                                    smooth.pressure.evaluate(t).unwrap(),
+                                    pen_size,
+                                ) as f32
+                                    * 2.0
+                                    * 0.25)
+                                .into(),
+                            },
+                            Op::DrawLine {
+                                line: printpdf::Line {
+                                    points: vec![
+                                        pdf_point_to_line_point(pos),
+                                        pdf_point_to_line_point(pos),
+                                    ],
+                                    is_closed: false,
+                                },
+                            },
+                        ]
+                    }));
                 }
             }
         }
