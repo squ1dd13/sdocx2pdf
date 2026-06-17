@@ -92,6 +92,10 @@ struct PenInfo {
 
     ui_colour_hsv: [f32; 3],
     ui_colour_info: u32,
+
+    is_fixed_opacity: bool,
+    is_auto_size_enabled: bool,
+    fit_ratio: f32,
 }
 
 impl PenInfo {
@@ -123,6 +127,10 @@ impl PenInfo {
 
             is_fixed_width: None,
             particle_size: None,
+
+            is_fixed_opacity: false,
+            is_auto_size_enabled: false,
+            fit_ratio: 1.0,
         })
     }
 
@@ -158,6 +166,16 @@ impl PenInfo {
                 stream.read_f32_le()?,
             ],
             ui_colour_info: stream.read_u32_le()?,
+
+            // These were added after v4.4.33.5 and before or in v4.4.41.9 of the mobile app,
+            // and are only read if there are bytes remaining after reading all of the above.
+            is_fixed_opacity: stream.n_remaining() >= 4 && stream.read_u32_le()? != 0,
+            is_auto_size_enabled: stream.n_remaining() >= 4 && stream.read_u32_le()? != 0,
+            fit_ratio: if stream.n_remaining() >= 4 {
+                stream.read_f32_le()?
+            } else {
+                1.0
+            },
         };
 
         stream.ensure_eof()?;
