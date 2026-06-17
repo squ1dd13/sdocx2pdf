@@ -3,11 +3,11 @@ use std::os::unix::fs::MetadataExt;
 use euclid::{Point2D, Vector2D};
 use itertools::Itertools;
 use printpdf::{
-    Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Polygon,
+    Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Point, Polygon,
     PolygonRing, Rgb, WindingOrder,
 };
 
-use crate::stroke::{FilteredStroke, InterpolatedStroke};
+use crate::stroke::{FilteredStroke, InterpolatedStroke, StrokeOrDot};
 
 struct PdfSpace;
 type PdfPoint = Point2D<f64, PdfSpace>;
@@ -92,7 +92,7 @@ fn main() {
     // sdocx::test_all();
 
     let document = sdocx::Document::from_zip(
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
     )
     .unwrap();
 
@@ -143,13 +143,6 @@ fn main() {
                     continue;
                 };
 
-                let interpolated = InterpolatedStroke::from_events(stroke.events());
-
-                // fixme: Think carefully about how many samples to take here
-                let smooth =
-                    FilteredStroke::new(&interpolated, 5.5, 7.9, stroke.events().len() * 2)
-                        .unwrap();
-
                 // let (min_curvature, max_curvature) = derivs
                 //     .curvature
                 //     .iter()
@@ -167,6 +160,45 @@ fn main() {
                 // bottom.
                 let tx = euclid::Transform2D::<f64, (), PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
+
+                let smooth = match StrokeOrDot::from_events(stroke.events()) {
+                    StrokeOrDot::Stroke(stroke) => FilteredStroke::new(
+                        &InterpolatedStroke::from_split_stroke(&stroke),
+                        5.5,
+                        7.9,
+                        stroke.event_count() * 2,
+                    )
+                    .unwrap(),
+
+                    StrokeOrDot::Dot { x, y, pressure } => {
+                        let pos = tx.transform_point((x, y).into());
+                        let spread = pressure_to_circle_radius(pressure, pen_size);
+
+                        // Draw a filled circle.
+                        page_contents.extend([
+                            Op::SetOutlineColor {
+                                col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
+                            },
+                            Op::SetLineCapStyle {
+                                cap: printpdf::LineCapStyle::Round,
+                            },
+                            Op::SetOutlineThickness {
+                                pt: Mm(spread as f32 * 2.0).into(),
+                            },
+                            Op::DrawLine {
+                                line: printpdf::Line {
+                                    points: vec![
+                                        pdf_point_to_line_point(pos),
+                                        pdf_point_to_line_point(pos),
+                                    ],
+                                    is_closed: false,
+                                },
+                            },
+                        ]);
+
+                        continue;
+                    }
+                };
 
                 let target_angle = f64::to_radians(15.0);
                 let min_space_step = 2.0;

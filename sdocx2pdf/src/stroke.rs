@@ -27,6 +27,87 @@ pub struct InterpolatedStroke {
     pressure: PchipInterpolator<f64>,
 }
 
+/// Time, position and pressure data for a stroke, split into four vectors. It is guaranteed that
+/// the four vectors have the same length, that this length is at least 2, and that the data is
+/// stored in chronological order.
+pub struct SplitStroke {
+    time: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    pressure: Vec<f64>,
+}
+
+impl SplitStroke {
+    pub fn event_count(&self) -> usize {
+        self.time.len()
+    }
+}
+
+pub enum StrokeOrDot {
+    Stroke(SplitStroke),
+    Dot { x: f64, y: f64, pressure: f64 },
+}
+
+impl StrokeOrDot {
+    /// Extracts clean stroke data from the given events. There must be at least one event, and if
+    /// there is more than one, the events must be in chronological order.
+    ///
+    /// If the events all have the same position, a `Dot` is returned with that position and the
+    /// maximum pressure value across all events. If the events are not all at the same position,
+    /// the stroke data is cleaned by merging consecutive events with the same timestamps, and is
+    /// returned as a `SplitStroke` with the data in the same order as it was obtained from the
+    /// events.
+    pub fn from_events<'a>(
+        events: impl IntoIterator<Item = &'a sdocx::page::object::stroke::Event> + 'a,
+    ) -> StrokeOrDot {
+        // Combine consecutive events that occur at the same time. Since the events are in
+        // chronological order, the effect is that for every time value we have, there is exactly
+        // one event that occurs at that time.
+        let deduped = events
+            .into_iter()
+            .map(|ev| {
+                (
+                    f64::from(ev.timestamp),
+                    ev.point.x,
+                    ev.point.y,
+                    f64::from(ev.pressure),
+                )
+            })
+            .coalesce(|a @ (t0, x0, y0, p0), b @ (t1, x1, y1, p1)| {
+                if t0 == t1 {
+                    // Sometimes the two events are identical, but sometimes they are not.
+                    // We just take the mean of the two.
+                    Ok((t0, 0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (p0 + p1)))
+                } else {
+                    Err((a, b))
+                }
+            });
+
+        let (time, x, y, pressure): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
+            itertools::multiunzip(deduped);
+
+        assert!(!time.is_empty(), "there must be at least one event");
+
+        if let (Ok(&x), Ok(&y)) = (x.iter().all_equal_value(), y.iter().all_equal_value()) {
+            return StrokeOrDot::Dot {
+                x,
+                y,
+                // Unwrapping is safe here because there is at least one event.
+                pressure: pressure.into_iter().max_by(f64::total_cmp).unwrap(),
+            };
+        }
+
+        // Since the x and y values are not all the same, we now know there are at least two
+        // events in the cleaned data.
+        StrokeOrDot::Stroke(SplitStroke {
+            time,
+            x,
+            y,
+            pressure,
+        })
+    }
+}
+
 impl InterpolatedStroke {
     /// Returns an interpolated stroke created from the given `x`, `y` and `p`ressure data sampled
     /// at the times `t`.
@@ -48,45 +129,16 @@ impl InterpolatedStroke {
         })
     }
 
-    /// Constructs an interpolated stroke from the given events. There must be at least two events,
-    /// and the events must be in chronological order.
-    pub fn from_events<'a>(
-        events: impl IntoIterator<Item = &'a sdocx::page::object::stroke::Event> + 'a,
-    ) -> InterpolatedStroke {
-        // Combine events that occur at the same time so that the x, y and pressure functions are
-        // well defined. It is sufficient to combine consecutive events with the same timestamps,
-        // because the events are given in chronological order.
-        let deduped = events
-            .into_iter()
-            .map(|ev| {
-                (
-                    f64::from(ev.timestamp),
-                    ev.point.x,
-                    ev.point.y,
-                    f64::from(ev.pressure),
-                )
-            })
-            .coalesce(|a @ (t0, x0, y0, p0), b @ (t1, x1, y1, p1)| {
-                if t0 == t1 {
-                    // Sometimes the two events are identical, but sometimes they are not.
-                    // We just take the mean of the two.
-                    Ok((t0, 0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (p0 + p1)))
-                } else {
-                    Err((a, b))
-                }
-            });
-
-        let (t, x, y, p): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) = itertools::multiunzip(deduped);
-
+    /// Interpolates the given stroke data.
+    pub fn from_split_stroke(stroke: &SplitStroke) -> InterpolatedStroke {
         let r = InterpolatedStroke::new(
-            &Array1::from(t).view(),
-            &Array1::from(x).view(),
-            &Array1::from(y).view(),
-            &Array1::from(p).view(),
+            &ArrayView1::from(&stroke.time),
+            &ArrayView1::from(&stroke.x),
+            &ArrayView1::from(&stroke.y),
+            &ArrayView1::from(&stroke.pressure),
         );
 
-        // The data is in order, the arrays are all the same length, and the caller guarantees
-        // that there is more than one event, so `unwrap` is safe here.
+        // The guarantees made by `SplitStroke` ensure that unwrapping is safe here.
         r.unwrap()
     }
 }
