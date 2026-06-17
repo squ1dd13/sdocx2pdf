@@ -361,11 +361,15 @@ impl FilteredStroke {
             })
         };
 
+        let mut min_step_search = min_step;
+        let mut max_step_search = max_step;
+
+        // We should already be close to the target angle, so only perform a few iterations.
         for _ in 0..5 {
             let possible_steps = [
                 current_step,
-                0.5 * (current_step + max_step),
-                0.5 * (current_step + min_step),
+                0.5 * (current_step + max_step_search),
+                0.5 * (current_step + min_step_search),
             ];
 
             // todo: Reuse angle calculated for the best step on the previous iteration.
@@ -378,8 +382,18 @@ impl FilteredStroke {
                 .min_by(|(_, a1), (_, a2)| a1.total_cmp(a2))
             else {
                 // Failed to calculate the angle for any of the steps. Give up.
-                return Ok(current_step);
+                break;
             };
+
+            if best_step == current_step {
+                break;
+            }
+
+            if best_step > current_step {
+                min_step_search = current_step;
+            } else {
+                max_step_search = current_step;
+            }
 
             current_step = best_step;
         }
