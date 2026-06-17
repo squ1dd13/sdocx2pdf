@@ -206,8 +206,8 @@ fn main() {
                 let tx = euclid::Transform2D::<f64, (), PdfSpace>::scale(1.0, -1.0)
                     .then_translate(PdfVector::new(0.0, h.into()));
 
-                let target_angle = f64::to_radians(10.0);
-                let min_space_step = 1.0;
+                let target_angle = f64::to_radians(15.0);
+                let min_space_step = 2.0;
                 let max_time_step = 50.0;
 
                 let sample_times =
@@ -374,55 +374,57 @@ fn main() {
                     //     },
                     // ]);
 
-                    let left_start =
+                    let bottom_left =
                         start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
 
-                    let right_start =
+                    let bottom_right =
                         start_pos + Vector2D::new(scaled_tangent_start.y, -scaled_tangent_start.x);
 
-                    let left_first_third = pos_first_third
+                    let lower_mid_left = pos_first_third
                         + Vector2D::new(
                             -scaled_tangent_first_third.y,
                             scaled_tangent_first_third.x,
                         );
 
-                    let right_first_third = pos_first_third
+                    let lower_mid_right = pos_first_third
                         + Vector2D::new(
                             scaled_tangent_first_third.y,
                             -scaled_tangent_first_third.x,
                         );
 
-                    let left_second_third = pos_second_third
+                    let upper_mid_left = pos_second_third
                         + Vector2D::new(
                             -scaled_tangent_second_third.y,
                             scaled_tangent_second_third.x,
                         );
 
-                    let right_second_third = pos_second_third
+                    let upper_mid_right = pos_second_third
                         + Vector2D::new(
                             scaled_tangent_second_third.y,
                             -scaled_tangent_second_third.x,
                         );
 
-                    let left_end =
+                    let top_left =
                         end_pos + Vector2D::new(-scaled_tangent_end.y, scaled_tangent_end.x);
 
-                    let right_end =
+                    let top_right =
                         end_pos + Vector2D::new(scaled_tangent_end.y, -scaled_tangent_end.x);
 
-                    let (left_p1, left_p2) = bezier_control_pts_for_intersections(
-                        left_start,
-                        left_end,
-                        left_first_third,
-                        left_second_third,
-                    );
+                    let (cp_lower_mid_left, cp_upper_mid_left) =
+                        bezier_control_pts_for_intersections(
+                            bottom_left,
+                            top_left,
+                            lower_mid_left,
+                            upper_mid_left,
+                        );
 
-                    let (right_p1, right_p2) = bezier_control_pts_for_intersections(
-                        right_start,
-                        right_end,
-                        right_first_third,
-                        right_second_third,
-                    );
+                    let (cp_upper_mid_right, cp_lower_mid_right) =
+                        bezier_control_pts_for_intersections(
+                            top_right,
+                            bottom_right,
+                            upper_mid_right,
+                            lower_mid_right,
+                        );
 
                     // eprintln!(
                     //     "fitting {right_first_third:?} and {right_second_third:?} into curve from {right_start:?} to {right_end:?}"
@@ -432,16 +434,83 @@ fn main() {
                     //     "ls = {left_start:?}, le = {left_end:?}, lp1 = {left_p1:?}, lp2 = {left_p2:?}, rp1 = {right_p1:?}, rp2 = {right_p2:?}"
                     // );
 
-                    let points = vec![
-                        pdf_point_to_line_point(left_start),
-                        pdf_point_to_control_point(left_p1),
-                        pdf_point_to_control_point(left_p2),
-                        pdf_point_to_line_point(left_end),
-                        pdf_point_to_line_point(right_end),
-                        pdf_point_to_control_point(right_p2),
-                        pdf_point_to_control_point(right_p1),
-                        pdf_point_to_line_point(right_start),
+                    // let Some([r2_top_c1, r2_top_c2]) = bezier_arc_control_points(r2, top, end_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([top_l1_c1, top_l1_c2]) = bezier_arc_control_points(top, l1, end_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([l2_bot_c1, l2_bot_c2]) =
+                    //     bezier_arc_control_points(l2, bot, start_pos)
+                    // else {
+                    //     continue;
+                    // };
+                    // let Some([bot_r1_c1, bot_r1_c2]) =
+                    //     bezier_arc_control_points(bot, r1, start_pos)
+                    // else {
+                    //     continue;
+                    // };
+
+                    let bottom_to_top_left_points = [
+                        pdf_point_to_line_point(bottom_left),
+                        pdf_point_to_control_point(cp_lower_mid_left),
+                        pdf_point_to_control_point(cp_upper_mid_left),
+                        pdf_point_to_line_point(top_left),
                     ];
+
+                    let top_to_bottom_right_points = [
+                        pdf_point_to_line_point(top_right),
+                        pdf_point_to_control_point(cp_upper_mid_right),
+                        pdf_point_to_control_point(cp_lower_mid_right),
+                        pdf_point_to_line_point(bottom_right),
+                    ];
+
+                    let bottom_arc_lowest = start_pos - scaled_tangent_start;
+                    let top_arc_highest = end_pos + scaled_tangent_end;
+
+                    let points = if let (
+                        Some(top_left_to_arc_highest_cps),
+                        Some(top_arc_highest_to_right_cps),
+                        Some(bottom_right_to_arc_lowest_cps),
+                        Some(bottom_arc_lowest_to_left_cps),
+                    ) = (
+                        bezier_arc_control_points(top_left, top_arc_highest, end_pos)
+                            .map(IntoIterator::into_iter),
+                        bezier_arc_control_points(top_arc_highest, top_right, end_pos)
+                            .map(IntoIterator::into_iter),
+                        bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos)
+                            .map(IntoIterator::into_iter),
+                        bezier_arc_control_points(bottom_arc_lowest, bottom_left, start_pos)
+                            .map(IntoIterator::into_iter),
+                    ) {
+                        // Points from bottom left to top left
+                        bottom_to_top_left_points
+                            .into_iter()
+                            // Control points for top left arc
+                            .chain(top_left_to_arc_highest_cps.map(pdf_point_to_control_point))
+                            // Common point for top arcs
+                            .chain(std::iter::once(pdf_point_to_line_point(top_arc_highest)))
+                            // Control points for top right arc
+                            .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
+                            // Points from top right to bottom right
+                            .chain(top_to_bottom_right_points)
+                            // Control points for bottom right arc
+                            .chain(bottom_right_to_arc_lowest_cps.map(pdf_point_to_control_point))
+                            // Common point for bottom arcs
+                            .chain(std::iter::once(pdf_point_to_line_point(bottom_arc_lowest)))
+                            // Control points for bottom left arc
+                            .chain(bottom_arc_lowest_to_left_cps.map(pdf_point_to_control_point))
+                            // Bottom left point (again - this time, to complete the curve)
+                            .chain(std::iter::once(pdf_point_to_line_point(bottom_left)))
+                            .collect_vec()
+                    } else {
+                        bottom_to_top_left_points
+                            .into_iter()
+                            .chain(top_to_bottom_right_points)
+                            .collect_vec()
+                    };
 
                     // let points = vec![
                     //     pdf_point_into_line_point(left_start),
@@ -564,22 +633,22 @@ fn main() {
                         .abs();
 
                     let col = Color::Rgb(Rgb::new(
-                        // 0.0, 0.0, 0.0,
-                        if used_fallback_start_tangent {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                        if true_angle > 1.5 * target_angle {
-                            0.5
-                        } else {
-                            0.0
-                        },
-                        if true_angle < 0.5 * target_angle {
-                            1.0
-                        } else {
-                            0.0
-                        },
+                        0.0, 0.0, 0.0,
+                        // if used_fallback_start_tangent {
+                        //     1.0
+                        // } else {
+                        //     0.0
+                        // },
+                        // if true_angle > 1.5 * target_angle {
+                        //     0.5
+                        // } else {
+                        //     0.0
+                        // },
+                        // if true_angle < 0.5 * target_angle {
+                        //     1.0
+                        // } else {
+                        //     0.0
+                        // },
                         None,
                     ));
 
