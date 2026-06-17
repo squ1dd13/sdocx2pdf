@@ -113,10 +113,6 @@ fn main() {
     let (w, h) = document.width_height();
     eprintln!("w = {w}, h = {h}");
 
-    let mut event_count = 0_usize;
-    let mut polygon_count = 0_usize;
-    let mut used_event_count = 0_usize;
-
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
         // creates huge dimensions.
@@ -142,17 +138,6 @@ fn main() {
                 let sdocx::DocObject::Stroke(stroke) = object else {
                     continue;
                 };
-
-                // let (min_curvature, max_curvature) = derivs
-                //     .curvature
-                //     .iter()
-                //     .minmax_by(|a, b| a.total_cmp(b))
-                //     .into_option()
-                //     .unwrap();
-
-                // let curvature_span = max_curvature - min_curvature;
-
-                event_count += stroke.events().len();
 
                 let pen_size = stroke.pen_size().map(f64::from).unwrap_or(1.0);
 
@@ -209,27 +194,8 @@ fn main() {
 
                 // let rings = (0..derivs.t.len())
                 for (t_start, t_end) in sample_times.tuple_windows() {
-                    // eprintln!("dt = {}", t_end - t_start);
-
-                    // .flat_map(|(i_start, i_end)| {
-                    // A single event, ish
-                    used_event_count += 1;
-
-                    let start_pos = tx.transform_point(
-                        (
-                            smooth.x.evaluate(t_start).unwrap(),
-                            smooth.y.evaluate(t_start).unwrap(),
-                        )
-                            .into(),
-                    );
-
-                    let end_pos = tx.transform_point(
-                        (
-                            smooth.x.evaluate(t_end).unwrap(),
-                            smooth.y.evaluate(t_end).unwrap(),
-                        )
-                            .into(),
-                    );
+                    let start_pos = tx.transform_point(smooth.position(t_start).unwrap().into());
+                    let end_pos = tx.transform_point(smooth.position(t_end).unwrap().into());
 
                     let start_pressure = smooth.pressure.evaluate(t_start).unwrap();
                     let end_pressure = smooth.pressure.evaluate(t_end).unwrap();
@@ -241,13 +207,6 @@ fn main() {
                         smooth.pressure.evaluate(t_first_third).unwrap(),
                         smooth.pressure.evaluate(t_second_third).unwrap(),
                     );
-
-                    // let forwards = (end_pos - start_pos).normalize();
-
-                    // if !forwards.is_finite() {
-                    //     continue;
-                    //     // return None;
-                    // }
 
                     let start_spread = pressure_to_circle_radius(start_pressure, pen_size);
                     let spread_first_third =
@@ -408,21 +367,44 @@ fn main() {
                     let bottom_arc_lowest = start_pos - scaled_tangent_start;
                     let top_arc_highest = end_pos + scaled_tangent_end;
 
-                    let points = if let (
-                        Some(top_left_to_arc_highest_cps),
-                        Some(top_arc_highest_to_right_cps),
-                        Some(bottom_right_to_arc_lowest_cps),
-                        Some(bottom_arc_lowest_to_left_cps),
-                    ) = (
-                        bezier_arc_control_points(top_left, top_arc_highest, end_pos)
-                            .map(IntoIterator::into_iter),
-                        bezier_arc_control_points(top_arc_highest, top_right, end_pos)
-                            .map(IntoIterator::into_iter),
-                        bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos)
-                            .map(IntoIterator::into_iter),
-                        bezier_arc_control_points(bottom_arc_lowest, bottom_left, start_pos)
-                            .map(IntoIterator::into_iter),
-                    ) {
+                    let use_arcs = false;
+
+                    let points = if let Some((
+                        top_left_to_arc_highest_cps,
+                        top_arc_highest_to_right_cps,
+                        bottom_right_to_arc_lowest_cps,
+                        bottom_arc_lowest_to_left_cps,
+                    )) = use_arcs
+                        .then(|| {
+                            // If we can't calculate the control points for all four arcs, we won't
+                            // draw any of them. This is like a short-circuiting four-way zip that
+                            // either gives us `None` or a tuple containing all of the control
+                            // points.
+                            bezier_arc_control_points(top_left, top_arc_highest, end_pos).and_then(
+                                |a| {
+                                    bezier_arc_control_points(top_arc_highest, top_right, end_pos)
+                                        .and_then(|b| {
+                                            bezier_arc_control_points(
+                                                bottom_right,
+                                                bottom_arc_lowest,
+                                                start_pos,
+                                            )
+                                            .and_then(
+                                                |c| {
+                                                    bezier_arc_control_points(
+                                                        bottom_arc_lowest,
+                                                        bottom_left,
+                                                        start_pos,
+                                                    )
+                                                    .map(|d| (a, b, c, d))
+                                                },
+                                            )
+                                        })
+                                },
+                            )
+                        })
+                        .flatten()
+                    {
                         // Points from bottom left to top left
                         bottom_to_top_left_points
                             .into_iter()
@@ -484,7 +466,7 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Fill,
+                                mode: PaintMode::Stroke,
                                 winding_order: WindingOrder::NonZero,
                             },
                         },
@@ -496,8 +478,6 @@ fn main() {
         pdf.pages
             .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
     }
-
-    eprintln!("Creating PDF with {polygon_count} polygons");
 
     let mut warnings = vec![];
     let bytes = pdf.save(&PdfSaveOptions::default(), &mut warnings);
