@@ -616,4 +616,81 @@ impl FilteredStroke {
             )
             .chain(std::iter::once(KeyTime::End(t_end)))
     }
+
+    pub fn compute_sample_times_strictly_between(
+        &self,
+        start_excl: f64,
+        end_excl: f64,
+        target_angle: f64,
+        min_space_step: f64,
+        max_time_step: f64,
+    ) -> impl Iterator<Item = f64> {
+        let mut t = start_excl;
+
+        // todo: Step from both ends
+
+        std::iter::from_fn(move || {
+            let min_time_step = self.space_step_to_time_step(t, min_space_step);
+
+            if t + min_time_step >= end_excl {
+                // Taking even the smallest possible step further would take us past the end, so
+                // there's nothing more to do.
+                return None;
+            }
+
+            // Since the minimum time step is computed from the space step, it might not be less
+            // than the maximum time step. If it isn't, then we just use the maximum time step
+            // because logically a high minimum time step would push us towards the maximum,
+            // but we aren't allowed to go past the maximum, which is given to us explicitly.
+            let time_step = if min_time_step >= max_time_step {
+                max_time_step
+            } else {
+                // As long as `start_excl` and `end_excl` are within the interpolated data,
+                // unwrapping is safe here.
+                self.compute_timestep(t, target_angle, min_time_step, max_time_step)
+                    .unwrap()
+            };
+
+            t += time_step;
+
+            if t + min_time_step >= end_excl {
+                // Even if this step is OK, the next one would end up shorter than the minimum.
+                return None;
+            }
+
+            Some(t)
+        })
+    }
+
+    pub fn compute_sample_times_from_key_times(
+        &self,
+        target_angle: f64,
+        min_space_step: f64,
+        max_time_step: f64,
+    ) -> impl Iterator<Item = f64> {
+        self.key_times()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .tuple_windows()
+            .map(move |(a, b)| {
+                let (Some(a), Some(b)) = (a, b) else {
+                    // Dummy pair to let us yield the final key time as a sample time.
+                    return Either::Right([a.unwrap().to_time()]);
+                };
+
+                let a = a.to_time();
+                let b = b.to_time();
+
+                Either::Left(
+                    std::iter::once(a).chain(self.compute_sample_times_strictly_between(
+                        a,
+                        b,
+                        target_angle,
+                        min_space_step,
+                        max_time_step,
+                    )),
+                )
+            })
+            .flat_map(|x| x.into_iter())
+    }
 }

@@ -189,8 +189,11 @@ fn main() {
                 let min_space_step = 2.0;
                 let max_time_step = 50.0;
 
-                let sample_times =
-                    smooth.compute_sample_times(target_angle, min_space_step, max_time_step);
+                let sample_times = smooth.compute_sample_times_from_key_times(
+                    target_angle,
+                    min_space_step,
+                    max_time_step,
+                );
 
                 // let rings = (0..derivs.t.len())
                 for (t_start, t_end) in sample_times.tuple_windows() {
