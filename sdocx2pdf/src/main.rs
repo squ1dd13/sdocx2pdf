@@ -92,7 +92,8 @@ fn main() {
     // sdocx::test_all();
 
     let document = sdocx::Document::from_zip(
-        "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
     )
     .unwrap();
 
@@ -185,9 +186,9 @@ fn main() {
                     }
                 };
 
-                let target_angle = f64::to_radians(15.0);
-                let min_space_step = 2.0;
-                let max_time_step = 50.0;
+                let target_angle = f64::to_radians(20.0);
+                let min_space_step = 1.0;
+                let max_time_step = 75.0;
 
                 let sample_times = smooth.compute_sample_times_from_key_times(
                     target_angle,
@@ -469,54 +470,57 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Stroke,
+                                mode: PaintMode::Fill,
                                 winding_order: WindingOrder::NonZero,
                             },
                         },
-                        // Set things up for drawing the points of interest.
-                        Op::SetLineCapStyle {
-                            cap: printpdf::LineCapStyle::Round,
-                        },
+                        // // Set things up for drawing the points of interest.
+                        // Op::SetLineCapStyle {
+                        //     cap: printpdf::LineCapStyle::Round,
+                        // },
                     ]);
 
-                    page_contents.extend(smooth.key_times().flat_map(|key_time| {
-                        let t = key_time.to_time();
+                    // page_contents.extend(smooth.key_times().flat_map(|key_time| {
+                    //     let t = key_time.to_time();
 
-                        let pos = tx.transform_point(smooth.position(t).unwrap().into());
+                    //     let pos = tx.transform_point(smooth.position(t).unwrap().into());
 
-                        [
-                            Op::SetOutlineColor {
-                                col: Color::Rgb(match key_time {
-                                    stroke::KeyTime::Start(_) => Rgb::new(1.0, 0.5, 0.0, None),
-                                    stroke::KeyTime::CurvatureExtremum(_) => {
-                                        Rgb::new(0.0, 1.0, 0.0, None)
-                                    }
-                                    stroke::KeyTime::PressureExtremum(_) => {
-                                        Rgb::new(1.0, 0.0, 0.0, None)
-                                    }
-                                    stroke::KeyTime::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
-                                }),
-                            },
-                            Op::SetOutlineThickness {
-                                pt: Mm(pressure_to_circle_radius(
-                                    smooth.pressure.evaluate(t).unwrap(),
-                                    pen_size,
-                                ) as f32
-                                    * 2.0
-                                    * 0.25)
-                                .into(),
-                            },
-                            Op::DrawLine {
-                                line: printpdf::Line {
-                                    points: vec![
-                                        pdf_point_to_line_point(pos),
-                                        pdf_point_to_line_point(pos),
-                                    ],
-                                    is_closed: false,
-                                },
-                            },
-                        ]
-                    }));
+                    //     [
+                    //         Op::SetOutlineColor {
+                    //             col: Color::Rgb(match key_time {
+                    //                 stroke::KeyTime::Start(_) => Rgb::new(1.0, 0.5, 0.0, None),
+                    //                 stroke::KeyTime::CurvatureExtremum(_) => {
+                    //                     Rgb::new(0.0, 1.0, 0.0, None)
+                    //                 }
+                    //                 stroke::KeyTime::InflectionPoint(_) => {
+                    //                     Rgb::new(1.0, 1.0, 0.0, None)
+                    //                 }
+                    //                 stroke::KeyTime::PressureExtremum(_) => {
+                    //                     Rgb::new(1.0, 0.0, 0.0, None)
+                    //                 }
+                    //                 stroke::KeyTime::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
+                    //             }),
+                    //         },
+                    //         Op::SetOutlineThickness {
+                    //             pt: Mm(pressure_to_circle_radius(
+                    //                 smooth.pressure.evaluate(t).unwrap(),
+                    //                 pen_size,
+                    //             ) as f32
+                    //                 * 2.0
+                    //                 * 0.25)
+                    //             .into(),
+                    //         },
+                    //         Op::DrawLine {
+                    //             line: printpdf::Line {
+                    //                 points: vec![
+                    //                     pdf_point_to_line_point(pos),
+                    //                     pdf_point_to_line_point(pos),
+                    //                 ],
+                    //                 is_closed: false,
+                    //             },
+                    //         },
+                    //     ]
+                    // }));
                 }
             }
         }

@@ -1,7 +1,10 @@
+use std::collections::VecDeque;
+
 use euclid::default::Vector2D;
 use itertools::{Either, Itertools};
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
+use num::ToPrimitive;
 use scirs2_interpolate::{
     CubicSpline, Interp1d, InterpolateResult, InterpolationMethod, PchipInterpolator,
     interp1d::ExtrapolateMode,
@@ -152,6 +155,7 @@ pub enum KeyTime {
     Start(f64),
     CurvatureExtremum(f64),
     PressureExtremum(f64),
+    InflectionPoint(f64),
     End(f64),
 }
 
@@ -161,8 +165,36 @@ impl KeyTime {
             KeyTime::Start(t)
             | KeyTime::CurvatureExtremum(t)
             | KeyTime::PressureExtremum(t)
+            | KeyTime::InflectionPoint(t)
             | KeyTime::End(t) => t,
         }
+    }
+}
+
+impl std::cmp::Eq for KeyTime {}
+
+impl std::cmp::Ord for KeyTime {
+    fn cmp(&self, other: &KeyTime) -> std::cmp::Ordering {
+        self.to_time().total_cmp(&other.to_time())
+    }
+}
+
+impl std::cmp::PartialEq for KeyTime {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Start(l0), Self::Start(r0)) => l0 == r0,
+            (Self::CurvatureExtremum(l0), Self::CurvatureExtremum(r0)) => l0 == r0,
+            (Self::PressureExtremum(l0), Self::PressureExtremum(r0)) => l0 == r0,
+            (Self::InflectionPoint(l0), Self::InflectionPoint(r0)) => l0 == r0,
+            (Self::End(l0), Self::End(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+impl std::cmp::PartialOrd for KeyTime {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -196,6 +228,8 @@ pub struct FilteredStroke {
     ///
     /// We use a cubic spline for this so that we can easily find extrema via differentiation.
     curvature: CubicSpline<f64>,
+
+    curvature_by_arc_length: CubicSpline<f64>,
 
     /// Filtered pressure data.
     pub pressure: Interp1d<f64>,
@@ -373,6 +407,14 @@ impl FilteredStroke {
             .unwrap()
         };
 
+        let curvature_by_time = CubicSpline::new(&tv, &curvature.view()).unwrap();
+        let curvature_by_arc_length = CubicSpline::with_boundary_condition(
+            &arc_length_by_time.evaluate_array(&tv).unwrap().view(),
+            &curvature.view(),
+            scirs2_interpolate::SplineBoundaryCondition::NotAKnot,
+        )
+        .unwrap();
+
         Ok(FilteredStroke {
             x: interp(x),
             x1: interp(x1),
@@ -381,7 +423,8 @@ impl FilteredStroke {
             y1: interp(y1),
             y2: interp(y2),
             speed: interp(speed),
-            curvature: CubicSpline::new(&tv, &curvature.view()).unwrap(),
+            curvature: curvature_by_time,
+            curvature_by_arc_length,
             pressure: interp(pressure),
             pressure1: interp(pressure1),
             arc_length_by_time,
@@ -394,14 +437,14 @@ impl FilteredStroke {
     /// should be taken in order to achieve an approximate absolute angle change of
     /// `abs_angle_delta`. The returned timestep is not clamped and may not be finite.
     fn compute_raw_timestep(&self, now: f64, abs_angle_delta: f64) -> InterpolateResult<f64> {
-        // It can be shown that the curvature is equal to the magnitude of the rate of change
+        // It can be shown that the curvature is equal to the rate of change
         // of the angle of the unit vector tangent to the stroke with respect to arc length.
-        // That is, κ = |dT/ds| = |dθ/ds|, where T is the unit tangent, and θ is the angle of the
+        // Thus, |κ| = |dT/ds| = |dθ/ds|, where T is the unit tangent, and θ is the angle of the
         // unit tangent. Since |dθ/ds| = |dθ/dt||dt/ds| and |dt/ds| = 1/u, where u is the speed
-        // of the stroke, it follows that κ = |dθ/dt|/u. For sufficiently small Δt, then,
-        // we have κ ≈ Δθ/(uΔt), where Δθ > 0 is the absolute angle change between the samples at t
-        // and t + Δt. Therefore, to (approximately) achieve a given Δθ between the samples at
-        // t and t + Δt, we can use Δt = Δθ/(κu).
+        // of the stroke, it follows that |κ| = |dθ/dt|/u. For sufficiently small Δt, then,
+        // we have |κ| ≈ Δθ/(uΔt), where Δθ > 0 is the absolute angle change between the samples at
+        // t and t + Δt. Therefore, to (approximately) achieve a given Δθ between the samples at
+        // t and t + Δt, we can use Δt = Δθ/(|κ|u).
         Ok(abs_angle_delta / (self.curvature.evaluate(now)?.abs() * self.speed.evaluate(now)?))
     }
 
@@ -581,38 +624,34 @@ impl FilteredStroke {
             .find_extrema(&[(t_start + t_delta, t_end - t_delta)], extremum_tolerance)
             .unwrap();
 
-        // let last_curvature_extremum = curvature_extrema
-        //     .last()
-        //     .map(|(t, _, _)| KeyTime::CurvatureExtremum(*t));
+        // fixme: 10% of the smallest _extremum_ is a stupid root-finding tolerance
+        // But also, the algorithm uses the tolerance we give it both for the interval width (unit:
+        // time) and for the distance of the curvature from zero (unit: absolute curvature). These
+        // are not comparable. So what should it be?
+        let root_tolerance = 0.1
+            * curvature_extrema
+                .iter()
+                .map(|(_t, curvature, _)| curvature.abs())
+                .min_by(f64::total_cmp)
+                .map(|rt| rt.min(extremum_tolerance))
+                .unwrap_or(extremum_tolerance);
 
-        // let extrema = curvature_extrema
-        //     .into_iter()
-        //     .tuple_windows()
-        //     // Look for pressure extrema between each pair of curvature extrema.
-        //     .flat_map(move |((left, _, _), (right, _, _))| {
-        //         find_multiple_roots(
-        //             left + (right - left) * 0.3,
-        //             right - (right - left) * 0.3,
-        //             t_delta * extremum_tolerance_in_deltas,
-        //             3, // subdivision count - needs more careful consideration than this
-        //             |t| self.pressure1.evaluate(t),
-        //         )
-        //         .map(|pressure_extrema| {
-        //             std::iter::once(KeyTime::CurvatureExtremum(left))
-        //                 .chain(pressure_extrema.into_iter().map(KeyTime::PressureExtremum))
-        //         })
-        //     })
-        //     .flatten()
-        //     // The map on `tuple_windows` only yields the first curvature extremum, never the
-        //     // second, of a pair (and won't yield anything if there are not two curvature extrema).
-        //     // Thus, the last curvature extremum has not yet been yielded.
-        //     .chain(last_curvature_extremum);
+        // Roots of the curvature are inflection points of the stroke.
+        let inflection_points = self
+            .curvature
+            .find_roots(&[(t_start + t_delta, t_end - t_delta)], root_tolerance)
+            .unwrap();
+
+        // todo: Could we combine the root finding with the extremum finding?
+        // We should re-implement them anyway, because the crate implementations aren't ideal
 
         std::iter::once(KeyTime::Start(t_start))
             .chain(
                 curvature_extrema
                     .into_iter()
-                    .map(|(t, _, _)| KeyTime::CurvatureExtremum(t)),
+                    .map(|(t, _, _)| KeyTime::CurvatureExtremum(t))
+                    .chain(inflection_points.into_iter().map(KeyTime::InflectionPoint))
+                    .sorted_unstable(),
             )
             .chain(std::iter::once(KeyTime::End(t_end)))
     }
@@ -625,41 +664,119 @@ impl FilteredStroke {
         min_space_step: f64,
         max_time_step: f64,
     ) -> impl Iterator<Item = f64> {
-        let mut t = start_excl;
+        // Calculate the earliest time we can sample at according to the minimum step and the
+        // exclusive start time.
+        let start_min_time_step = self.space_step_to_time_step(start_excl, min_space_step);
+        let earliest_allowed = start_excl + start_min_time_step;
 
-        // todo: Step from both ends
+        // Calculate the latest time we can sample at according to the minimum step and the
+        // exclusive end time.
+        let end_min_backwards_time_step = -self.space_step_to_time_step(end_excl, -min_space_step);
+        let latest_allowed = end_excl - end_min_backwards_time_step;
 
-        std::iter::from_fn(move || {
-            let min_time_step = self.space_step_to_time_step(t, min_space_step);
+        if earliest_allowed > latest_allowed {
+            // The start and end times are too close together to fit a sample in between.
+            return Either::Left(std::iter::empty());
+        }
 
-            if t + min_time_step >= end_excl {
-                // Taking even the smallest possible step further would take us past the end, so
-                // there's nothing more to do.
-                return None;
+        // todo: Iterators
+        let ltr_sample_times = {
+            let mut ltr_s_t = Vec::new();
+
+            let mut current_time = start_excl;
+            let mut min_time_step = start_min_time_step;
+
+            loop {
+                let step = self
+                    .compute_timestep(current_time, target_angle, min_time_step, max_time_step)
+                    // Safe to unwrap as long as `start_excl` and `end_excl` are within
+                    // interpolated bounds.
+                    .unwrap();
+
+                let updated_time = current_time + step;
+
+                if updated_time > latest_allowed {
+                    break;
+                }
+
+                ltr_s_t.push(updated_time);
+
+                current_time = updated_time;
+                min_time_step = self.space_step_to_time_step(current_time, min_space_step);
             }
 
-            // Since the minimum time step is computed from the space step, it might not be less
-            // than the maximum time step. If it isn't, then we just use the maximum time step
-            // because logically a high minimum time step would push us towards the maximum,
-            // but we aren't allowed to go past the maximum, which is given to us explicitly.
-            let time_step = if min_time_step >= max_time_step {
-                max_time_step
-            } else {
-                // As long as `start_excl` and `end_excl` are within the interpolated data,
-                // unwrapping is safe here.
-                self.compute_timestep(t, target_angle, min_time_step, max_time_step)
-                    .unwrap()
-            };
+            ltr_s_t
+        };
 
-            t += time_step;
+        let rtl_sample_times = {
+            let mut rtl_s_t = Vec::new();
 
-            if t + min_time_step >= end_excl {
-                // Even if this step is OK, the next one would end up shorter than the minimum.
-                return None;
+            let mut current_time = end_excl;
+            let mut min_backwards_time_step = end_min_backwards_time_step;
+
+            loop {
+                // todo: Time steps for a target angle change are symmetric...? Think this through.
+                let backwards_step = self
+                    .compute_timestep(
+                        current_time,
+                        target_angle,
+                        min_backwards_time_step,
+                        max_time_step,
+                    )
+                    .unwrap();
+
+                let updated_time = current_time - backwards_step;
+
+                if updated_time < earliest_allowed {
+                    break;
+                }
+
+                rtl_s_t.push(updated_time);
+
+                current_time = updated_time;
+                min_backwards_time_step =
+                    -self.space_step_to_time_step(current_time, -min_space_step);
             }
 
-            Some(t)
-        })
+            rtl_s_t
+        };
+
+        let mut fwd_times = Vec::new();
+        let mut bwd_times = Vec::new();
+
+        for (forwards_time, backwards_time) in ltr_sample_times.into_iter().zip(rtl_sample_times) {
+            // fixme: We've already calculated the minimum steps at both times, so we don't need to
+            // find the arc lengths again
+
+            // Note that the difference will be negative if the forwards time is ahead of the
+            // backwards time, so in that case it is definitely below the minimum.
+            if self.arc_length_by_time.evaluate(backwards_time).unwrap()
+                - self.arc_length_by_time.evaluate(forwards_time).unwrap()
+                <= min_space_step
+            {
+                let middle_time = 0.5 * (forwards_time + backwards_time);
+
+                let last_fwd = fwd_times.last().copied().unwrap_or(start_excl);
+                let last_bwd = bwd_times.last().copied().unwrap_or(end_excl);
+
+                // todo: Do we need to check the max?
+                // We can sample at the midpoint of the forwards and backwards times as long as
+                // it is sufficiently far from the times either side.
+                if self.time_step_to_space_step(last_fwd, middle_time - last_fwd) > min_space_step
+                    && -self.time_step_to_space_step(last_bwd, middle_time - last_bwd)
+                        > min_space_step
+                {
+                    fwd_times.push(middle_time);
+                }
+
+                break;
+            }
+
+            fwd_times.push(forwards_time);
+            bwd_times.push(backwards_time);
+        }
+
+        Either::Right(fwd_times.into_iter().chain(bwd_times.into_iter().rev()))
     }
 
     pub fn compute_sample_times_from_key_times(
@@ -681,16 +798,200 @@ impl FilteredStroke {
                 let a = a.to_time();
                 let b = b.to_time();
 
-                Either::Left(
-                    std::iter::once(a).chain(self.compute_sample_times_strictly_between(
-                        a,
-                        b,
-                        target_angle,
-                        min_space_step,
-                        max_time_step,
-                    )),
-                )
+                Either::Left(std::iter::once(a).chain({
+                    let lcs = LinearCurvatureSegment::new(
+                        self.arc_length_by_time.evaluate(a).unwrap(),
+                        self.arc_length_by_time.evaluate(b).unwrap(),
+                        &self.curvature_by_arc_length,
+                    )
+                    .unwrap();
+
+                    lcs.sample_points_strictly_inside(target_angle)
+                        .map(|s| self.time_by_arc_length.evaluate(s).unwrap())
+                }))
+                // Either::Left(
+                //     std::iter::once(a).chain(self.compute_sample_times_strictly_between(
+                //         a,
+                //         b,
+                //         target_angle,
+                //         min_space_step,
+                //         max_time_step,
+                //     )),
+                // )
             })
             .flat_map(|x| x.into_iter())
+    }
+}
+
+struct LinearCurvatureSegment {
+    /// The arc length between the start of the whole stroke and the start of this segment. This is
+    /// only used to offset local arc lengths to get global ones. It is not used in calculations.
+    s_start: f64,
+
+    /// The length L of the segment.
+    length: f64,
+
+    /// κ0, the absolute curvature at the beginning of the segment. Locally, we consider this to be
+    /// the value of the curvature when s = 0.
+    abs_curv_start: f64,
+
+    /// κ1, the absolute curvature at the end of the segment. Locally, we consider this to be the
+    /// value of the curvature at s = L.
+    abs_curv_end: f64,
+
+    /// The accumulated absolute angle change across the segment.
+    accumulated_abs_angular_change: f64,
+}
+
+impl LinearCurvatureSegment {
+    /// Creates a new linear curvature segment from the given curvature data in the region where
+    /// the arc length is in `[s_start, s_end]`. There must be no zeros or local extrema of
+    /// curvature in this region.
+    fn new(
+        s_start: f64,
+        s_end: f64,
+        curvature_by_arc_length: &CubicSpline<f64>,
+    ) -> InterpolateResult<LinearCurvatureSegment> {
+        let length = s_end - s_start;
+
+        Ok(LinearCurvatureSegment {
+            s_start,
+
+            length,
+
+            abs_curv_start: curvature_by_arc_length.evaluate(s_start)?.abs(),
+            abs_curv_end: curvature_by_arc_length.evaluate(s_end)?.abs(),
+
+            // Since the sign of the curvature does not change between `s_start` and `s_end`,
+            // we can integrate and take the absolute value instead of integrating the absolute
+            // curvature.
+            accumulated_abs_angular_change: curvature_by_arc_length
+                .integrate(s_start + length * 0.1, s_end - length * 0.1)?
+                .abs(),
+        })
+    }
+
+    /// Returns the gradient of the curvature when we approximate it as linear.
+    fn true_curvature_gradient(&self) -> f64 {
+        (self.abs_curv_end - self.abs_curv_start) / self.length
+    }
+
+    /// Returns the curvature gradient we can use in our linear model to get a perfect segmentation
+    /// when we use a segment angle that perfectly divides the accumulated angular change.
+    fn adjusted_curvature_gradient(&self) -> f64 {
+        // todo: Explain
+        (2.0 * (self.accumulated_abs_angular_change - self.abs_curv_start * self.length))
+            / (self.length * self.length)
+    }
+
+    fn adjusted_model_is_valid(&self) -> bool {
+        // Since we are working with absolute curvature, the adjusted linear model is invalid if
+        // it predicts a negative curvature. The adjusted model has the form κ(s) = cs + κ0,
+        // where c is the adjusted curvature gradient. Since κ is assumed to be linear and
+        // κ(0) = κ0 >= 0, we can only have κ(s) < 0 for some s if we also have κ(L) < 0.
+        // Therefore, it suffices to check that cL + κ0 >= 0. Using the definition of the adjusted
+        // gradient c, this reduces to the following condition:
+        self.accumulated_abs_angular_change >= 0.5 * self.abs_curv_start * self.length
+    }
+
+    // hack: `&self`
+    fn spsi_adjusted(self, tgt_ss_angle: f64) -> impl Iterator<Item = f64> {
+        let tgt_ss_count = self.accumulated_abs_angular_change / tgt_ss_angle;
+
+        // In general the target angle delta does not divide the accumulated angle change,
+        // so the target subsegment count will not be an integer. We round it to get an integer
+        // count and an adjusted target subsegment angle. This gives us a perfect subsegmentation
+        // when we use the adjusted curvature gradient and angle.
+        let adj_ss_count = tgt_ss_count.round();
+        let adj_ss_angle = self.accumulated_abs_angular_change / adj_ss_count;
+        let adj_ss_count = adj_ss_count.to_u32().unwrap();
+
+        if adj_ss_count <= 1 {
+            // We already have one subsegment: the whole thing.
+            return Either::Left(std::iter::empty());
+        }
+
+        // todo: Remove
+        assert!(adj_ss_angle.is_finite());
+
+        let acs = self.abs_curv_start;
+        let c = self.adjusted_curvature_gradient();
+
+        // Solution to the quadratic equation we get when we integrate the adjusted linear model
+        // between 0 and sn to get the accumulated angle change over the subsegments up to and
+        // including the nth and set it equal to n times the adjusted target angle per subsegment.
+        // todo: Explain better
+        let sn = move |n: u32| -> f64 {
+            // As in the fallback, we have to consider the case c = 0, where curvature is const
+            // fixme: Epsilon
+            if c.abs() < f64::EPSILON {
+                (f64::from(n) * adj_ss_angle) / acs
+            } else {
+                (-acs + (acs * acs + 2.0 * c * f64::from(n) * adj_ss_angle).sqrt()) / c
+            }
+        };
+
+        // s0 = 0 and sN = L (where N is the adjusted count), so we only care about
+        // s1, s2, ..., s_{N-1}.
+
+        // hack: take 100 stops us spinning when the accumulated angle is stupidly big from
+        // numerical instability
+        Either::Right((1..adj_ss_count).map(sn).take(100))
+    }
+
+    // hack: `&self`
+    fn spsi_fallback(self, tgt_ss_angle: f64) -> impl Iterator<Item = f64> {
+        if tgt_ss_angle >= self.accumulated_abs_angular_change {
+            // No need to subsegment.
+            return Either::Left(std::iter::empty());
+        }
+
+        let acs = self.abs_curv_start;
+        let c = self.true_curvature_gradient();
+
+        let sn = move |n: u32| -> f64 {
+            // fixme: Is epsilon right here? In any case, explain better:
+            // When c = 0 we have constant curvature, so we have to do this instead
+            if c.abs() < f64::EPSILON {
+                (f64::from(n) * tgt_ss_angle) / acs
+            } else {
+                (-acs + (acs * acs + 2.0 * c * f64::from(n) * tgt_ss_angle).sqrt()) / c
+            }
+        };
+
+        let subseg_count_limit = (self.accumulated_abs_angular_change / tgt_ss_angle)
+            .ceil()
+            .to_usize()
+            .unwrap()
+            .min(100);
+
+        // s0 = 0, so start from 1. Keep going until we reach the end of the segment.
+        Either::Right(
+            (1..)
+                .map(sn)
+                .take_while({
+                    let length = self.length;
+                    move |&sn| sn < length
+                })
+                .take(subseg_count_limit),
+        )
+    }
+
+    // hack: This takes ownership of `self` to work around lifetime capture rules
+    fn sample_points_strictly_inside(
+        self,
+        tgt_subseg_angle_delta: f64,
+    ) -> impl Iterator<Item = f64> {
+        let s_start = self.s_start;
+
+        if self.adjusted_model_is_valid() {
+            // eprintln!("Adjusted");
+            Either::Left(self.spsi_adjusted(tgt_subseg_angle_delta))
+        } else {
+            // eprintln!("Fallback");
+            Either::Right(self.spsi_fallback(tgt_subseg_angle_delta))
+        }
+        .into_iter()
+        .map(move |s| s + s_start)
     }
 }
