@@ -1,7 +1,9 @@
-use std::collections::VecDeque;
+use std::{borrow::Cow, collections::VecDeque};
 
 use euclid::default::Vector2D;
 use itertools::{Either, Itertools};
+use kahan::KahanSum;
+use lerp::Lerp;
 use ndarray::{Array1, ArrayView1, Axis};
 use ndarray_ndimage::BorderMode;
 use num::ToPrimitive;
@@ -12,6 +14,385 @@ use scirs2_interpolate::{
     traits::{ExtremaType, SplineInterpolator},
     utils::{find_multiple_roots, find_roots_bisection},
 };
+
+enum Root {
+    Interval(f64, f64),
+    Single(f64),
+}
+
+struct Linterpolator<'v> {
+    independent: Cow<'v, [f64]>,
+    dependent: Cow<'v, [f64]>,
+}
+
+impl<'v> Linterpolator<'v> {
+    fn interval_index(&self, t: f64) -> Option<usize> {
+        if !t.is_finite() {
+            return None;
+        }
+
+        // Find the index of the first independent data point strictly greater than `t`.
+        // `t` lies in the interval immediately before that.
+        let idx_first_gt = self.independent.partition_point(|&v| v <= t);
+
+        // If `idx_first_gt == 0`, then `t` is below the range for which we have data.
+        let idx_last_le = idx_first_gt.checked_sub(1)?;
+
+        if idx_first_gt == self.independent.len() {
+            // No independent data point is strictly greater than `t`. `t` may be equal to the
+            // largest data point, in which case we use that as the "interval", since we do have
+            // data for it.
+            (self.independent[idx_last_le] == t).then_some(idx_last_le)
+        } else {
+            Some(idx_last_le)
+        }
+    }
+
+    fn evaluate(&self, t: f64) -> Option<f64> {
+        let idx_before = self.interval_index(t)?;
+
+        let t_before = self.independent[idx_before];
+        let v_before = self.dependent[idx_before];
+
+        if t_before == t {
+            return Some(v_before);
+        }
+
+        // `idx_before + 1` is a valid index except when `interval_index` returned the index of
+        // the last independent data point, but we've already handled that case above.
+        let t_after = self.independent[idx_before + 1];
+        let v_after = self.dependent[idx_before + 1];
+
+        Some(v_before.lerp(v_after, (t - t_before) / (t_after - t_before)))
+    }
+
+    fn integrate(&self, t0: f64, t1: f64) -> Option<f64> {
+        assert!(t0 <= t1);
+
+        let t0_idx = self.interval_index(t0)?;
+        let t1_idx = self.interval_index(t1)?;
+
+        // Only check for equality now we know that both bounds are valid. We don't want to return
+        // an apparently meaningful result when the input is invalid.
+        if t0 == t1 {
+            return Some(0.0);
+        }
+
+        if t0_idx == t1_idx {
+            return Some(
+                0.5 * (t1 - t0) * (self.evaluate(t0).unwrap() + self.evaluate(t1).unwrap()),
+            );
+        }
+
+        // Since `t0 < t1`, we know there is a point to the right of `t0`.
+        let t0_after = self.independent[t0_idx + 1];
+        let t0_ival_contrib =
+            0.5 * (t0_after - t0) * (self.evaluate(t0).unwrap() + self.dependent[t0_idx + 1]);
+
+        let t1_ival_contrib = if t1_idx + 1 == self.independent.len() {
+            // `t1` is the final independent data point, so is exactly at the beginning of its
+            // "interval".
+            0.0
+        } else {
+            let t1_before = self.independent[t1_idx];
+            0.5 * (t1 - t1_before) * (self.dependent[t1_idx] + self.evaluate(t1).unwrap())
+        };
+
+        Some(
+            [t0_ival_contrib, t1_ival_contrib]
+                .into_iter()
+                .chain(((t0_idx + 1)..t1_idx).map(|i| {
+                    let &[ta, tb] = &self.independent[i..=(i + 1)].try_into().unwrap();
+                    let &[va, vb] = &self.dependent[i..=(i + 1)].try_into().unwrap();
+
+                    // todo: We could precompute these
+                    0.5 * (tb - ta) * (va + vb)
+                }))
+                .fold(KahanSum::<f64>::new(), |ks, contrib| ks + contrib)
+                .sum(),
+        )
+    }
+
+    fn roots<'me>(&'me self, tolerance: f64) -> impl Iterator<Item = Root> + 'me {
+        self.independent
+            .iter()
+            .zip(self.dependent.iter())
+            .tuple_windows()
+            .flat_map(move |((&ta, &va), (&tb, &vb))| {
+                if va.abs() <= tolerance {
+                    if vb.abs() <= tolerance {
+                        return Some(Root::Interval(ta, tb));
+                    }
+
+                    return Some(Root::Single(ta));
+                }
+
+                if vb.abs() <= tolerance {
+                    return Some(Root::Single(tb));
+                }
+
+                if va.signum() == vb.signum() {
+                    // Both are the same side of zero. Since neither has magnitude less than the
+                    // tolerance, no value between has.
+                    return None;
+                }
+
+                // todo: Adjust for accuracy
+                let t_zero = ta - (va * (tb - ta)) / (vb - va);
+
+                if ta <= t_zero && t_zero <= tb {
+                    return Some(Root::Single(t_zero));
+                }
+
+                // Since neither endpoint is in the interval on which `|v(t)| <= tolerance`, that
+                // interval is either disjoint with `[ta, tb]` or a proper subset of it. But it
+                // can't be a subset because `t_zero` is not in `[ta, tb]`, and thus the intervals
+                // are disjoint.
+                None
+            })
+            .coalesce(|ra, rb| match (ra, rb) {
+                (Root::Interval(a, b), Root::Interval(c, d)) if b == c => Ok(Root::Interval(a, d)),
+                (Root::Single(a), Root::Single(b)) if a == b => Ok(Root::Single(a)),
+                other => Err(other),
+            })
+    }
+
+    fn extrema(&self) -> impl Iterator<Item = f64> {
+        self.independent
+            .iter()
+            .zip(self.dependent.iter())
+            .tuple_windows()
+            .flat_map(|((_, va), (tb, vb), (_, vc))| {
+                ((va < vb && vc < vb) || (vb < va && vb < vc)).then_some(*tb)
+            })
+    }
+}
+
+pub struct ContinuousStroke {
+    /// Arc length at the end of the stroke.
+    length: f64,
+
+    /// x position as a function of arc length.
+    x: PchipInterpolator<f64>,
+
+    /// y position as a function of arc length.
+    y: PchipInterpolator<f64>,
+
+    /// Pressure as a function of arc length.
+    p: Linterpolator<'static>,
+
+    /// Curvature as a function of arc length.
+    curvature: Linterpolator<'static>,
+}
+
+impl ContinuousStroke {
+    fn calc_curvature(x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+        // https://en.wikipedia.org/wiki/Curvature#Plane_curves
+        // For more accurate calculation using floats, we rearrange the formula to
+        //   ((x'/s)y'' - (y'/s)x'')/s^2
+        // with s = sqrt(x'^2 + y'^2), the speed of the stroke, calculated using `hypot` in
+        // order to avoid over/underflow when we square the derivatives. We can use fused
+        // multiply-add for the numerator. Note that x'/s and y'/s are the components of the
+        // unit tangent vector, and are therefore in [-1,1].
+
+        let speed = x1.hypot(y1);
+
+        // Tangent vector components.
+        let tx = x1 / speed;
+        let ty = y1 / speed;
+
+        // todo: Kahan?
+        let curvature = x2.mul_add(-ty, tx * y2) / (speed * speed);
+
+        // The curvature will be NaN if the division by speed^2 fails. This means that x' and
+        // y' are very small. In general this also means the numerator is very small, so we
+        // deal with NaNs by replacing them with zeros.
+        if curvature.is_finite() {
+            curvature
+        } else {
+            0.0
+        }
+    }
+
+    pub fn new(split: &SplitStroke) -> ContinuousStroke {
+        // The start and end times are respectively the first and last, and they will be distinct.
+        // Both of these facts follow from the guarantees made by `SplitStroke`.
+        let t_start = split.time[0];
+        let t_end = *split.time.last().unwrap();
+
+        let t_arr_v: ArrayView1<f64> = (&split.time).into();
+        let xt_arr_v: ArrayView1<f64> = (&split.x).into();
+        let yt_arr_v: ArrayView1<f64> = (&split.y).into();
+        let pt_arr_v: ArrayView1<f64> = (&split.pressure).into();
+
+        // Construct initial interpolators for x, y and pressure as functions of time.
+        // We use PCHIP in order to best preserve the shape of the stroke and pressure curve.
+        // Unwrapping is OK because of `SplitStroke`'s guarantees.
+        let xt = PchipInterpolator::new(&t_arr_v, &xt_arr_v, false).unwrap();
+        let yt = PchipInterpolator::new(&t_arr_v, &yt_arr_v, false).unwrap();
+        let pt = PchipInterpolator::new(&t_arr_v, &pt_arr_v, false).unwrap();
+
+        // We want an arc-length parameterisation rather than a time parameterisation. We need new
+        // interpolators for this, and we'll construct them using data points from the current
+        // interpolators, sampled at a greater rate than the original stroke data.
+
+        // Generally, the slowest parts of the stroke are the most interesting. We resample using
+        // uniform timesteps so that we still end up sampling more often (with respect to arc
+        // length) in the areas of greatest interest. Using uniform timesteps is necessary for the
+        // Gaussian filters we apply to smooth the data, because we need the array indices to be
+        // proportional to the time in order for the index-based Gaussian filter to be meaningful.
+        let t_resamples = {
+            const TIME_RESAMPLING_RATIO: u8 = 15;
+
+            let mut t_rs = scirs2_core::Array1::linspace(
+                t_start,
+                t_end,
+                t_arr_v.len() * (TIME_RESAMPLING_RATIO as usize),
+            );
+
+            // `linspace` calculates the final value instead of setting it exactly, so sometimes it
+            // is slightly greater than the end time we gave it. This causes an error when fed into
+            // the interpolator because we do not have extrapolation enabled, so we set the last
+            // time exactly here.
+            *t_rs.last_mut().unwrap() = t_end;
+
+            t_rs
+        };
+
+        // Resample.
+        let xt_rs = xt.evaluate_array(&t_resamples.view()).unwrap();
+        let yt_rs = yt.evaluate_array(&t_resamples.view()).unwrap();
+        let pt_rs = pt.evaluate_array(&t_resamples.view()).unwrap();
+
+        // Filter the resampled data. We also take derivatives here so we can calculate curvature.
+        let (
+            xt_rs_filt,
+            yt_rs_filt,
+            pt_rs_filt,
+            x1t_rs_filt,
+            y1t_rs_filt,
+            x2t_rs_filt,
+            y2t_rs_filt,
+        ) = {
+            use ndarray_ndimage::gaussian_filter1d as f;
+
+            const XY_FILT_SIGMA: f64 = 5.5;
+            const XY_FILT_BM: BorderMode<f64> = BorderMode::Nearest;
+            const XY_FILT_TRUNC: usize = 6;
+
+            const P_FILT_SIGMA: f64 = 7.9;
+            const P_FILT_BM: BorderMode<f64> = BorderMode::Nearest;
+            const P_FILT_TRUNC: usize = 6;
+
+            // d(index)/dt. `f` gives us derivatives with respect to index, so we use the chain
+            // rule to get derivatives with respect to time.
+            let di_dt = t_resamples[1] - t_resamples[0];
+
+            (
+                f(&xt_rs, XY_FILT_SIGMA, Axis(0), 0, XY_FILT_BM, XY_FILT_TRUNC),
+                f(&yt_rs, XY_FILT_SIGMA, Axis(0), 0, XY_FILT_BM, XY_FILT_TRUNC),
+                f(&pt_rs, P_FILT_SIGMA, Axis(0), 0, P_FILT_BM, P_FILT_TRUNC),
+                // For some reason, the sign is flipped for the first derivatives. The Python
+                // implementation does not do this.
+                -f(&xt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / di_dt,
+                -f(&yt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / di_dt,
+                // Second derivatives are fine.
+                f(&xt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / (di_dt * di_dt),
+                f(&yt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / (di_dt * di_dt),
+            )
+        };
+
+        // The data we were given is guaranteed not to have had any adjacent events with the same
+        // position. Though we have now interpolated, resampled and filtered the position data,
+        // it should still be true that no two adjacent position samples will be the same.
+        // Therefore, we can obtain a strictly increasing function s(t) giving the arc length
+        // at time t by summing the distances between sample positions.
+        let st_rs_filt: Array1<f64> = std::iter::once(0.0)
+            .chain(
+                xt_rs_filt
+                    .iter()
+                    .zip(&yt_rs_filt)
+                    .tuple_windows()
+                    .map(|((&xa, &ya), (&xb, &yb))| {
+                        let dist = (xa - xb).hypot(ya - yb);
+
+                        assert!(
+                            dist > f64::EPSILON,
+                            "arc length is not strictly increasing with time"
+                        );
+
+                        dist
+                    })
+                    .scan(0.0, |arc_length, dist| {
+                        *arc_length += dist;
+                        Some(*arc_length)
+                    }),
+            )
+            .collect_vec()
+            .into();
+
+        let curvature = {
+            // There is no vectorised `hypot` or FMA, so we need to work element-wise to some
+            // degree. We might as well perform the whole calculation in that one loop.
+            let mut curvature = x2t_rs_filt.to_vec();
+
+            ndarray::azip!((
+                k in &mut curvature,
+                &x1 in &x1t_rs_filt,
+                &y1 in &y1t_rs_filt,
+                &y2 in &y2t_rs_filt,
+            ) {
+                let x2 = *k;
+                *k = Self::calc_curvature(x1, y1, x2, y2);
+            });
+
+            curvature
+        };
+
+        // Since the arc length and x/y/p/curvature data all correspond to the time data, we can
+        // treat the former as the independent variable for the latter four.
+        ContinuousStroke {
+            length: *st_rs_filt.last().unwrap(),
+            x: PchipInterpolator::new(&st_rs_filt.view(), &xt_rs_filt.view(), false).unwrap(),
+            y: PchipInterpolator::new(&st_rs_filt.view(), &yt_rs_filt.view(), false).unwrap(),
+            p: Linterpolator {
+                independent: st_rs_filt.to_vec().into(),
+                // fixme: Could we avoid the allocation here and convert directly?
+                dependent: pt_rs_filt.to_vec().into(),
+            },
+            curvature: Linterpolator {
+                // fixme: Here, too
+                independent: st_rs_filt.to_vec().into(),
+                dependent: curvature.into(),
+            },
+        }
+    }
+
+    fn vertices(&self) -> impl Iterator<Item = f64> {
+        self.curvature.extrema()
+    }
+
+    fn inflection_points(&self) -> impl Iterator<Item = f64> {
+        const TOLERANCE: f64 = f64::EPSILON;
+
+        let s_end = self.length;
+
+        self.curvature
+            .roots(TOLERANCE)
+            .filter_map(move |root| match root {
+                Root::Single(s) => Some(s),
+
+                // For an interval of zero curvature that is not the entire stroke, we take the
+                // midpoint.
+                Root::Interval(s0, s1) if 0.0 < s0 || s1 < s_end => Some(0.5 * (s0 + s1)),
+
+                // We don't care if there is zero curvature along the entire stroke, because that
+                // just means the stroke is perfectly straight. Logically, there are no inflection
+                // points.
+                Root::Interval(_, _) => None,
+            })
+    }
+}
 
 /// Interpolates between samples of stroke data to create a continuous mapping from time to
 /// position and pressure.
@@ -35,8 +416,8 @@ pub struct InterpolatedStroke {
 }
 
 /// Time, position and pressure data for a stroke, split into four vectors. It is guaranteed that
-/// the four vectors have the same length, that this length is at least 2, and that the data is
-/// stored in chronological order.
+/// the four vectors have the same length, that this length is at least 2, that the data is
+/// stored in chronological order, and that no two consecutive events have the same position.
 pub struct SplitStroke {
     time: Vec<f64>,
     x: Vec<f64>,
@@ -61,15 +442,17 @@ impl StrokeOrDot {
     ///
     /// If the events all have the same position, a `Dot` is returned with that position and the
     /// maximum pressure value across all events. If the events are not all at the same position,
-    /// the stroke data is cleaned by merging consecutive events with the same timestamps, and is
-    /// returned as a `SplitStroke` with the data in the same order as it was obtained from the
-    /// events.
+    /// the stroke data is cleaned by merging consecutive events with the same timestamp or
+    /// position and is returned as a `SplitStroke` with the data in the same order as it was
+    /// obtained from the events.
     pub fn from_events<'a>(
         events: impl IntoIterator<Item = &'a sdocx::page::object::stroke::Event> + 'a,
     ) -> StrokeOrDot {
-        // Combine consecutive events that occur at the same time. Since the events are in
-        // chronological order, the effect is that for every time value we have, there is exactly
-        // one event that occurs at that time.
+        const COORD_DUPE_TOLERANCE: f64 = f64::EPSILON;
+
+        // Combine consecutive events that occur at the same time or position. Since the events are
+        // in chronological order, the effect is that for every time value we have, there is
+        // exactly one event that occurs at that time.
         let deduped = events
             .into_iter()
             .map(|ev| {
@@ -80,38 +463,52 @@ impl StrokeOrDot {
                     f64::from(ev.pressure),
                 )
             })
+            // Combine consecutive elements with the same position by taking the mean of their
+            // timestamps and the maximum pressure. Taking the maximum pressure ensures that marks
+            // that are likely to be wider (higher pressure) effectively obscure ones that are
+            // likely to be narrower (lower pressure).
+            .coalesce(|a @ (t0, x0, y0, p0), b @ (t1, x1, y1, p1)| {
+                if (x0 - x1).abs() < COORD_DUPE_TOLERANCE && (y0 - y1).abs() < COORD_DUPE_TOLERANCE
+                {
+                    Ok((0.5 * (t0 + t1), x0, y0, p0.max(p1)))
+                } else {
+                    Err((a, b))
+                }
+            })
+            // Combine consecutive events with the same timestamp. Since the events are in
+            // chronological order, the effect of this is to ensure that there is at most one event
+            // for any given timestamp.
             .coalesce(|a @ (t0, x0, y0, p0), b @ (t1, x1, y1, p1)| {
                 if t0 == t1 {
-                    // Sometimes the two events are identical, but sometimes they are not.
-                    // We just take the mean of the two.
+                    // There are lots of exactly duplicate events in the data for some reason, so
+                    // the two events are likely to be identical. There are sometimes events with
+                    // the same timestamp which are not identical otherwise, however, so we take
+                    // the mean of the other fields.
                     Ok((t0, 0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (p0 + p1)))
                 } else {
                     Err((a, b))
                 }
             });
 
-        let (time, x, y, pressure): (Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-            itertools::multiunzip(deduped);
+        match deduped.at_most_one() {
+            // Single event => dot
+            Ok(Some((_time, x, y, pressure))) => StrokeOrDot::Dot { x, y, pressure },
 
-        assert!(!time.is_empty(), "there must be at least one event");
+            // Many events => stroke
+            Err(deduped) => {
+                let (time, x, y, pressure) = itertools::multiunzip(deduped);
 
-        if let (Ok(&x), Ok(&y)) = (x.iter().all_equal_value(), y.iter().all_equal_value()) {
-            return StrokeOrDot::Dot {
-                x,
-                y,
-                // Unwrapping is safe here because there is at least one event.
-                pressure: pressure.into_iter().max_by(f64::total_cmp).unwrap(),
-            };
+                StrokeOrDot::Stroke(SplitStroke {
+                    time,
+                    x,
+                    y,
+                    pressure,
+                })
+            }
+
+            // No events => :(
+            Ok(None) => panic!("there must be at least one event"),
         }
-
-        // Since the x and y values are not all the same, we now know there are at least two
-        // events in the cleaned data.
-        StrokeOrDot::Stroke(SplitStroke {
-            time,
-            x,
-            y,
-            pressure,
-        })
     }
 }
 

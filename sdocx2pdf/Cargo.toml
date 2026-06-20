@@ -14,3 +14,4 @@ scirs2-interpolate = "0.5.0"
 ndarray = "0.17"
 ndarray-ndimage = "0.6"
 sdocx = { path = "../sdocx" }
+kahan = "0.1.4"
