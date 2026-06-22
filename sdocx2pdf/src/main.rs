@@ -2,12 +2,13 @@ use std::os::unix::fs::MetadataExt;
 
 use euclid::{Point2D, Vector2D};
 use itertools::Itertools;
+use lerp::Lerp;
 use printpdf::{
     Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Point, Polygon,
     PolygonRing, Rgb, WindingOrder,
 };
 
-use crate::stroke::{FilteredStroke, InterpolatedStroke, StrokeOrDot};
+use crate::stroke::{ContinuousStroke, Feature, StrokeOrDot};
 
 struct PdfSpace;
 type PdfPoint = Point2D<f64, PdfSpace>;
@@ -148,13 +149,7 @@ fn main() {
                     .then_translate(PdfVector::new(0.0, h.into()));
 
                 let smooth = match StrokeOrDot::from_events(stroke.events()) {
-                    StrokeOrDot::Stroke(stroke) => FilteredStroke::new(
-                        &InterpolatedStroke::from_split_stroke(&stroke),
-                        5.5,
-                        7.9,
-                        stroke.event_count() * 2,
-                    )
-                    .unwrap(),
+                    StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke),
 
                     StrokeOrDot::Dot { x, y, pressure } => {
                         let pos = tx.transform_point((x, y).into());
@@ -186,30 +181,29 @@ fn main() {
                     }
                 };
 
-                let target_angle = f64::to_radians(20.0);
-                let min_space_step = 1.0;
-                let max_time_step = 75.0;
+                let target_angle = f64::to_radians(25.0);
+                let sample_arc_lengths = smooth.sample_points(target_angle);
 
-                let sample_times = smooth.compute_sample_times_from_key_times(
-                    target_angle,
-                    min_space_step,
-                    max_time_step,
-                );
+                // let sample_times = smooth.compute_sample_times_from_key_times(
+                //     target_angle,
+                //     min_space_step,
+                //     max_time_step,
+                // );
 
                 // let rings = (0..derivs.t.len())
-                for (t_start, t_end) in sample_times.tuple_windows() {
-                    let start_pos = tx.transform_point(smooth.position(t_start).unwrap().into());
-                    let end_pos = tx.transform_point(smooth.position(t_end).unwrap().into());
+                for (s_start, s_end) in sample_arc_lengths.tuple_windows() {
+                    let start_pos = tx.transform_point(smooth.position(s_start).into());
+                    let end_pos = tx.transform_point(smooth.position(s_end).into());
 
-                    let start_pressure = smooth.pressure.evaluate(t_start).unwrap();
-                    let end_pressure = smooth.pressure.evaluate(t_end).unwrap();
+                    let start_pressure = smooth.pressure(s_start);
+                    let end_pressure = smooth.pressure(s_end);
 
-                    let (t_first_third, t_second_third) =
-                        smooth.arc_length_third_times(t_start, t_end);
+                    let s_first_third = s_start.lerp(s_end, 1.0 / 3.0);
+                    let s_second_third = s_start.lerp(s_end, 2.0 / 3.0);
 
                     let (pressure_first_third, pressure_second_third) = (
-                        smooth.pressure.evaluate(t_first_third).unwrap(),
-                        smooth.pressure.evaluate(t_second_third).unwrap(),
+                        smooth.pressure(s_first_third),
+                        smooth.pressure(s_second_third),
                     );
 
                     let start_spread = pressure_to_circle_radius(start_pressure, pen_size);
@@ -231,7 +225,7 @@ fn main() {
                         {
                             let tangent = tx
                                 .transform_vector(Vector2D::<_, ()>::from(
-                                    smooth.velocity(t_start).unwrap(),
+                                    smooth.unit_tangent(s_start),
                                 ))
                                 .normalize();
 
@@ -242,16 +236,14 @@ fn main() {
                                 (end_pos - start_pos).normalize()
                             }
                         } * start_spread,
-                        Vector2D::<_, ()>::from(smooth.velocity(t_first_third).unwrap())
-                            .normalize()
+                        Vector2D::<_, ()>::from(smooth.unit_tangent(s_first_third)).normalize()
                             * spread_first_third,
-                        Vector2D::<_, ()>::from(smooth.velocity(t_second_third).unwrap())
-                            .normalize()
+                        Vector2D::<_, ()>::from(smooth.unit_tangent(s_second_third)).normalize()
                             * spread_second_third,
                         {
                             let tangent = tx
                                 .transform_vector(Vector2D::<_, ()>::from(
-                                    smooth.velocity(t_end).unwrap(),
+                                    smooth.unit_tangent(s_end),
                                 ))
                                 .normalize();
 
@@ -273,8 +265,8 @@ fn main() {
                     );
 
                     let (pos_first_third, pos_second_third) = (
-                        Point2D::<f64, ()>::from(smooth.position(t_first_third).unwrap()),
-                        Point2D::<f64, ()>::from(smooth.position(t_second_third).unwrap()),
+                        Point2D::<f64, ()>::from(smooth.position(s_first_third)),
+                        Point2D::<f64, ()>::from(smooth.position(s_second_third)),
                     );
 
                     let scaled_tangent_first_third =
@@ -436,28 +428,29 @@ fn main() {
                             .collect_vec()
                     };
 
-                    // let true_angle = scaled_tangent_start
-                    //     .angle_to(scaled_tangent_end)
-                    //     .radians
-                    //     .abs();
+                    let true_angle = scaled_tangent_start
+                        .angle_to(scaled_tangent_end)
+                        .radians
+                        .abs();
 
                     let col = Color::Rgb(Rgb::new(
-                        0.0, 0.0, 0.0,
-                        // if used_fallback_start_tangent {
-                        //     1.0
-                        // } else {
-                        //     0.0
-                        // },
-                        // if true_angle > 1.5 * target_angle {
-                        //     0.5
-                        // } else {
-                        //     0.0
-                        // },
-                        // if true_angle < 0.5 * target_angle {
-                        //     1.0
-                        // } else {
-                        //     0.0
-                        // },
+                        // 0.0, 0.0, 0.0,
+                        if used_fallback_start_tangent {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        if true_angle > 1.5 * target_angle {
+                            // eprintln!("True angle way too big");
+                            0.5
+                        } else {
+                            0.0
+                        },
+                        if true_angle < 0.5 * target_angle {
+                            1.0
+                        } else {
+                            0.0
+                        },
                         None,
                     ));
 
@@ -470,7 +463,7 @@ fn main() {
                         Op::DrawPolygon {
                             polygon: Polygon {
                                 rings: vec![PolygonRing { points }],
-                                mode: PaintMode::Fill,
+                                mode: PaintMode::Stroke,
                                 winding_order: WindingOrder::NonZero,
                             },
                         },
@@ -480,32 +473,23 @@ fn main() {
                         // },
                     ]);
 
-                    // page_contents.extend(smooth.key_times().flat_map(|key_time| {
-                    //     let t = key_time.to_time();
+                    // page_contents.extend(smooth.features().into_iter().flat_map(|feature| {
+                    //     let s = feature.arc_length();
 
-                    //     let pos = tx.transform_point(smooth.position(t).unwrap().into());
+                    //     let pos = tx.transform_point(smooth.position(s).into());
 
                     //     [
                     //         Op::SetOutlineColor {
-                    //             col: Color::Rgb(match key_time {
-                    //                 stroke::KeyTime::Start(_) => Rgb::new(1.0, 0.5, 0.0, None),
-                    //                 stroke::KeyTime::CurvatureExtremum(_) => {
-                    //                     Rgb::new(0.0, 1.0, 0.0, None)
-                    //                 }
-                    //                 stroke::KeyTime::InflectionPoint(_) => {
-                    //                     Rgb::new(1.0, 1.0, 0.0, None)
-                    //                 }
-                    //                 stroke::KeyTime::PressureExtremum(_) => {
-                    //                     Rgb::new(1.0, 0.0, 0.0, None)
-                    //                 }
-                    //                 stroke::KeyTime::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
+                    //             col: Color::Rgb(match feature {
+                    //                 Feature::Start => Rgb::new(1.0, 0.5, 0.0, None),
+                    //                 Feature::Vertex(_) => Rgb::new(0.0, 1.0, 0.0, None),
+                    //                 Feature::Inflection(_) => Rgb::new(1.0, 1.0, 0.0, None),
+                    //                 Feature::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
                     //             }),
                     //         },
                     //         Op::SetOutlineThickness {
-                    //             pt: Mm(pressure_to_circle_radius(
-                    //                 smooth.pressure.evaluate(t).unwrap(),
-                    //                 pen_size,
-                    //             ) as f32
+                    //             pt: Mm(pressure_to_circle_radius(smooth.pressure(s), pen_size)
+                    //                 as f32
                     //                 * 2.0
                     //                 * 0.25)
                     //             .into(),
