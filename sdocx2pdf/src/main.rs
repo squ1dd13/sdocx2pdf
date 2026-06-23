@@ -191,6 +191,8 @@ fn main() {
                 //     max_time_step,
                 // );
 
+                let mut tangent_at_connection: Option<PdfVector> = None;
+
                 // let rings = (0..derivs.t.len())
                 for (iter_pos, (s_start, s_end)) in
                     sample_arc_lengths.tuple_windows().with_position()
@@ -415,11 +417,16 @@ fn main() {
                             .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
                             // Points from top right to bottom right
                             .chain(top_to_bottom_right_points)
-                            .chain(
-                                if matches!(
-                                    iter_pos,
-                                    itertools::Position::First | itertools::Position::Only
-                                ) {
+                            .chain({
+                                let it = if tangent_at_connection.is_none_or(|tangent| {
+                                    tangent.angle_to(scaled_tangent_start).radians.abs()
+                                        > f64::to_radians(20.0)
+                                }) {
+                                    // Either this is the first segment, in which case we need to
+                                    // round the beginning, or there is a significant difference in
+                                    // tangent angle between the final third of the previous segment
+                                    // and the start of this one. In the latter case, we round the
+                                    // beginning to make the connection look cleaner.
                                     Some(
                                         // Control points for bottom right arc
                                         bottom_right_to_arc_lowest_cps
@@ -444,8 +451,12 @@ fn main() {
                                     None
                                 }
                                 .into_iter()
-                                .flatten(),
-                            )
+                                .flatten();
+
+                                tangent_at_connection = Some(end_pos - pos_second_third);
+
+                                it
+                            })
                             .collect_vec()
                     } else {
                         bottom_to_top_left_points
