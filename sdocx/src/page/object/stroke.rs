@@ -337,6 +337,7 @@ pub struct Stroke {
     is_alpha_locked: bool,
     is_binary_added: bool,
     is_generated: bool,
+    is_fixed_opacity: bool,
 
     events: Vec<Event>,
 
@@ -407,6 +408,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             8 => !is_binary_added;
             // missing 9
             10 => !is_generated;
+            11 => is_fixed_opacity;
         });
 
         let event_count: usize = stream.read_u16_le()?.into();
@@ -471,6 +473,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             is_alpha_locked,
             is_binary_added,
             is_generated,
+            is_fixed_opacity,
             events,
             tool_type,
             advanced_pen_settings,
