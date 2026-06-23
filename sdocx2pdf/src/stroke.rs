@@ -276,7 +276,7 @@ fn filter_position<'v>(
 ) -> impl Iterator<Item = f64> {
     static KERNELS: [Lazy<Vec<f64>>; 3] = {
         const SIGMA: f64 = 5.0 * (TIME_UPSAMPLING_RATIO as f64);
-        const TRUNC: f64 = 8.0;
+        const TRUNC: f64 = 10.0;
 
         [
             Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC)),
@@ -532,7 +532,7 @@ impl ContinuousStroke {
     /// Returns an iterator yielding the arc lengths at the inflection points of the stroke, in
     /// ascending order.
     fn inflection_points(&self) -> impl Iterator<Item = f64> {
-        const TOLERANCE: f64 = f64::EPSILON;
+        const TOLERANCE: f64 = 0.0;
 
         let s_end = self.length;
 

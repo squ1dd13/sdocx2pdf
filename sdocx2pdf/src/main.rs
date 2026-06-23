@@ -93,9 +93,9 @@ fn main() {
     // sdocx::test_all();
 
     let document = sdocx::Document::from_zip(
-        "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
     )
     .unwrap();
 
@@ -182,7 +182,7 @@ fn main() {
                     }
                 };
 
-                let target_angle = f64::to_radians(25.0);
+                let target_angle = f64::to_radians(40.0);
                 let sample_arc_lengths = smooth.sample_points(target_angle);
 
                 // let sample_times = smooth.compute_sample_times_from_key_times(
