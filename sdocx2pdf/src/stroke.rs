@@ -275,7 +275,7 @@ fn filter_position<'v>(
     order: usize,
 ) -> impl Iterator<Item = f64> {
     static KERNELS: [Lazy<Vec<f64>>; 3] = {
-        const SIGMA: f64 = 10.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const SIGMA: f64 = 5.0 * (TIME_UPSAMPLING_RATIO as f64);
         const TRUNC: f64 = 8.0;
 
         [
@@ -294,7 +294,7 @@ fn filter_pressure<'p>(
     p: impl Iterator<Item = f64> + 'p,
 ) -> impl Iterator<Item = f64> + 'p {
     static KERNEL: Lazy<Vec<f64>> = {
-        const SIGMA: f64 = 10.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const SIGMA: f64 = 15.0 * (TIME_UPSAMPLING_RATIO as f64);
         const TRUNC: f64 = 8.0;
 
         Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC))

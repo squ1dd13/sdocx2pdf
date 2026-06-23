@@ -1,7 +1,7 @@
 use std::os::unix::fs::MetadataExt;
 
 use euclid::{Point2D, Vector2D};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use lerp::Lerp;
 use printpdf::{
     Color, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions, Point, Polygon,
@@ -192,7 +192,9 @@ fn main() {
                 // );
 
                 // let rings = (0..derivs.t.len())
-                for (s_start, s_end) in sample_arc_lengths.tuple_windows() {
+                for (iter_pos, (s_start, s_end)) in
+                    sample_arc_lengths.tuple_windows().with_position()
+                {
                     let start_pos = tx.transform_point(smooth.position(s_start).into());
                     let end_pos = tx.transform_point(smooth.position(s_end).into());
 
@@ -413,14 +415,37 @@ fn main() {
                             .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
                             // Points from top right to bottom right
                             .chain(top_to_bottom_right_points)
-                            // Control points for bottom right arc
-                            .chain(bottom_right_to_arc_lowest_cps.map(pdf_point_to_control_point))
-                            // Common point for bottom arcs
-                            .chain(std::iter::once(pdf_point_to_line_point(bottom_arc_lowest)))
-                            // Control points for bottom left arc
-                            .chain(bottom_arc_lowest_to_left_cps.map(pdf_point_to_control_point))
-                            // Bottom left point (again - this time, to complete the curve)
-                            .chain(std::iter::once(pdf_point_to_line_point(bottom_left)))
+                            .chain(
+                                if matches!(
+                                    iter_pos,
+                                    itertools::Position::First | itertools::Position::Only
+                                ) {
+                                    Some(
+                                        // Control points for bottom right arc
+                                        bottom_right_to_arc_lowest_cps
+                                            .map(pdf_point_to_control_point)
+                                            .into_iter()
+                                            // Common point for bottom arcs
+                                            .chain(std::iter::once(pdf_point_to_line_point(
+                                                bottom_arc_lowest,
+                                            )))
+                                            // Control points for bottom left arc
+                                            .chain(
+                                                bottom_arc_lowest_to_left_cps
+                                                    .map(pdf_point_to_control_point),
+                                            )
+                                            // Bottom left point (again - this time, to complete
+                                            // the curve)
+                                            .chain(std::iter::once(pdf_point_to_line_point(
+                                                bottom_left,
+                                            ))),
+                                    )
+                                } else {
+                                    None
+                                }
+                                .into_iter()
+                                .flatten(),
+                            )
                             .collect_vec()
                     } else {
                         bottom_to_top_left_points
@@ -441,13 +466,8 @@ fn main() {
                         } else {
                             0.0
                         },
+                        0.0,
                         if true_angle > 1.5 * target_angle {
-                            // eprintln!("True angle way too big");
-                            0.5
-                        } else {
-                            0.0
-                        },
-                        if true_angle < 0.5 * target_angle {
                             1.0
                         } else {
                             0.0
