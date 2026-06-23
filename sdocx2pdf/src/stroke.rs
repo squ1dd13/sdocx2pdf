@@ -1,19 +1,11 @@
-use std::{borrow::Cow, collections::VecDeque};
-
-use euclid::default::Vector2D;
 use itertools::{Either, Itertools};
 use kahan::KahanSum;
 use lerp::Lerp;
-use ndarray::{Array1, ArrayView1, Axis};
-use ndarray_ndimage::BorderMode;
+use ndarray::ArrayView1;
 use num::ToPrimitive;
+use once_cell::sync::Lazy;
 use scirs2_interpolate::{
-    CubicSpline, Interp1d, InterpolateResult, InterpolationMethod, PchipInterpolator,
-    PiecewisePolynomial,
-    interp1d::ExtrapolateMode,
-    symbolic_derivative::{self, Differentiable},
-    traits::{ExtremaType, SplineInterpolator},
-    utils::{find_multiple_roots, find_roots_bisection},
+    PchipInterpolator, PiecewisePolynomial, symbolic_derivative::Differentiable,
 };
 
 /// A root of a function that takes `f64` values.
@@ -24,12 +16,26 @@ enum Root {
 
 /// Piecewise linear function constructed by linearly interpolating between finitely many points of
 /// a function `f64 -> f64`.
-struct Linterpolator<'v> {
-    independent: Cow<'v, [f64]>,
-    dependent: Cow<'v, [f64]>,
+struct Linterpolator {
+    independent: Vec<f64>,
+    dependent: Vec<f64>,
 }
 
-impl<'v> Linterpolator<'v> {
+impl Linterpolator {
+    fn new(independent: Vec<f64>, dependent: Vec<f64>) -> Linterpolator {
+        assert!(
+            independent.len() == dependent.len(),
+            "independent and dependent data vectors differ in size ({} vs {})",
+            independent.len(),
+            dependent.len()
+        );
+
+        Linterpolator {
+            independent,
+            dependent,
+        }
+    }
+
     /// Returns the index of the interval containing `t` in the list `[t0, t1), [t1, t2), ...
     /// [tn-1, tn), [tn, tn]`, where the `ti` are the interpolated data points for the independent
     /// variable.
@@ -240,6 +246,63 @@ impl Feature {
     }
 }
 
+fn gaussian_filter<'s>(
+    pad_left: f64,
+    pad_right: f64,
+    signal: impl Iterator<Item = f64> + 's,
+    kernel: &'s [f64],
+) -> impl Iterator<Item = f64> + 's {
+    // There is a bug in `gaussfilt` in that even with padding enabled, we get back an empty
+    // iterator if `signal` yields fewer elements than the size of `kernel`. To work around this,
+    // we pad manually first and then pass `pad = false`.
+    let signal = {
+        let pad_count = (kernel.len() - 1) / 2;
+
+        std::iter::repeat_n(pad_left, pad_count)
+            .chain(signal)
+            .chain(std::iter::repeat_n(pad_right, pad_count))
+    };
+
+    gaussfilt::apply_gaussian_filter1d(signal, kernel, false)
+}
+
+const TIME_UPSAMPLING_RATIO: u8 = 3;
+
+fn filter_position<'v>(
+    pad_left: f64,
+    pad_right: f64,
+    v: impl Iterator<Item = f64> + 'v,
+    order: usize,
+) -> impl Iterator<Item = f64> {
+    static KERNELS: [Lazy<Vec<f64>>; 3] = {
+        const SIGMA: f64 = 10.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const TRUNC: f64 = 8.0;
+
+        [
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 1, TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 2, TRUNC)),
+        ]
+    };
+
+    gaussian_filter(pad_left, pad_right, v, &KERNELS[order])
+}
+
+fn filter_pressure<'p>(
+    pad_left: f64,
+    pad_right: f64,
+    p: impl Iterator<Item = f64> + 'p,
+) -> impl Iterator<Item = f64> + 'p {
+    static KERNEL: Lazy<Vec<f64>> = {
+        const SIGMA: f64 = 10.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const TRUNC: f64 = 8.0;
+
+        Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC))
+    };
+
+    gaussian_filter(pad_left, pad_right, p, &KERNEL)
+}
+
 pub struct ContinuousStroke {
     /// Arc length at the end of the stroke.
     length: f64,
@@ -257,10 +320,10 @@ pub struct ContinuousStroke {
     ty: PiecewisePolynomial<f64>,
 
     /// Pressure as a function of arc length.
-    p: Linterpolator<'static>,
+    p: Linterpolator,
 
     /// Curvature as a function of arc length.
-    curvature: Linterpolator<'static>,
+    curvature: Linterpolator,
 }
 
 impl ContinuousStroke {
@@ -314,82 +377,84 @@ impl ContinuousStroke {
         // interpolators for this, and we'll construct them using data points from the current
         // interpolators, sampled at a greater rate than the original stroke data.
 
-        // Generally, the slowest parts of the stroke are the most interesting. We resample using
+        // Generally, the slowest parts of the stroke are the most interesting. We upsample using
         // uniform timesteps so that we still end up sampling more often (with respect to arc
         // length) in the areas of greatest interest. Using uniform timesteps is necessary for the
         // Gaussian filters we apply to smooth the data, because we need the array indices to be
         // proportional to the time in order for the index-based Gaussian filter to be meaningful.
-        let t_resamples = {
-            const TIME_RESAMPLING_RATIO: u8 = 15;
-
-            let mut t_rs = scirs2_core::Array1::linspace(
+        let t_samples = {
+            let mut t_us = scirs2_core::Array1::linspace(
                 t_start,
                 t_end,
-                t_arr_v.len() * (TIME_RESAMPLING_RATIO as usize),
+                t_arr_v.len() * (TIME_UPSAMPLING_RATIO as usize),
             );
 
             // `linspace` calculates the final value instead of setting it exactly, so sometimes it
             // is slightly greater than the end time we gave it. This causes an error when fed into
             // the interpolator because we do not have extrapolation enabled, so we set the last
             // time exactly here.
-            *t_rs.last_mut().unwrap() = t_end;
+            *t_us.last_mut().unwrap() = t_end;
 
-            t_rs
+            t_us
         };
 
-        // Resample.
-        let xt_rs = xt.evaluate_array(&t_resamples.view()).unwrap();
-        let yt_rs = yt.evaluate_array(&t_resamples.view()).unwrap();
-        let pt_rs = pt.evaluate_array(&t_resamples.view()).unwrap();
+        // Upsample.
+        let xt_us = xt.evaluate_array(&t_samples.view()).unwrap();
+        let yt_us = yt.evaluate_array(&t_samples.view()).unwrap();
+        let pt_us = pt.evaluate_array(&t_samples.view()).unwrap();
 
-        // Filter the resampled data. We also take derivatives here so we can calculate curvature.
+        // Filter the upsampled data. We also take derivatives here so we can calculate curvature.
         let (
-            xt_rs_filt,
-            yt_rs_filt,
-            pt_rs_filt,
-            x1t_rs_filt,
-            y1t_rs_filt,
-            x2t_rs_filt,
-            y2t_rs_filt,
+            pt_us_filt,
+            xt_us_filt,
+            yt_us_filt,
+            x1t_us_filt,
+            y1t_us_filt,
+            x2t_us_filt,
+            y2t_us_filt,
         ) = {
-            use ndarray_ndimage::gaussian_filter1d as f;
+            // d(index)/dt. The functions give us derivatives with respect to index, so we use the
+            // chain rule to get derivatives with respect to time.
+            let didt = t_samples[1] - t_samples[0];
 
-            const XY_FILT_SIGMA: f64 = 155.5;
-            const XY_FILT_BM: BorderMode<f64> = BorderMode::Nearest;
-            const XY_FILT_TRUNC: usize = 10;
+            let xpl = xt_us[0];
+            let xpr = xt_us.last().copied().unwrap();
 
-            const P_FILT_SIGMA: f64 = 7.9;
-            const P_FILT_BM: BorderMode<f64> = BorderMode::Nearest;
-            const P_FILT_TRUNC: usize = 6;
+            let ypl = yt_us[0];
+            let ypr = yt_us.last().copied().unwrap();
 
-            // d(index)/dt. `f` gives us derivatives with respect to index, so we use the chain
-            // rule to get derivatives with respect to time.
-            let di_dt = t_resamples[1] - t_resamples[0];
+            use filter_position as fxy;
+            use filter_pressure as fp;
 
             (
-                f(&xt_rs, XY_FILT_SIGMA, Axis(0), 0, XY_FILT_BM, XY_FILT_TRUNC),
-                f(&yt_rs, XY_FILT_SIGMA, Axis(0), 0, XY_FILT_BM, XY_FILT_TRUNC),
-                f(&pt_rs, P_FILT_SIGMA, Axis(0), 0, P_FILT_BM, P_FILT_TRUNC),
-                // For some reason, the sign is flipped for the first derivatives. The Python
-                // implementation does not do this.
-                -f(&xt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / di_dt,
-                -f(&yt_rs, XY_FILT_SIGMA, Axis(0), 1, XY_FILT_BM, XY_FILT_TRUNC) / di_dt,
-                // Second derivatives are fine.
-                f(&xt_rs, XY_FILT_SIGMA, Axis(0), 2, XY_FILT_BM, XY_FILT_TRUNC) / (di_dt * di_dt),
-                f(&yt_rs, XY_FILT_SIGMA, Axis(0), 2, XY_FILT_BM, XY_FILT_TRUNC) / (di_dt * di_dt),
+                fp(pt_us[0], pt_us.last().copied().unwrap(), pt_us.into_iter()).collect_vec(),
+                fxy(xpl, xpr, xt_us.iter().copied(), 0).collect_vec(),
+                fxy(ypl, ypr, yt_us.iter().copied(), 0).collect_vec(),
+                fxy(xpl, xpr, xt_us.iter().copied(), 1)
+                    .map(|v| v / didt)
+                    .collect_vec(),
+                fxy(ypl, ypr, yt_us.iter().copied(), 1)
+                    .map(|v| v / didt)
+                    .collect_vec(),
+                fxy(xpl, xpr, xt_us.into_iter(), 2)
+                    .map(|v| v / (didt * didt))
+                    .collect_vec(),
+                fxy(ypl, ypr, yt_us.into_iter(), 2)
+                    .map(|v| v / (didt * didt))
+                    .collect_vec(),
             )
         };
 
         // The data we were given is guaranteed not to have had any adjacent events with the same
-        // position. Though we have now interpolated, resampled and filtered the position data,
+        // position. Though we have now interpolated, upsampled and filtered the position data,
         // it should still be true that no two adjacent position samples will be the same.
         // Therefore, we can obtain a strictly increasing function s(t) giving the arc length
         // at time t by summing the distances between sample positions.
-        let st_rs_filt: Array1<f64> = std::iter::once(0.0)
+        let st_us_filt: Vec<f64> = std::iter::once(0.0)
             .chain(
-                xt_rs_filt
+                xt_us_filt
                     .iter()
-                    .zip(&yt_rs_filt)
+                    .zip(&yt_us_filt)
                     .tuple_windows()
                     .map(|((&xa, &ya), (&xb, &yb))| {
                         let dist = (xa - xb).hypot(ya - yb);
@@ -406,19 +471,18 @@ impl ContinuousStroke {
                         Some(*arc_length)
                     }),
             )
-            .collect_vec()
-            .into();
+            .collect();
 
         let curvature = {
             // There is no vectorised `hypot` or FMA, so we need to work element-wise to some
             // degree. We might as well perform the whole calculation in that one loop.
-            let mut curvature = x2t_rs_filt.to_vec();
+            let mut curvature = x2t_us_filt.to_vec();
 
             ndarray::azip!((
                 k in &mut curvature,
-                &x1 in &x1t_rs_filt,
-                &y1 in &y1t_rs_filt,
-                &y2 in &y2t_rs_filt,
+                &x1 in &x1t_us_filt,
+                &y1 in &y1t_us_filt,
+                &y2 in &y2t_us_filt,
             ) {
                 let x2 = *k;
                 *k = Self::calc_curvature(x1, y1, x2, y2);
@@ -429,25 +493,19 @@ impl ContinuousStroke {
 
         // Since the arc length and x/y/p/curvature data all correspond to the time data, we can
         // treat the former as the independent variable for the latter four.
-        let x = PchipInterpolator::new(&st_rs_filt.view(), &xt_rs_filt.view(), false).unwrap();
-        let y = PchipInterpolator::new(&st_rs_filt.view(), &yt_rs_filt.view(), false).unwrap();
+        let x =
+            PchipInterpolator::new(&(&st_us_filt).into(), &(&xt_us_filt).into(), false).unwrap();
+        let y =
+            PchipInterpolator::new(&(&st_us_filt).into(), &(&yt_us_filt).into(), false).unwrap();
 
         ContinuousStroke {
-            length: *st_rs_filt.last().unwrap(),
+            length: *st_us_filt.last().unwrap(),
             tx: x.derivative(1).unwrap(),
             ty: y.derivative(1).unwrap(),
             x,
             y,
-            p: Linterpolator {
-                independent: st_rs_filt.to_vec().into(),
-                // fixme: Could we avoid the allocation here and convert directly?
-                dependent: pt_rs_filt.to_vec().into(),
-            },
-            curvature: Linterpolator {
-                // fixme: Here, too
-                independent: st_rs_filt.to_vec().into(),
-                dependent: curvature.into(),
-            },
+            p: Linterpolator::new(st_us_filt.clone(), pt_us_filt),
+            curvature: Linterpolator::new(st_us_filt, curvature),
         }
     }
 
@@ -549,7 +607,7 @@ impl ContinuousStroke {
                         s1,
                         self.curvature.evaluate(s0).unwrap().abs(),
                         self.curvature.evaluate(s1).unwrap().abs(),
-                        self.curvature.integrate(s0, s1).unwrap().abs(),
+                        self.tangent_angle_change(s0, s1).unwrap().abs(),
                     );
 
                     lcs.sample_points_strictly_inside(target_segment_angle)
@@ -573,12 +631,6 @@ pub struct SplitStroke {
     x: Vec<f64>,
     y: Vec<f64>,
     pressure: Vec<f64>,
-}
-
-impl SplitStroke {
-    pub fn event_count(&self) -> usize {
-        self.time.len()
-    }
 }
 
 pub enum StrokeOrDot {
@@ -772,7 +824,7 @@ impl LinearCurvatureSegment {
 
         // hack: take 100 stops us spinning when the accumulated angle is stupidly big from
         // numerical instability
-        Either::Right((1..adj_ss_count).map(sn).take(100))
+        Either::Right((1..adj_ss_count).map(sn).take(50))
     }
 
     // hack: `&self`
@@ -799,7 +851,7 @@ impl LinearCurvatureSegment {
             .ceil()
             .to_usize()
             .unwrap()
-            .min(100);
+            .min(50);
 
         // s0 = 0, so start from 1. Keep going until we reach the end of the segment.
         Either::Right(

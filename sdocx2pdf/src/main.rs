@@ -93,8 +93,9 @@ fn main() {
     // sdocx::test_all();
 
     let document = sdocx::Document::from_zip(
-        // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
     )
     .unwrap();
 
