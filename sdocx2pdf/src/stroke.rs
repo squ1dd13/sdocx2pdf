@@ -647,8 +647,8 @@ impl StrokeOrDot {
     /// the stroke data is cleaned by merging consecutive events with the same timestamp or
     /// position and is returned as a `SplitStroke` with the data in the same order as it was
     /// obtained from the events.
-    pub fn from_events<'a>(
-        events: impl IntoIterator<Item = sdocx::page::object::stroke::Event> + 'a,
+    pub fn from_events<'e>(
+        events: impl IntoIterator<Item = &'e sdocx::page::object::stroke::Event>,
     ) -> StrokeOrDot {
         const COORD_DUPE_TOLERANCE: f64 = f64::EPSILON;
 

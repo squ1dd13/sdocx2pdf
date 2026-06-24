@@ -64,12 +64,11 @@ impl From<Point> for (f64, f64) {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-#[expect(dead_code)]
 pub struct Rect {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
 }
 
 impl Rect {
@@ -449,6 +448,14 @@ impl Page {
 
     pub const fn origin(&self) -> (u32, u32) {
         (self.offset_x, self.offset_y)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.iter().all(|layer| layer.objects().is_empty())
+    }
+
+    pub const fn drawn_rect(&self) -> Option<Rect> {
+        self.drawn_rect
     }
 }
 

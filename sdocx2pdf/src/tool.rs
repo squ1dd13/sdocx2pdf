@@ -142,10 +142,10 @@ impl Tool {
 
     /// Extends `ops` with the necessary operations to draw each slice of stroke events in
     /// `strokes` using this tool. The strokes are drawn in order.
-    pub fn draw_events(
+    pub fn draw_events<'e>(
         &self,
         egs_id: &ExtendedGraphicsStateId,
-        strokes: impl IntoIterator<Item = impl IntoIterator<Item = Event>>,
+        strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
         ops: &mut Vec<printpdf::Op>,
     ) -> Result<(), ()> {
         let &Basics {
@@ -266,8 +266,8 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
 /// smoother connections, but increase the file size. They also necessarily overlap the next
 /// segment, making them inappropriate for strokes with transparency (because you can see the
 /// arcs).
-fn draw_events_basic(
-    events: impl IntoIterator<Item = Event>,
+fn draw_events_basic<'e>(
+    events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
     use_arcs: bool,
     ops: &mut Vec<printpdf::Op>,

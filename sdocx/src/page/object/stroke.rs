@@ -221,15 +221,6 @@ impl Event {
 
         Ok(events)
     }
-
-    /// Returns an `Event` equivalent to `self` but with the position modified using the provided
-    /// function.
-    pub fn map_position(self, mut f: impl FnMut((f64, f64)) -> (f64, f64)) -> Event {
-        Event {
-            point: f(self.point.into()).into(),
-            ..self
-        }
-    }
 }
 
 impl std::fmt::Debug for Event {
