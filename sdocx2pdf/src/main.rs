@@ -16,12 +16,13 @@ fn main() {
         // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Nearly empty but long inf scroll_260624_170445.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145202.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145950_has_empty_page.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_150246_with_explicit_blank_page_last.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Paged with handwriting_260624_142215.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/long page with rotated squiggle_260624_155155.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/long page with rotated squiggle_260624_155155.sdocx",
     )
     .unwrap();
 
@@ -63,7 +64,27 @@ fn main() {
         let mm_per_unit = 210.0 / page_w_internal.min(page_h_internal);
 
         let page_w_mm = page_w_internal * mm_per_unit;
-        let page_h_mm = page_h_internal * mm_per_unit;
+
+        let page_h_mm = {
+            if pageless && let Some(drawn_rect) = page.drawn_rect() {
+                // Since pageless documents are A4-width, the height of a page in an equivalent
+                // paged document is A4 height, 297mm. The sdocx tends to report an extra
+                // page-height worth of empty space at the end of a pageless document. When the app
+                // exports a PDF, this space is not included, and we don't want to include it
+                // either, so we subtract it from the height. Just to be safe, we make sure not to
+                // reduce the height below the combined height of the pages we'd need to hold the
+                // drawn content if this were a paged document.
+
+                let drawn_height_mm = (drawn_rect.bottom - drawn_rect.top) as f32 * mm_per_unit;
+
+                let drawn_page_count = (drawn_height_mm / 297.0).ceil();
+                let reduced_page_count = (page_h_internal * mm_per_unit) / 297.0 - 1.0;
+
+                reduced_page_count.max(drawn_page_count) * 297.0
+            } else {
+                page_h_internal * mm_per_unit
+            }
+        };
 
         let mut page_contents = {
             let tx = printpdf::Op::SetTransformationMatrix {
