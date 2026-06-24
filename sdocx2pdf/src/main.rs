@@ -1,6 +1,7 @@
 use std::{collections::HashMap, os::unix::fs::MetadataExt};
 
 use itertools::Itertools;
+use num::ToPrimitive;
 use printpdf::{Mm, PdfDocument, PdfPage, PdfSaveOptions};
 
 use crate::tool::Tool;
@@ -12,10 +13,11 @@ fn main() {
     // sdocx::test_all();
 
     let document = sdocx::Document::from_zip(
-        "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Paged with handwriting_260624_142215.sdocx",
     )
     .unwrap();
 
@@ -33,14 +35,12 @@ fn main() {
         sdocx::PageModel::Pageless => eprintln!("This is a pageless document"),
     };
 
-    let (w, h) = document.width_height();
-    let hf = f64::from(h);
-    eprintln!("w = {w}, h = {h}");
-
     for page in document.pages() {
         // fixme: Document units are pixels, so we shouldn't be treating them as mm because it
         // creates huge dimensions.
-        let (w, h) = page.width_height();
+        let (page_w, page_h) = page.width_height();
+
+        let page_h_f = page_h.to_f64().unwrap();
 
         let mut page_contents = vec![];
         let mut tool_graphics_state_ids = HashMap::new();
@@ -58,7 +58,7 @@ fn main() {
             let strokes_by_tool = strokes.chunk_by(|stroke| Tool::for_stroke(stroke));
 
             // Document space has y = 0 at the top; PDF space has y = 0 at the bottom.
-            let event_position_map = |(x, y)| (x, hf - y);
+            let event_position_map = |(x, y)| (x, page_h_f - y);
 
             for (tool, strokes) in &strokes_by_tool {
                 // Get the extended graphics state required by this tool, creating it if it does
@@ -89,8 +89,11 @@ fn main() {
             }
         }
 
-        pdf.pages
-            .push(PdfPage::new(Mm(w as _), Mm(h as _), page_contents));
+        pdf.pages.push(PdfPage::new(
+            Mm(page_w as _),
+            Mm(page_h as _),
+            page_contents,
+        ));
     }
 
     let mut warnings = vec![];
