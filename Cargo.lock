@@ -2035,10 +2035,12 @@ dependencies = [
  "ndarray",
  "num",
  "once_cell",
+ "ordered-float",
  "printpdf",
  "scirs2-core",
  "scirs2-interpolate",
  "sdocx",
+ "thiserror",
 ]
 
 [[package]]

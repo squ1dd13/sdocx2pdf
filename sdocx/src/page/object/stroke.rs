@@ -36,12 +36,13 @@ pub struct TiltData {
     /// Orientation angle in radians, relative to the document. Range is \[-π, π\], where
     ///  * 0 means the pen is oriented with its tip towards the top of the document;
     ///  * +/- π means the tip is towards the bottom of the document;
-    ///  * -π/2 means ths tip is towards the left;
+    ///  * -π/2 means the tip is towards the left;
     ///  * π/2 means the tip is towards the right.
     pub orientation: f32,
 }
 
 /// A single stroke event. Essentially a sample of the tool state at some point during the stroke.
+#[derive(Clone, Copy)]
 pub struct Event {
     /// Tool position.
     pub point: Point,
@@ -220,6 +221,15 @@ impl Event {
 
         Ok(events)
     }
+
+    /// Returns an `Event` equivalent to `self` but with the position modified using the provided
+    /// function.
+    pub fn map_position(self, mut f: impl FnMut((f64, f64)) -> (f64, f64)) -> Event {
+        Event {
+            point: f(self.point.into()).into(),
+            ..self
+        }
+    }
 }
 
 impl std::fmt::Debug for Event {
@@ -374,12 +384,20 @@ impl Stroke {
         self.pen_size
     }
 
-    pub fn pen_name(&self) -> Option<&str> {
-        self.pen_name.as_ref().map(AsRef::as_ref)
+    pub const fn is_fixed_width(&self) -> bool {
+        self.is_fixed_width_enabled
     }
 
-    pub fn colour(&self) -> [u8; 4] {
-        self.colour.unwrap_or([0, 0, 0, 255])
+    pub const fn is_fixed_opacity(&self) -> bool {
+        self.is_fixed_opacity
+    }
+
+    pub const fn pen_name(&self) -> Option<&Rc<str>> {
+        self.pen_name.as_ref()
+    }
+
+    pub const fn colour(&self) -> Option<[u8; 4]> {
+        self.colour
     }
 }
 

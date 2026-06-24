@@ -29,7 +29,7 @@ use thiserror::Error;
 mod header;
 pub mod object;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
@@ -48,6 +48,18 @@ impl Point {
             x: stream.read_f32_le()?.into(),
             y: stream.read_f32_le()?.into(),
         })
+    }
+}
+
+impl From<(f64, f64)> for Point {
+    fn from((x, y): (f64, f64)) -> Point {
+        Point { x, y }
+    }
+}
+
+impl From<Point> for (f64, f64) {
+    fn from(Point { x, y }: Point) -> (f64, f64) {
+        (x, y)
     }
 }
 

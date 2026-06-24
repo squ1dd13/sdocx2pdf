@@ -648,7 +648,7 @@ impl StrokeOrDot {
     /// position and is returned as a `SplitStroke` with the data in the same order as it was
     /// obtained from the events.
     pub fn from_events<'a>(
-        events: impl IntoIterator<Item = &'a sdocx::page::object::stroke::Event> + 'a,
+        events: impl IntoIterator<Item = sdocx::page::object::stroke::Event> + 'a,
     ) -> StrokeOrDot {
         const COORD_DUPE_TOLERANCE: f64 = f64::EPSILON;
 
