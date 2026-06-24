@@ -117,6 +117,11 @@ impl Tool {
         )
     }
 
+    /// Returns whether strokes drawn using this tool are always straight.
+    fn is_straight_only(&self) -> bool {
+        matches!(self, Tool::StraightHighlighter(_) | Tool::StraightMarker(_))
+    }
+
     pub fn create_egs(&self) -> ExtendedGraphicsState {
         let mut egs = ExtendedGraphicsState::default().with_line_cap(printpdf::LineCapStyle::Round);
 
@@ -169,10 +174,16 @@ impl Tool {
             printpdf::Op::SetOutlineColor { col: colour },
         ]);
 
-        let use_arcs = a == 255;
+        if self.is_straight_only() {
+            for events in strokes {
+                draw_events_straight(events, size, ops);
+            }
+        } else {
+            let use_arcs = a == 255;
 
-        for events in strokes {
-            draw_events_basic(events, size, use_arcs, ops);
+            for events in strokes {
+                draw_events_basic(events, size, use_arcs, ops);
+            }
         }
 
         ops.push(printpdf::Op::RestoreGraphicsState);
@@ -593,4 +604,30 @@ fn draw_events_basic<'e>(
         //     ]
         // }));
     }
+}
+
+fn draw_events_straight<'e>(
+    events: impl IntoIterator<Item = &'e Event>,
+    pen_size: f32,
+    ops: &mut Vec<printpdf::Op>,
+) {
+    let mut events = events.into_iter();
+
+    let first = events.next().unwrap();
+    let last = events.last().unwrap();
+
+    let a = pdf_point_to_line_point(<(f64, f64)>::from(first.point).into());
+    let b = pdf_point_to_line_point(<(f64, f64)>::from(last.point).into());
+
+    ops.extend([
+        printpdf::Op::SetOutlineThickness {
+            pt: Mm(pen_size).into(),
+        },
+        printpdf::Op::DrawLine {
+            line: printpdf::Line {
+                points: vec![a, b],
+                is_closed: false,
+            },
+        },
+    ]);
 }
