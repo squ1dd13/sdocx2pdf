@@ -416,7 +416,7 @@ pub struct Page {
     background_colour: Option<[u8; 4]>,
     background_width: Option<u32>,
     background_rotation: Option<u32>,
-    pdf_data_items: Vec<PdfPage>,
+    pdf_page_objects: Vec<PdfPage>,
     template_type: Option<TemplateType>,
     canvas_cache_map: Vec<(u32, CanvasCacheEntry)>,
     imported_data_height: Option<u32>,
@@ -442,6 +442,10 @@ impl Page {
         &self.layers
     }
 
+    pub fn embedded_pdf_pages(&self) -> &[PdfPage] {
+        &self.pdf_page_objects
+    }
+
     pub const fn width_height(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -451,7 +455,8 @@ impl Page {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.layers.iter().all(|layer| layer.objects().is_empty())
+        self.pdf_page_objects.is_empty()
+            && self.layers.iter().all(|layer| layer.objects().is_empty())
     }
 
     pub const fn drawn_rect(&self) -> Option<Rect> {
@@ -654,7 +659,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
             background_colour,
             background_width,
             background_rotation,
-            pdf_data_items,
+            pdf_page_objects: pdf_data_items,
             template_type,
             canvas_cache_map,
             imported_data_height,

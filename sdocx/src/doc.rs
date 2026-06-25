@@ -2,9 +2,10 @@ use std::{
     borrow::Cow,
     fs::File,
     io::{BufReader, Read},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
+use either::Either;
 use thiserror::Error;
 use zip::{HasZipMetadata, ZipArchive};
 
@@ -41,6 +42,37 @@ pub enum DocumentError {
 
     #[error("uncompressed size {0} is too large")]
     FileTooBig(u64),
+}
+
+/// Kept private to force use of the public file access API.
+#[derive(Debug)]
+enum MediaStorageInner {
+    /// An on-disk `media` directory.
+    Directory(PathBuf),
+
+    /// The archive that makes up the entire document, within which are all the files from the
+    /// `media` directory.
+    Archive(ZipArchive<BufReader<File>>),
+}
+
+/// Holds the information necessary to retrieve a file from the `media` directory of a document.
+#[derive(Debug)]
+pub struct MediaStorage(MediaStorageInner);
+
+impl MediaStorage {
+    /// Returns a reader for the file at `path` relative to the `media` directory.
+    pub fn open_file(&mut self, path: impl AsRef<Path>) -> std::io::Result<impl Read> {
+        Ok(match &mut self.0 {
+            MediaStorageInner::Directory(dir_path) => {
+                Either::Left(File::open(dir_path.join(path))?)
+            }
+
+            // `by_path` takes `&mut self`, which is why we have to as well.
+            MediaStorageInner::Archive(archive) => {
+                Either::Right(archive.by_path(Path::new("media").join(path))?)
+            }
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -91,7 +123,9 @@ macro_rules! entry_cursor {
 
 impl Document {
     /// Constructs a `Document` from a zipped note file (typically `.sdocx`) at `path`.
-    pub fn from_zip(path: impl AsRef<Path>) -> Result<Document, DocumentError> {
+    /// A `MediaStorage` providing access to the `media` directory within the zip file is also
+    /// returned; the file is not closed until the `MediaStorage` is dropped.
+    pub fn from_zip(path: impl AsRef<Path>) -> Result<(Document, MediaStorage), DocumentError> {
         let mut archive = ZipArchive::new(BufReader::new(File::open(path)?))?;
 
         let file_registry =
@@ -138,18 +172,22 @@ impl Document {
             &crate::end_tag::NoteSdkType::SPen,
         )?;
 
-        Ok(Document {
-            note,
-            pages,
-            end_tag,
-        })
+        Ok((
+            Document {
+                note,
+                pages,
+                end_tag,
+            },
+            MediaStorage(MediaStorageInner::Archive(archive)),
+        ))
     }
 
-    /// Constructs a `Document` from the contents of the directory at `path`.
+    /// Constructs a `Document` from the contents of the directory at `path`. A `MediaStorage`
+    /// providing access to the contents of the document's `media` directory is also returned.
     ///
     /// The directory could be an extracted `.sdocx`, or possibly an unexported note from the
     /// Windows app.
-    pub fn from_dir(path: impl AsRef<Path>) -> Result<Document, DocumentError> {
+    pub fn from_dir(path: impl AsRef<Path>) -> Result<(Document, MediaStorage), DocumentError> {
         let path: &Path = path.as_ref();
 
         let file_registry =
@@ -198,11 +236,14 @@ impl Document {
             &crate::end_tag::NoteSdkType::SPen,
         )?;
 
-        Ok(Document {
-            note,
-            pages,
-            end_tag,
-        })
+        Ok((
+            Document {
+                note,
+                pages,
+                end_tag,
+            },
+            MediaStorage(MediaStorageInner::Directory(path.to_path_buf())),
+        ))
     }
 
     pub fn pages(&self) -> &[Page] {

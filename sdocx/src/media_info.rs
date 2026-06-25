@@ -21,7 +21,6 @@ pub struct BoundFile {
     is_attached: Option<bool>,
 }
 
-#[expect(dead_code)]
 impl BoundFile {
     pub fn name(&self) -> &str {
         &self.name

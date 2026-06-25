@@ -25,12 +25,29 @@ pub enum PdfDataItemParseError {
     NoSuchFile(#[from] NoSuchRegisteredFileError),
 }
 
+/// A page of a linked PDF file.
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct PdfPage {
     pdf: Rc<BoundFile>,
     page_index: u32,
     rect: Rect,
+}
+
+impl PdfPage {
+    /// Returns the PDF file that this page is from.
+    pub fn file(&self) -> &BoundFile {
+        &self.pdf
+    }
+
+    /// Returns the index of the page displayed.
+    pub const fn page_index(&self) -> u32 {
+        self.page_index
+    }
+
+    /// Returns the rectangle within which the page is displayed.
+    pub const fn rect(&self) -> Rect {
+        self.rect
+    }
 }
 
 impl<R: Read> TryParseWithContext<R, PdfDataItemParseCtx<'_>> for PdfPage {
