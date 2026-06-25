@@ -42,7 +42,7 @@
 )]
 
 use byte_stream::{ByteStreamLe, ReadStringError, TryParse};
-use std::{io::Read, path::Path};
+use std::io::Read;
 use thiserror::Error;
 
 pub use doc::Document;
@@ -135,44 +135,5 @@ impl<R: Read> TryParse<R> for AppVersion {
             minor: reader.read_u32_le()?,
             patch_name: reader.read_short_u16_string()?,
         })
-    }
-}
-
-// #[test]
-pub fn test_all() {
-    let sdocx_paths = [
-        "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Single drawn line fp17, inf scroll_260218_145754.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Has background colour, pattern cover, dots_260218_181735.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Empty, inf scroll_260218_145632.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/empty encrypted_260219_125722.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Typed, formatted text with summary and voice memo_260220_003622.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features_260220_005438.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/uses LOADS of features plus dupes_260220_010554.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/uses handwriting recognition and pages_260220_185052.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/automatic shape recognition_260222_221513.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Shape text_260224_122639.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Maths_260227_150540.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Different pens_260228_134854.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Non Stroke objects_260228_134617.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/web_260303_103930.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/maths objects_260303_110957.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/eraser_260304_103837.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Note replay_260304_170858.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/tilt_test___Notes_260304_194325.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/CAMDOWN__up down left right pressure inc_260304_202617.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Up down left right CAMRIGHT_260304_203137.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/V small shapes_260305_233455.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Normal-sized shapes_260305_234841.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/V small shapes scaled up_260306_132640.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Large diamond_260306_135138.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/fromwindows__V small shapes_260307_000230___meeeeeeeeeeeeee.sdocx",
-    ];
-
-    for path in sdocx_paths {
-        let _zipped = Document::from_zip(path).unwrap();
-        let extracted = Document::from_dir(Path::new(path).with_extension("")).unwrap();
-
-        eprintln!("{extracted:#?}");
     }
 }
