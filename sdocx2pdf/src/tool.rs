@@ -179,10 +179,19 @@ impl Tool {
                 draw_events_straight(events, size, ops);
             }
         } else {
-            let use_arcs = a == 255;
+            let arc_mode = if self.is_like_highlighter() {
+                // Straight ends for highlighter strokes.
+                ArcMode::None
+            } else if a == 255 {
+                // Round ends and nice connections for opaque non-highlighter strokes.
+                ArcMode::All
+            } else {
+                // Round ends only but no interior arcs for translucent non-highlighter strokes.
+                ArcMode::FirstLastOnly
+            };
 
             for events in strokes {
-                draw_events_basic(events, size, use_arcs, ops);
+                draw_events_basic(events, size, arc_mode, ops);
             }
         }
 
@@ -265,6 +274,340 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
     0.5 * pen_size * pressure.clamp(0.4, 0.7)
 }
 
+fn draw_bezier_pulley(
+    points_tangents_radii: [(PdfPoint, PdfVector, f64); 4],
+    draw_arcs: bool,
+    last_segment_tan: &mut Option<PdfVector>,
+    ops: &mut Vec<printpdf::Op>,
+) -> Result<(), ()> {
+    let [
+        (start_pos, start_tangent, start_spread),
+        (pos_first_third, tangent_first_third, spread_first_third),
+        (pos_second_third, tangent_second_third, spread_second_third),
+        (end_pos, end_tangent, end_spread),
+    ] = points_tangents_radii;
+
+    let (
+        scaled_tangent_start,
+        scaled_tangent_first_third,
+        scaled_tangent_second_third,
+        scaled_tangent_end,
+    ) = (
+        start_tangent * start_spread,
+        tangent_first_third * spread_first_third,
+        tangent_second_third * spread_second_third,
+        end_tangent * end_spread,
+    );
+
+    if !scaled_tangent_start.is_finite()
+        || !scaled_tangent_first_third.is_finite()
+        || !scaled_tangent_second_third.is_finite()
+        || !scaled_tangent_end.is_finite()
+    {
+        return Err(());
+    }
+
+    let start_to_first_third = (pos_first_third - start_pos).normalize();
+
+    // If the computed start direction is in opposition to the direction to the
+    // first third position, use the latter for the tangent so we aren't going back
+    // on ourselves. `start_to_first_third` should be finite, but we check the
+    // partial ordering so that if it is not, we retain the current finite tangent.
+    let scaled_tangent_start = if let Some(std::cmp::Ordering::Less) = scaled_tangent_start
+        .dot(start_to_first_third)
+        .partial_cmp(&0.0)
+    {
+        start_to_first_third * start_spread
+    } else {
+        scaled_tangent_start
+    };
+
+    let bottom_left = start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
+
+    let bottom_right = start_pos + Vector2D::new(scaled_tangent_start.y, -scaled_tangent_start.x);
+
+    let lower_mid_left = pos_first_third
+        + Vector2D::new(-scaled_tangent_first_third.y, scaled_tangent_first_third.x);
+
+    let lower_mid_right = pos_first_third
+        + Vector2D::new(scaled_tangent_first_third.y, -scaled_tangent_first_third.x);
+
+    let upper_mid_left = pos_second_third
+        + Vector2D::new(
+            -scaled_tangent_second_third.y,
+            scaled_tangent_second_third.x,
+        );
+
+    let upper_mid_right = pos_second_third
+        + Vector2D::new(
+            scaled_tangent_second_third.y,
+            -scaled_tangent_second_third.x,
+        );
+
+    let top_left = end_pos + Vector2D::new(-scaled_tangent_end.y, scaled_tangent_end.x);
+
+    let top_right = end_pos + Vector2D::new(scaled_tangent_end.y, -scaled_tangent_end.x);
+
+    let (cp_lower_mid_left, cp_upper_mid_left) =
+        bezier_control_pts_for_intersections(bottom_left, top_left, lower_mid_left, upper_mid_left);
+
+    let (cp_upper_mid_right, cp_lower_mid_right) = bezier_control_pts_for_intersections(
+        top_right,
+        bottom_right,
+        upper_mid_right,
+        lower_mid_right,
+    );
+
+    let bottom_to_top_left_points = [
+        pdf_point_to_line_point(bottom_left),
+        pdf_point_to_control_point(cp_lower_mid_left),
+        pdf_point_to_control_point(cp_upper_mid_left),
+        pdf_point_to_line_point(top_left),
+    ];
+
+    let top_to_bottom_right_points = [
+        pdf_point_to_line_point(top_right),
+        pdf_point_to_control_point(cp_upper_mid_right),
+        pdf_point_to_control_point(cp_lower_mid_right),
+        pdf_point_to_line_point(bottom_right),
+    ];
+
+    let bottom_arc_lowest = start_pos - scaled_tangent_start;
+    let top_arc_highest = end_pos + scaled_tangent_end;
+
+    let points = if let Some((
+        top_left_to_arc_highest_cps,
+        top_arc_highest_to_right_cps,
+        bottom_right_to_arc_lowest_cps,
+        bottom_arc_lowest_to_left_cps,
+    )) = draw_arcs
+        .then(|| {
+            // If we can't calculate the control points for all four arcs, we won't
+            // draw any of them. This is like a short-circuiting four-way zip that
+            // either gives us `None` or a tuple containing all of the control
+            // points.
+            bezier_arc_control_points(top_left, top_arc_highest, end_pos).and_then(|a| {
+                bezier_arc_control_points(top_arc_highest, top_right, end_pos).and_then(|b| {
+                    bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos).and_then(
+                        |c| {
+                            bezier_arc_control_points(bottom_arc_lowest, bottom_left, start_pos)
+                                .map(|d| (a, b, c, d))
+                        },
+                    )
+                })
+            })
+        })
+        .flatten()
+    {
+        // Points from bottom left to top left
+        bottom_to_top_left_points
+            .into_iter()
+            // Control points for top left arc
+            .chain(top_left_to_arc_highest_cps.map(pdf_point_to_control_point))
+            // Common point for top arcs
+            .chain(std::iter::once(pdf_point_to_line_point(top_arc_highest)))
+            // Control points for top right arc
+            .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
+            // Points from top right to bottom right
+            .chain(top_to_bottom_right_points)
+            .chain({
+                let it = if last_segment_tan.is_none_or(|tangent| {
+                    tangent.angle_to(scaled_tangent_start).radians.abs() > f64::to_radians(20.0)
+                }) {
+                    // Either this is the first segment, in which case we need to
+                    // round the beginning, or there is a significant difference in
+                    // tangent angle between the final third of the previous segment
+                    // and the start of this one. In the latter case, we round the
+                    // beginning to make the connection look cleaner.
+                    Some(
+                        // Control points for bottom right arc
+                        bottom_right_to_arc_lowest_cps
+                            .map(pdf_point_to_control_point)
+                            .into_iter()
+                            // Common point for bottom arcs
+                            .chain(std::iter::once(pdf_point_to_line_point(bottom_arc_lowest)))
+                            // Control points for bottom left arc
+                            .chain(bottom_arc_lowest_to_left_cps.map(pdf_point_to_control_point))
+                            // Bottom left point (again - this time, to complete
+                            // the curve)
+                            .chain(std::iter::once(pdf_point_to_line_point(bottom_left))),
+                    )
+                } else {
+                    None
+                }
+                .into_iter()
+                .flatten();
+
+                *last_segment_tan = Some(end_pos - pos_second_third);
+
+                it
+            })
+            .collect_vec()
+    } else {
+        bottom_to_top_left_points
+            .into_iter()
+            .chain(top_to_bottom_right_points)
+            .collect_vec()
+    };
+
+    ops.extend([printpdf::Op::DrawPolygon {
+        polygon: printpdf::Polygon {
+            rings: vec![printpdf::PolygonRing { points }],
+            mode: printpdf::PaintMode::Fill,
+            winding_order: printpdf::WindingOrder::NonZero,
+        },
+    }]);
+
+    Ok(())
+}
+
+fn calc_pulley_line_points_acw_from_lower_right(
+    c1: PdfPoint,
+    r1: f64,
+    c2: PdfPoint,
+    r2: f64,
+) -> Option<[PdfPoint; 4]> {
+    let d = c1.distance_to(c2);
+
+    if d == 0.0 {
+        return None;
+    }
+
+    let alpha = (c2 - c1).angle_from_x_axis().radians;
+    let beta = ((r1 - r2) / d).acos();
+
+    if !beta.is_finite() {
+        // (r1-r2)/d is not in [-1,1], i.e. one circle is inside the other.
+        return None;
+    }
+
+    let (apb_s, apb_c) = (alpha + beta).sin_cos();
+    let (amb_s, amb_c) = (alpha - beta).sin_cos();
+
+    let apb = PdfVector::new(apb_c, apb_s);
+    let amb = PdfVector::new(amb_c, amb_s);
+
+    let right_start = c1 + amb * r1;
+    let right_end = c2 + amb * r2;
+
+    let left_start = c2 + apb * r2;
+    let left_end = c1 + apb * r1;
+
+    Some([right_start, right_end, left_start, left_end])
+}
+
+fn draw_simple_pulley(
+    [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
+    use_arcs: bool,
+    ops: &mut Vec<printpdf::Op>,
+) -> Result<(), ()> {
+    let [a_right, b_right, b_left, a_left] =
+        calc_pulley_line_points_acw_from_lower_right(a, radius_a, b, radius_b).ok_or(())?;
+
+    let direction = (b - a).normalize();
+
+    if !direction.is_finite() {
+        return Err(());
+    }
+
+    let points = if use_arcs {
+        let a_arc_midpoint = a - direction * radius_a;
+        let b_arc_midpoint = b + direction * radius_b;
+
+        let [b_right_arc_cp1, b_right_arc_cp2] =
+            bezier_arc_control_points(b_right, b_arc_midpoint, b).ok_or(())?;
+        let [b_left_arc_cp1, b_left_arc_cp2] =
+            bezier_arc_control_points(b_arc_midpoint, b_left, b).ok_or(())?;
+        let [a_left_arc_cp1, a_left_arc_cp2] =
+            bezier_arc_control_points(a_left, a_arc_midpoint, a).ok_or(())?;
+        let [a_right_arc_cp1, a_right_arc_cp2] =
+            bezier_arc_control_points(a_arc_midpoint, a_right, a).ok_or(())?;
+
+        vec![
+            pdf_point_to_line_point(b_right),
+            pdf_point_to_control_point(b_right_arc_cp1),
+            pdf_point_to_control_point(b_right_arc_cp2),
+            pdf_point_to_line_point(b_arc_midpoint),
+            pdf_point_to_control_point(b_left_arc_cp1),
+            pdf_point_to_control_point(b_left_arc_cp2),
+            pdf_point_to_line_point(b_left),
+            pdf_point_to_line_point(a_left),
+            pdf_point_to_control_point(a_left_arc_cp1),
+            pdf_point_to_control_point(a_left_arc_cp2),
+            pdf_point_to_line_point(a_arc_midpoint),
+            pdf_point_to_control_point(a_right_arc_cp1),
+            pdf_point_to_control_point(a_right_arc_cp2),
+            pdf_point_to_line_point(a_right),
+        ]
+    } else {
+        vec![
+            pdf_point_to_line_point(b_right),
+            pdf_point_to_line_point(b_left),
+            pdf_point_to_line_point(a_left),
+            pdf_point_to_line_point(a_right),
+        ]
+    };
+
+    ops.extend([
+        printpdf::Op::SaveGraphicsState,
+        printpdf::Op::DrawPolygon {
+            polygon: printpdf::Polygon {
+                rings: vec![printpdf::PolygonRing { points }],
+                mode: printpdf::PaintMode::Fill,
+                winding_order: printpdf::WindingOrder::NonZero,
+            },
+        },
+        printpdf::Op::RestoreGraphicsState,
+    ]);
+
+    Ok(())
+}
+
+fn draw_simple_line(
+    [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
+    round_ends: bool,
+    ops: &mut Vec<printpdf::Op>,
+) {
+    ops.extend([
+        printpdf::Op::SaveGraphicsState,
+        if round_ends {
+            printpdf::Op::SetLineCapStyle {
+                cap: printpdf::LineCapStyle::Round,
+            }
+        } else {
+            printpdf::Op::SetLineCapStyle {
+                cap: printpdf::LineCapStyle::Butt,
+            }
+        },
+        printpdf::Op::SetOutlineThickness {
+            // If this were a radius we'd take the mean of the two radii supplied, but as it's the
+            // full line width, we'd be multiplying the mean radius by two anyway.
+            pt: Mm((radius_a + radius_b) as f32).into(),
+        },
+        printpdf::Op::DrawLine {
+            line: printpdf::Line {
+                points: vec![pdf_point_to_line_point(a), pdf_point_to_line_point(b)],
+                is_closed: false,
+            },
+        },
+        printpdf::Op::RestoreGraphicsState,
+    ]);
+
+    // todo: Draw line with width equal to the smaller radius and add a dot for the bigger radius?
+}
+
+#[derive(Clone, Copy)]
+enum ArcMode {
+    /// Do not draw any arcs.
+    None,
+
+    /// Draw arcs only on the first and last segments of the stroke.
+    FirstLastOnly,
+
+    /// Draw arcs on all segments.
+    All,
+}
+
 /// Draws `events` into `ops` using the basic unmodified stroke segmentation algorithm and a simple
 /// pressure-to-width conversion based on `pen_size`.
 ///
@@ -280,7 +623,7 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
 fn draw_events_basic<'e>(
     events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
-    use_arcs: bool,
+    arc_mode: ArcMode,
     ops: &mut Vec<printpdf::Op>,
 ) {
     let pen_size: f64 = pen_size.into();
@@ -318,218 +661,124 @@ fn draw_events_basic<'e>(
     let target_angle = f64::to_radians(40.0);
     let sample_arc_lengths = smooth.sample_points(target_angle);
 
-    let mut tangent_at_connection: Option<PdfVector> = None;
+    let mut last_segment_tan: Option<PdfVector> = None;
 
-    for (s_start, s_end) in sample_arc_lengths.tuple_windows() {
-        let start_pos: PdfPoint = smooth.position(s_start).into();
-        let end_pos: PdfPoint = smooth.position(s_end).into();
+    for (iter_pos, (start_s, end_s)) in sample_arc_lengths.tuple_windows().with_position() {
+        let start_pos: PdfPoint = smooth.position(start_s).into();
+        let end_pos: PdfPoint = smooth.position(end_s).into();
 
-        let start_pressure = smooth.pressure(s_start);
-        let end_pressure = smooth.pressure(s_end);
+        let start_spread = pressure_to_circle_radius(smooth.pressure(start_s), pen_size);
+        let end_spread = pressure_to_circle_radius(smooth.pressure(end_s), pen_size);
 
-        let s_first_third = s_start.lerp(s_end, 1.0 / 3.0);
-        let s_second_third = s_start.lerp(s_end, 2.0 / 3.0);
+        let visual_length = 0.5 * start_spread + (end_pos - start_pos).length() + 0.5 * end_spread;
 
-        let (pressure_first_third, pressure_second_third) = (
-            smooth.pressure(s_first_third),
-            smooth.pressure(s_second_third),
-        );
+        let is_very_short =
+            visual_length < start_spread.max(end_spread) + start_spread.min(end_spread) * 0.1;
 
-        let start_spread = pressure_to_circle_radius(start_pressure, pen_size);
-        let spread_first_third = pressure_to_circle_radius(pressure_first_third, pen_size);
-        let spread_second_third = pressure_to_circle_radius(pressure_second_third, pen_size);
-        let end_spread = pressure_to_circle_radius(end_pressure, pen_size);
+        let is_quite_short = is_very_short || visual_length < start_spread + end_spread;
 
-        let (
-            scaled_tangent_start,
-            scaled_tangent_first_third,
-            scaled_tangent_second_third,
-            scaled_tangent_end,
-        ) = (
-            {
-                let tangent = PdfVector::from(smooth.unit_tangent(s_start)).normalize();
-
-                if tangent.is_finite() {
-                    tangent
-                } else {
-                    (end_pos - start_pos).normalize()
-                }
-            } * start_spread,
-            PdfVector::from(smooth.unit_tangent(s_first_third)).normalize() * spread_first_third,
-            PdfVector::from(smooth.unit_tangent(s_second_third)).normalize() * spread_second_third,
-            {
-                let tangent = PdfVector::from(smooth.unit_tangent(s_end)).normalize();
-
-                if tangent.is_finite() {
-                    tangent
-                } else {
-                    (end_pos - start_pos).normalize()
-                }
-            } * end_spread,
-        );
-
-        // todo: Handle the case where this assertion fails.
-        assert!(
-            scaled_tangent_start.is_finite()
-                && scaled_tangent_first_third.is_finite()
-                && scaled_tangent_second_third.is_finite()
-                && scaled_tangent_end.is_finite()
-        );
-
-        let (pos_first_third, pos_second_third) = (
-            PdfPoint::from(smooth.position(s_first_third)),
-            PdfPoint::from(smooth.position(s_second_third)),
-        );
-
-        let start_to_first_third = (pos_first_third - start_pos).normalize();
-
-        // If the computed start direction is in opposition to the direction to the
-        // first third position, use the latter for the tangent so we aren't going back
-        // on ourselves. `start_to_first_third` should be finite, but we check the
-        // partial ordering so that if it is not, we retain the current finite tangent.
-        let scaled_tangent_start = if let Some(std::cmp::Ordering::Less) = scaled_tangent_start
-            .dot(start_to_first_third)
-            .partial_cmp(&0.0)
-        {
-            start_to_first_third * start_spread
-        } else {
-            scaled_tangent_start
+        let want_arcs = match arc_mode {
+            ArcMode::All => true,
+            ArcMode::FirstLastOnly => !matches!(iter_pos, itertools::Position::Middle),
+            ArcMode::None => false,
         };
 
-        let bottom_left =
-            start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
+        // If the segment is not short, try drawing a Bézier pulley. If that doesn't work, or
+        // if the segment is short, use a simpler method.
+        if is_quite_short
+            || draw_bezier_pulley(
+                {
+                    let first_third_s = start_s.lerp(end_s, 1.0 / 3.0);
+                    let second_third_s = start_s.lerp(end_s, 2.0 / 3.0);
 
-        let bottom_right =
-            start_pos + Vector2D::new(scaled_tangent_start.y, -scaled_tangent_start.x);
+                    let first_third_pos: PdfPoint = smooth.position(first_third_s).into();
+                    let second_third_pos: PdfPoint = smooth.position(second_third_s).into();
 
-        let lower_mid_left = pos_first_third
-            + Vector2D::new(-scaled_tangent_first_third.y, scaled_tangent_first_third.x);
-
-        let lower_mid_right = pos_first_third
-            + Vector2D::new(scaled_tangent_first_third.y, -scaled_tangent_first_third.x);
-
-        let upper_mid_left = pos_second_third
-            + Vector2D::new(
-                -scaled_tangent_second_third.y,
-                scaled_tangent_second_third.x,
-            );
-
-        let upper_mid_right = pos_second_third
-            + Vector2D::new(
-                scaled_tangent_second_third.y,
-                -scaled_tangent_second_third.x,
-            );
-
-        let top_left = end_pos + Vector2D::new(-scaled_tangent_end.y, scaled_tangent_end.x);
-
-        let top_right = end_pos + Vector2D::new(scaled_tangent_end.y, -scaled_tangent_end.x);
-
-        let (cp_lower_mid_left, cp_upper_mid_left) = bezier_control_pts_for_intersections(
-            bottom_left,
-            top_left,
-            lower_mid_left,
-            upper_mid_left,
-        );
-
-        let (cp_upper_mid_right, cp_lower_mid_right) = bezier_control_pts_for_intersections(
-            top_right,
-            bottom_right,
-            upper_mid_right,
-            lower_mid_right,
-        );
-
-        let bottom_to_top_left_points = [
-            pdf_point_to_line_point(bottom_left),
-            pdf_point_to_control_point(cp_lower_mid_left),
-            pdf_point_to_control_point(cp_upper_mid_left),
-            pdf_point_to_line_point(top_left),
-        ];
-
-        let top_to_bottom_right_points = [
-            pdf_point_to_line_point(top_right),
-            pdf_point_to_control_point(cp_upper_mid_right),
-            pdf_point_to_control_point(cp_lower_mid_right),
-            pdf_point_to_line_point(bottom_right),
-        ];
-
-        let bottom_arc_lowest = start_pos - scaled_tangent_start;
-        let top_arc_highest = end_pos + scaled_tangent_end;
-
-        let points = if let Some((
-            top_left_to_arc_highest_cps,
-            top_arc_highest_to_right_cps,
-            bottom_right_to_arc_lowest_cps,
-            bottom_arc_lowest_to_left_cps,
-        )) = use_arcs
-            .then(|| {
-                // If we can't calculate the control points for all four arcs, we won't
-                // draw any of them. This is like a short-circuiting four-way zip that
-                // either gives us `None` or a tuple containing all of the control
-                // points.
-                bezier_arc_control_points(top_left, top_arc_highest, end_pos).and_then(|a| {
-                    bezier_arc_control_points(top_arc_highest, top_right, end_pos).and_then(|b| {
-                        bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos)
-                            .and_then(|c| {
-                                bezier_arc_control_points(bottom_arc_lowest, bottom_left, start_pos)
-                                    .map(|d| (a, b, c, d))
-                            })
-                    })
-                })
-            })
-            .flatten()
+                    [
+                        (
+                            start_pos,
+                            Some(PdfVector::from(smooth.unit_tangent(start_s)).normalize())
+                                .filter(|v| v.is_finite())
+                                .unwrap_or_else(|| (first_third_pos - start_pos).normalize()),
+                            start_spread,
+                        ),
+                        (
+                            first_third_pos,
+                            Some(PdfVector::from(smooth.unit_tangent(first_third_s)).normalize())
+                                .filter(|v| v.is_finite())
+                                // Note that we use the same fallback tangent for both middle
+                                // thirds.
+                                .unwrap_or_else(|| {
+                                    (second_third_pos - first_third_pos).normalize()
+                                }),
+                            pressure_to_circle_radius(smooth.pressure(first_third_s), pen_size),
+                        ),
+                        (
+                            second_third_pos,
+                            Some(PdfVector::from(smooth.unit_tangent(second_third_s)).normalize())
+                                .filter(|v| v.is_finite())
+                                .unwrap_or_else(|| {
+                                    (second_third_pos - first_third_pos).normalize()
+                                }),
+                            pressure_to_circle_radius(smooth.pressure(second_third_s), pen_size),
+                        ),
+                        (
+                            end_pos,
+                            Some(PdfVector::from(smooth.unit_tangent(end_s)).normalize())
+                                .filter(|v| v.is_finite())
+                                .unwrap_or_else(|| (end_pos - second_third_pos).normalize()),
+                            end_spread,
+                        ),
+                    ]
+                },
+                want_arcs,
+                &mut last_segment_tan,
+                ops,
+            )
+            .is_err()
         {
-            // Points from bottom left to top left
-            bottom_to_top_left_points
-                .into_iter()
-                // Control points for top left arc
-                .chain(top_left_to_arc_highest_cps.map(pdf_point_to_control_point))
-                // Common point for top arcs
-                .chain(std::iter::once(pdf_point_to_line_point(top_arc_highest)))
-                // Control points for top right arc
-                .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
-                // Points from top right to bottom right
-                .chain(top_to_bottom_right_points)
-                .chain({
-                    let it = if tangent_at_connection.is_none_or(|tangent| {
-                        tangent.angle_to(scaled_tangent_start).radians.abs() > f64::to_radians(20.0)
-                    }) {
-                        // Either this is the first segment, in which case we need to
-                        // round the beginning, or there is a significant difference in
-                        // tangent angle between the final third of the previous segment
-                        // and the start of this one. In the latter case, we round the
-                        // beginning to make the connection look cleaner.
-                        Some(
-                            // Control points for bottom right arc
-                            bottom_right_to_arc_lowest_cps
-                                .map(pdf_point_to_control_point)
-                                .into_iter()
-                                // Common point for bottom arcs
-                                .chain(std::iter::once(pdf_point_to_line_point(bottom_arc_lowest)))
-                                // Control points for bottom left arc
-                                .chain(
-                                    bottom_arc_lowest_to_left_cps.map(pdf_point_to_control_point),
-                                )
-                                // Bottom left point (again - this time, to complete
-                                // the curve)
-                                .chain(std::iter::once(pdf_point_to_line_point(bottom_left))),
-                        )
-                    } else {
-                        None
-                    }
-                    .into_iter()
-                    .flatten();
+            last_segment_tan = Some(end_pos - start_pos);
 
-                    tangent_at_connection = Some(end_pos - pos_second_third);
+            let points = [(start_pos, start_spread), (end_pos, end_spread)];
 
-                    it
-                })
-                .collect_vec()
-        } else {
-            bottom_to_top_left_points
-                .into_iter()
-                .chain(top_to_bottom_right_points)
-                .collect_vec()
-        };
+            // If the segment is quite short but not very short, try drawing a simple pulley.
+            // If that doesn't work, or if the segment is very short, draw a simple line.
+            if is_very_short || draw_simple_pulley(points, want_arcs, ops).is_err() {
+                draw_simple_line(points, want_arcs, ops);
+            }
+        }
+
+        // let s_first_third = start_s.lerp(end_s, 1.0 / 3.0);
+        // let s_second_third = start_s.lerp(end_s, 2.0 / 3.0);
+
+        // let (pressure_first_third, pressure_second_third) = (
+        //     smooth.pressure(s_first_third),
+        //     smooth.pressure(s_second_third),
+        // );
+
+        // let spread_first_third = pressure_to_circle_radius(pressure_first_third, pen_size);
+        // let spread_second_third = pressure_to_circle_radius(pressure_second_third, pen_size);
+
+        // {
+        //     let tangent = PdfVector::from(smooth.unit_tangent(s_start)).normalize();
+
+        //     if tangent.is_finite() {
+        //         tangent
+        //     } else {
+        //         (end_pos - start_pos).normalize()
+        //     }
+        // } * start_spread,
+        // PdfVector::from(smooth.unit_tangent(s_first_third)).normalize() * spread_first_third,
+        // PdfVector::from(smooth.unit_tangent(s_second_third)).normalize() * spread_second_third,
+        // {
+        //     let tangent = PdfVector::from(smooth.unit_tangent(s_end)).normalize();
+
+        //     if tangent.is_finite() {
+        //         tangent
+        //     } else {
+        //         (end_pos - start_pos).normalize()
+        //     }
+        // } * end_spread,
 
         // let true_angle = scaled_tangent_start
         //     .angle_to(scaled_tangent_end)
@@ -551,25 +800,6 @@ fn draw_events_basic<'e>(
         //     // },
         //     None,
         // ));
-
-        ops.extend([
-            // Op::SetFillColor { col: col.clone() },
-            // Op::SetOutlineColor { col },
-            // Op::SetOutlineThickness {
-            //     pt: Mm(0.05).into(),
-            // },
-            printpdf::Op::DrawPolygon {
-                polygon: printpdf::Polygon {
-                    rings: vec![printpdf::PolygonRing { points }],
-                    mode: printpdf::PaintMode::Fill,
-                    winding_order: printpdf::WindingOrder::NonZero,
-                },
-            },
-            // // Set things up for drawing the points of interest.
-            // Op::SetLineCapStyle {
-            //     cap: printpdf::LineCapStyle::Round,
-            // },
-        ]);
 
         // page_contents.extend(smooth.features().into_iter().flat_map(|feature| {
         //     let s = feature.arc_length();
