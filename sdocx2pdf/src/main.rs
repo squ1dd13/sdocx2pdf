@@ -1,5 +1,6 @@
-use std::{collections::HashMap, os::unix::fs::MetadataExt};
+use std::{collections::HashMap, os::unix::fs::MetadataExt, time::Duration};
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use num::ToPrimitive;
 use printpdf::{Mm, PdfDocument, PdfPage, PdfSaveOptions};
@@ -10,17 +11,16 @@ mod stroke;
 mod tool;
 
 fn main() {
-    // sdocx::test_all();
-
     let document = sdocx::Document::from_zip(
         // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Nearly empty but long inf scroll_260624_170445.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145202.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145950_has_empty_page.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_150246_with_explicit_blank_page_last.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Much handwriting on pages_260625_184756.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Paged with handwriting_260624_142215.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/long page with rotated squiggle_260624_155155.sdocx",
     )
@@ -46,7 +46,24 @@ fn main() {
         }
     };
 
+    let multi_progress = MultiProgress::new();
+
+    // Only show a progress bar for the pages if there is more than one.
+    let pages_bar = if let page_count @ 2.. = document.pages().len() as u64 {
+        Some(
+            multi_progress.add(ProgressBar::new(page_count)).with_style(
+                ProgressStyle::with_template("Processing pages   [{bar:40}] [{pos}/{len}]")
+                    .unwrap()
+                    .progress_chars("# "),
+            ),
+        )
+    } else {
+        None
+    };
+
     for (pos, page) in document.pages().iter().with_position() {
+        pages_bar.as_ref().inspect(|pb| pb.inc(1));
+
         // For paged documents, there is a ghost page in the sdocx that is not represented in the
         // raster PDF. We ignore it too.
         if !pageless && matches!(pos, itertools::Position::Last) && page.is_empty() {
@@ -115,13 +132,26 @@ fn main() {
 
         for layer in page.layers() {
             let objects = layer.objects();
-            let obj_count = objects.len() as f64;
             let mut strokes_handled = 0;
 
-            let strokes = objects.iter().filter_map(|obj| match obj {
-                sdocx::DocObject::Stroke(stroke) => Some(stroke),
-                _ => None,
-            });
+            let objects_bar = multi_progress
+                .add(ProgressBar::new(objects.len() as _))
+                .with_style(
+                    ProgressStyle::with_template(
+                        "Processing objects [{bar:40}] {percent}% [{pos}/{len}]",
+                    )
+                    .unwrap()
+                    .progress_chars("# "),
+                );
+
+            let strokes =
+                objects
+                    .iter()
+                    .inspect(|_| objects_bar.inc(1))
+                    .filter_map(|obj| match obj {
+                        sdocx::DocObject::Stroke(stroke) => Some(stroke),
+                        _ => None,
+                    });
 
             let strokes_by_tool = strokes.chunk_by(|stroke| Tool::for_stroke(stroke));
 
@@ -140,15 +170,6 @@ fn main() {
                     &mut page_contents,
                 )
                 .unwrap();
-
-                // Number of strokes handled over the number of objects in total isn't an ideal
-                // progress indicator, but it will do for now.
-                eprintln!(
-                    "Processing strokes: {:.1}% complete ({} strokes of {} objects)",
-                    (strokes_handled as f64 / obj_count) * 100.0,
-                    strokes_handled,
-                    obj_count
-                );
             }
         }
 
@@ -156,14 +177,28 @@ fn main() {
             .push(PdfPage::new(Mm(page_w_mm), Mm(page_h_mm), page_contents));
     }
 
+    let _ = multi_progress.clear();
+
+    let write_spinner = ProgressBar::no_length()
+        .with_style(
+            ProgressStyle::with_template("{spinner} {wide_msg}")
+                .unwrap()
+                .tick_chars("-\\|/ "),
+        )
+        .with_message("Constructing PDF");
+
+    write_spinner.enable_steady_tick(Duration::from_millis(130));
+
     let mut warnings = vec![];
     let bytes = pdf.save(&PdfSaveOptions::default(), &mut warnings);
 
-    eprintln!("Warnings: {warnings:#?}");
+    let out_path = "/tmp/doc.pdf";
 
-    std::fs::write("/tmp/doc.pdf", &bytes).unwrap();
+    write_spinner.set_message(format!("Writing to '{out_path}'"));
+
+    std::fs::write(out_path, &bytes).unwrap();
 
     let mb = f64::from(std::fs::metadata("/tmp/doc.pdf").unwrap().size() as u32) / 1000000f64;
-
+    write_spinner.finish_and_clear();
     eprintln!("{mb} MB");
 }

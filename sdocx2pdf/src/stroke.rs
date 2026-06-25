@@ -383,11 +383,12 @@ impl ContinuousStroke {
         // Gaussian filters we apply to smooth the data, because we need the array indices to be
         // proportional to the time in order for the index-based Gaussian filter to be meaningful.
         let t_samples = {
-            let mut t_us = scirs2_core::Array1::linspace(
+            let mut t_us = ndarray::linspace(
                 t_start,
                 t_end,
                 t_arr_v.len() * (TIME_UPSAMPLING_RATIO as usize),
-            );
+            )
+            .collect_vec();
 
             // `linspace` calculates the final value instead of setting it exactly, so sometimes it
             // is slightly greater than the end time we gave it. This causes an error when fed into
@@ -398,10 +399,12 @@ impl ContinuousStroke {
             t_us
         };
 
+        let t_samples_view: ArrayView1<f64> = (&t_samples).into();
+
         // Upsample.
-        let xt_us = xt.evaluate_array(&t_samples.view()).unwrap();
-        let yt_us = yt.evaluate_array(&t_samples.view()).unwrap();
-        let pt_us = pt.evaluate_array(&t_samples.view()).unwrap();
+        let xt_us = xt.evaluate_array(&t_samples_view).unwrap();
+        let yt_us = yt.evaluate_array(&t_samples_view).unwrap();
+        let pt_us = pt.evaluate_array(&t_samples_view).unwrap();
 
         // Filter the upsampled data. We also take derivatives here so we can calculate curvature.
         let (
