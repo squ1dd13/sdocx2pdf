@@ -1,18 +1,17 @@
 use std::rc::Rc;
 
 use euclid::{Point2D, Vector2D};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use lerp::Lerp;
+use lopdf::dictionary;
 use ordered_float::OrderedFloat;
-use printpdf::{BlendMode, ExtendedGraphicsState, ExtendedGraphicsStateId, LinePoint, Mm, Rgb};
 use sdocx::page::object::stroke::{Event, Stroke};
 use thiserror::Error;
 
-use crate::stroke::{ContinuousStroke, StrokeOrDot};
-
-struct PdfSpace;
-type PdfPoint = Point2D<f64, PdfSpace>;
-type PdfVector = Vector2D<f64, PdfSpace>;
+use crate::{
+    op_gen::{self, PdfPoint, PdfVector, PolygonDrawMode, WindingRule},
+    stroke::{ContinuousStroke, StrokeOrDot},
+};
 
 /// Basic information used by all tools.
 ///
@@ -122,57 +121,59 @@ impl Tool {
         matches!(self, Tool::StraightHighlighter(_) | Tool::StraightMarker(_))
     }
 
-    pub fn create_egs(&self) -> ExtendedGraphicsState {
-        let mut egs = ExtendedGraphicsState::default().with_line_cap(printpdf::LineCapStyle::Round);
+    pub fn create_egs(&self) -> lopdf::Dictionary {
+        // fixme: Units
+        let mut dict = lopdf::dictionary! {
+            "Type" => "ExtGState",
+            // Round line cap style
+            "LC" => 1,
+        };
 
         let alpha = self.basics().colour_bgra[3];
 
         if alpha != 255 {
             let alpha = (alpha as f32) / 255.0;
 
-            egs.set_current_fill_alpha(alpha);
-            egs.set_current_stroke_alpha(alpha);
+            // Stroke alpha
+            dict.set("CA", alpha);
+            // Fill alpha
+            dict.set("ca", alpha);
 
             if self.is_like_highlighter() {
-                egs.set_blend_mode(BlendMode::multiply());
+                // Multiply blend mode
+                dict.set("BM", lopdf::Object::Name(b"Multiply".to_vec()));
             }
         }
 
-        // todo: Soft mask for pencil
-        // (I don't think it can work with `printpdf` because the soft mask in EGS doesn't let us
-        // provide dimensions for the mask we're using, which doesn't make much sense)
+        // todo: Soft masks for pencil and calligraphy brush
 
-        egs
+        dict
     }
 
     /// Extends `ops` with the necessary operations to draw each slice of stroke events in
     /// `strokes` using this tool. The strokes are drawn in order.
     pub fn draw_events<'e>(
         &self,
-        egs_id: &ExtendedGraphicsStateId,
+        egs_name: &str,
         strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
-        ops: &mut Vec<printpdf::Op>,
+        ops: &mut Vec<lopdf::content::Operation>,
     ) -> Result<(), ()> {
         let &Basics {
             size: OrderedFloat(size),
             colour_bgra: [b, g, r, a],
         } = self.basics();
 
-        let colour = printpdf::Color::Rgb(Rgb::new(
-            (r as f32) / 255.0,
-            (g as f32) / 255.0,
-            (b as f32) / 255.0,
-            None,
-        ));
-
         ops.extend([
-            printpdf::Op::SaveGraphicsState,
-            printpdf::Op::LoadGraphicsState { gs: egs_id.clone() },
-            printpdf::Op::SetFillColor {
-                col: colour.clone(),
-            },
-            printpdf::Op::SetOutlineColor { col: colour },
+            op_gen::save_graphics_state(),
+            op_gen::load_graphics_state(egs_name),
+            op_gen::set_fill_colour(r, g, b),
+            op_gen::set_stroke_colour(r, g, b),
         ]);
+
+        // todo: Draw translucent strokes by filling the stroke's bounding box and clipping
+        // That should work perfectly if the colour is uniform along the stroke. It won't allow
+        // us to vary the colour along the stroke (e.g., for the pencil with variable opacity),
+        // but even then it's better than the current system.
 
         if self.is_straight_only() {
             for events in strokes {
@@ -195,29 +196,9 @@ impl Tool {
             }
         }
 
-        ops.push(printpdf::Op::RestoreGraphicsState);
+        ops.push(op_gen::restore_graphics_state());
 
         Ok(())
-    }
-}
-
-fn pdf_point_to_line_point(point: PdfPoint) -> LinePoint {
-    LinePoint {
-        p: printpdf::Point {
-            x: Mm(point.x as f32).into(),
-            y: Mm(point.y as f32).into(),
-        },
-        bezier: false,
-    }
-}
-
-fn pdf_point_to_control_point(point: PdfPoint) -> LinePoint {
-    LinePoint {
-        p: printpdf::Point {
-            x: Mm(point.x as f32).into(),
-            y: Mm(point.y as f32).into(),
-        },
-        bezier: true,
     }
 }
 
@@ -278,7 +259,7 @@ fn draw_bezier_pulley(
     points_tangents_radii: [(PdfPoint, PdfVector, f64); 4],
     draw_arcs: bool,
     last_segment_tan: &mut Option<PdfVector>,
-    ops: &mut Vec<printpdf::Op>,
+    ops: &mut Vec<lopdf::content::Operation>,
 ) -> Result<(), ()> {
     let [
         (start_pos, start_tangent, start_spread),
@@ -358,18 +339,20 @@ fn draw_bezier_pulley(
         lower_mid_right,
     );
 
+    use op_gen::PolygonPoint::{Control, Normal};
+
     let bottom_to_top_left_points = [
-        pdf_point_to_line_point(bottom_left),
-        pdf_point_to_control_point(cp_lower_mid_left),
-        pdf_point_to_control_point(cp_upper_mid_left),
-        pdf_point_to_line_point(top_left),
+        Normal(bottom_left),
+        Control(cp_lower_mid_left),
+        Control(cp_upper_mid_left),
+        Normal(top_left),
     ];
 
     let top_to_bottom_right_points = [
-        pdf_point_to_line_point(top_right),
-        pdf_point_to_control_point(cp_upper_mid_right),
-        pdf_point_to_control_point(cp_lower_mid_right),
-        pdf_point_to_line_point(bottom_right),
+        Normal(top_right),
+        Control(cp_upper_mid_right),
+        Control(cp_lower_mid_right),
+        Normal(bottom_right),
     ];
 
     let bottom_arc_lowest = start_pos - scaled_tangent_start;
@@ -382,10 +365,9 @@ fn draw_bezier_pulley(
         bottom_arc_lowest_to_left_cps,
     )) = draw_arcs
         .then(|| {
-            // If we can't calculate the control points for all four arcs, we won't
-            // draw any of them. This is like a short-circuiting four-way zip that
-            // either gives us `None` or a tuple containing all of the control
-            // points.
+            // If we can't calculate the control points for all four arcs, we won't draw any of
+            // them. This is like a short-circuiting four-way zip that either gives us `None` or a
+            // tuple containing all of the control points.
             bezier_arc_control_points(top_left, top_arc_highest, end_pos).and_then(|a| {
                 bezier_arc_control_points(top_arc_highest, top_right, end_pos).and_then(|b| {
                     bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos).and_then(
@@ -400,63 +382,62 @@ fn draw_bezier_pulley(
         .flatten()
     {
         // Points from bottom left to top left
-        bottom_to_top_left_points
-            .into_iter()
-            // Control points for top left arc
-            .chain(top_left_to_arc_highest_cps.map(pdf_point_to_control_point))
-            // Common point for top arcs
-            .chain(std::iter::once(pdf_point_to_line_point(top_arc_highest)))
-            // Control points for top right arc
-            .chain(top_arc_highest_to_right_cps.map(pdf_point_to_control_point))
-            // Points from top right to bottom right
-            .chain(top_to_bottom_right_points)
-            .chain({
-                let it = if last_segment_tan.is_none_or(|tangent| {
-                    tangent.angle_to(scaled_tangent_start).radians.abs() > f64::to_radians(20.0)
-                }) {
-                    // Either this is the first segment, in which case we need to
-                    // round the beginning, or there is a significant difference in
-                    // tangent angle between the final third of the previous segment
-                    // and the start of this one. In the latter case, we round the
-                    // beginning to make the connection look cleaner.
-                    Some(
-                        // Control points for bottom right arc
-                        bottom_right_to_arc_lowest_cps
-                            .map(pdf_point_to_control_point)
-                            .into_iter()
-                            // Common point for bottom arcs
-                            .chain(std::iter::once(pdf_point_to_line_point(bottom_arc_lowest)))
-                            // Control points for bottom left arc
-                            .chain(bottom_arc_lowest_to_left_cps.map(pdf_point_to_control_point))
-                            // Bottom left point (again - this time, to complete
-                            // the curve)
-                            .chain(std::iter::once(pdf_point_to_line_point(bottom_left))),
-                    )
-                } else {
-                    None
-                }
+        Either::Left(
+            bottom_to_top_left_points
                 .into_iter()
-                .flatten();
+                // Control points for top left arc
+                .chain(top_left_to_arc_highest_cps.map(Control))
+                // Common point for top arcs
+                .chain(std::iter::once(Normal(top_arc_highest)))
+                // Control points for top right arc
+                .chain(top_arc_highest_to_right_cps.map(Control))
+                // Points from top right to bottom right
+                .chain(top_to_bottom_right_points)
+                .chain({
+                    let it = if last_segment_tan.is_none_or(|tangent| {
+                        tangent.angle_to(scaled_tangent_start).radians.abs() > f64::to_radians(20.0)
+                    }) {
+                        // Either this is the first segment, in which case we need to round the
+                        // beginning, or there is a significant difference in tangent angle between
+                        // the final third of the previous segment and the start of this one. In
+                        // the latter case, we round the beginning to make the connection look
+                        // cleaner.
+                        Some(
+                            // Control points for bottom right arc
+                            bottom_right_to_arc_lowest_cps
+                                .map(Control)
+                                .into_iter()
+                                // Common point for bottom arcs
+                                .chain(std::iter::once(Normal(bottom_arc_lowest)))
+                                // Control points for bottom left arc
+                                .chain(bottom_arc_lowest_to_left_cps.map(Control))
+                                // Bottom left point (again - this time, to complete
+                                // the curve)
+                                .chain(std::iter::once(Normal(bottom_left))),
+                        )
+                    } else {
+                        None
+                    }
+                    .into_iter()
+                    .flatten();
 
-                *last_segment_tan = Some(end_pos - pos_second_third);
+                    *last_segment_tan = Some(end_pos - pos_second_third);
 
-                it
-            })
-            .collect_vec()
+                    it
+                }),
+        )
     } else {
-        bottom_to_top_left_points
-            .into_iter()
-            .chain(top_to_bottom_right_points)
-            .collect_vec()
+        Either::Right(
+            bottom_to_top_left_points
+                .into_iter()
+                .chain(top_to_bottom_right_points),
+        )
     };
 
-    ops.extend([printpdf::Op::DrawPolygon {
-        polygon: printpdf::Polygon {
-            rings: vec![printpdf::PolygonRing { points }],
-            mode: printpdf::PaintMode::Fill,
-            winding_order: printpdf::WindingOrder::NonZero,
-        },
-    }]);
+    ops.extend(op_gen::draw_polygon(
+        points,
+        PolygonDrawMode::Fill(WindingRule::NonZero),
+    ));
 
     Ok(())
 }
@@ -499,7 +480,7 @@ fn calc_pulley_line_points_acw_from_lower_right(
 fn draw_simple_pulley(
     [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
     use_arcs: bool,
-    ops: &mut Vec<printpdf::Op>,
+    ops: &mut Vec<lopdf::content::Operation>,
 ) -> Result<(), ()> {
     let [a_right, b_right, b_left, a_left] =
         calc_pulley_line_points_acw_from_lower_right(a, radius_a, b, radius_b).ok_or(())?;
@@ -509,6 +490,8 @@ fn draw_simple_pulley(
     if !direction.is_finite() {
         return Err(());
     }
+
+    use op_gen::PolygonPoint::{Control, Normal};
 
     let points = if use_arcs {
         let a_arc_midpoint = a - direction * radius_a;
@@ -523,42 +506,45 @@ fn draw_simple_pulley(
         let [a_right_arc_cp1, a_right_arc_cp2] =
             bezier_arc_control_points(a_arc_midpoint, a_right, a).ok_or(())?;
 
-        vec![
-            pdf_point_to_line_point(b_right),
-            pdf_point_to_control_point(b_right_arc_cp1),
-            pdf_point_to_control_point(b_right_arc_cp2),
-            pdf_point_to_line_point(b_arc_midpoint),
-            pdf_point_to_control_point(b_left_arc_cp1),
-            pdf_point_to_control_point(b_left_arc_cp2),
-            pdf_point_to_line_point(b_left),
-            pdf_point_to_line_point(a_left),
-            pdf_point_to_control_point(a_left_arc_cp1),
-            pdf_point_to_control_point(a_left_arc_cp2),
-            pdf_point_to_line_point(a_arc_midpoint),
-            pdf_point_to_control_point(a_right_arc_cp1),
-            pdf_point_to_control_point(a_right_arc_cp2),
-            pdf_point_to_line_point(a_right),
-        ]
+        Either::Left(
+            [
+                Normal(b_right),
+                Control(b_right_arc_cp1),
+                Control(b_right_arc_cp2),
+                Normal(b_arc_midpoint),
+                Control(b_left_arc_cp1),
+                Control(b_left_arc_cp2),
+                Normal(b_left),
+                Normal(a_left),
+                Control(a_left_arc_cp1),
+                Control(a_left_arc_cp2),
+                Normal(a_arc_midpoint),
+                Control(a_right_arc_cp1),
+                Control(a_right_arc_cp2),
+                Normal(a_right),
+            ]
+            .into_iter(),
+        )
     } else {
-        vec![
-            pdf_point_to_line_point(b_right),
-            pdf_point_to_line_point(b_left),
-            pdf_point_to_line_point(a_left),
-            pdf_point_to_line_point(a_right),
-        ]
+        Either::Right(
+            [
+                Normal(b_right),
+                Normal(b_left),
+                Normal(a_left),
+                Normal(a_right),
+            ]
+            .into_iter(),
+        )
     };
 
-    ops.extend([
-        printpdf::Op::SaveGraphicsState,
-        printpdf::Op::DrawPolygon {
-            polygon: printpdf::Polygon {
-                rings: vec![printpdf::PolygonRing { points }],
-                mode: printpdf::PaintMode::Fill,
-                winding_order: printpdf::WindingOrder::NonZero,
-            },
-        },
-        printpdf::Op::RestoreGraphicsState,
-    ]);
+    ops.push(op_gen::save_graphics_state());
+
+    ops.extend(op_gen::draw_polygon(
+        points,
+        PolygonDrawMode::Fill(WindingRule::NonZero),
+    ));
+
+    ops.push(op_gen::restore_graphics_state());
 
     Ok(())
 }
@@ -566,32 +552,20 @@ fn draw_simple_pulley(
 fn draw_simple_line(
     [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
     round_ends: bool,
-    ops: &mut Vec<printpdf::Op>,
+    ops: &mut Vec<lopdf::content::Operation>,
 ) {
     ops.extend([
-        printpdf::Op::SaveGraphicsState,
+        op_gen::save_graphics_state(),
         if round_ends {
-            printpdf::Op::SetLineCapStyle {
-                cap: printpdf::LineCapStyle::Round,
-            }
+            op_gen::set_line_cap_round()
         } else {
-            printpdf::Op::SetLineCapStyle {
-                cap: printpdf::LineCapStyle::Butt,
-            }
+            op_gen::set_line_cap_butt()
         },
-        printpdf::Op::SetOutlineThickness {
-            // If this were a radius we'd take the mean of the two radii supplied, but as it's the
-            // full line width, we'd be multiplying the mean radius by two anyway.
-            pt: Mm((radius_a + radius_b) as f32).into(),
-        },
-        printpdf::Op::DrawLine {
-            line: printpdf::Line {
-                points: vec![pdf_point_to_line_point(a), pdf_point_to_line_point(b)],
-                is_closed: false,
-            },
-        },
-        printpdf::Op::RestoreGraphicsState,
+        op_gen::set_stroke_width((radius_a + radius_b) as f32),
     ]);
+
+    ops.extend(op_gen::draw_line(a, b));
+    ops.push(op_gen::restore_graphics_state());
 
     // todo: Draw line with width equal to the smaller radius and add a dot for the bigger radius?
 }
@@ -624,7 +598,7 @@ fn draw_events_basic<'e>(
     events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
     arc_mode: ArcMode,
-    ops: &mut Vec<printpdf::Op>,
+    ops: &mut Vec<lopdf::content::Operation>,
 ) {
     let pen_size: f64 = pen_size.into();
 
@@ -636,23 +610,8 @@ fn draw_events_basic<'e>(
             let spread = pressure_to_circle_radius(pressure, pen_size);
 
             // Draw a filled circle.
-            ops.extend([
-                // Op::SetOutlineColor {
-                //     col: Color::Rgb(Rgb::new(0.0, 1.0, 0.0, None)),
-                // },
-                // Op::SetLineCapStyle {
-                //     cap: printpdf::LineCapStyle::Round,
-                // },
-                printpdf::Op::SetOutlineThickness {
-                    pt: Mm(spread as f32 * 2.0).into(),
-                },
-                printpdf::Op::DrawLine {
-                    line: printpdf::Line {
-                        points: vec![pdf_point_to_line_point(pos), pdf_point_to_line_point(pos)],
-                        is_closed: false,
-                    },
-                },
-            ]);
+            ops.push(op_gen::set_stroke_width(spread as f32 * 2.0));
+            ops.extend(op_gen::draw_line(pos, pos));
 
             return;
         }
@@ -747,117 +706,22 @@ fn draw_events_basic<'e>(
                 draw_simple_line(points, want_arcs, ops);
             }
         }
-
-        // let s_first_third = start_s.lerp(end_s, 1.0 / 3.0);
-        // let s_second_third = start_s.lerp(end_s, 2.0 / 3.0);
-
-        // let (pressure_first_third, pressure_second_third) = (
-        //     smooth.pressure(s_first_third),
-        //     smooth.pressure(s_second_third),
-        // );
-
-        // let spread_first_third = pressure_to_circle_radius(pressure_first_third, pen_size);
-        // let spread_second_third = pressure_to_circle_radius(pressure_second_third, pen_size);
-
-        // {
-        //     let tangent = PdfVector::from(smooth.unit_tangent(s_start)).normalize();
-
-        //     if tangent.is_finite() {
-        //         tangent
-        //     } else {
-        //         (end_pos - start_pos).normalize()
-        //     }
-        // } * start_spread,
-        // PdfVector::from(smooth.unit_tangent(s_first_third)).normalize() * spread_first_third,
-        // PdfVector::from(smooth.unit_tangent(s_second_third)).normalize() * spread_second_third,
-        // {
-        //     let tangent = PdfVector::from(smooth.unit_tangent(s_end)).normalize();
-
-        //     if tangent.is_finite() {
-        //         tangent
-        //     } else {
-        //         (end_pos - start_pos).normalize()
-        //     }
-        // } * end_spread,
-
-        // let true_angle = scaled_tangent_start
-        //     .angle_to(scaled_tangent_end)
-        //     .radians
-        //     .abs();
-
-        // let col = Color::Rgb(Rgb::new(
-        //     0.0, 0.0, 0.0,
-        //     // if used_fallback_start_tangent {
-        //     //     1.0
-        //     // } else {
-        //     //     0.0
-        //     // },
-        //     // 0.0,
-        //     // if true_angle > 1.5 * target_angle {
-        //     //     1.0
-        //     // } else {
-        //     //     0.0
-        //     // },
-        //     None,
-        // ));
-
-        // page_contents.extend(smooth.features().into_iter().flat_map(|feature| {
-        //     let s = feature.arc_length();
-
-        //     let pos = tx.transform_point(smooth.position(s).into());
-
-        //     [
-        //         Op::SetOutlineColor {
-        //             col: Color::Rgb(match feature {
-        //                 Feature::Start => Rgb::new(1.0, 0.5, 0.0, None),
-        //                 Feature::Vertex(_) => Rgb::new(0.0, 1.0, 0.0, None),
-        //                 Feature::Inflection(_) => Rgb::new(1.0, 1.0, 0.0, None),
-        //                 Feature::End(_) => Rgb::new(0.0, 0.5, 1.0, None),
-        //             }),
-        //         },
-        //         Op::SetOutlineThickness {
-        //             pt: Mm(pressure_to_circle_radius(smooth.pressure(s), pen_size)
-        //                 as f32
-        //                 * 2.0
-        //                 * 0.25)
-        //             .into(),
-        //         },
-        //         Op::DrawLine {
-        //             line: printpdf::Line {
-        //                 points: vec![
-        //                     pdf_point_to_line_point(pos),
-        //                     pdf_point_to_line_point(pos),
-        //                 ],
-        //                 is_closed: false,
-        //             },
-        //         },
-        //     ]
-        // }));
     }
 }
 
 fn draw_events_straight<'e>(
     events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
-    ops: &mut Vec<printpdf::Op>,
+    ops: &mut Vec<lopdf::content::Operation>,
 ) {
     let mut events = events.into_iter();
 
     let first = events.next().unwrap();
     let last = events.last().unwrap();
 
-    let a = pdf_point_to_line_point(<(f64, f64)>::from(first.point).into());
-    let b = pdf_point_to_line_point(<(f64, f64)>::from(last.point).into());
-
-    ops.extend([
-        printpdf::Op::SetOutlineThickness {
-            pt: Mm(pen_size).into(),
-        },
-        printpdf::Op::DrawLine {
-            line: printpdf::Line {
-                points: vec![a, b],
-                is_closed: false,
-            },
-        },
-    ]);
+    ops.push(op_gen::set_stroke_width(pen_size));
+    ops.extend(op_gen::draw_line(
+        <(f64, f64)>::from(first.point).into(),
+        <(f64, f64)>::from(last.point).into(),
+    ));
 }
