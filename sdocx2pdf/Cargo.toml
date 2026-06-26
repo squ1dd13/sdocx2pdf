@@ -8,7 +8,6 @@ euclid = "0.22"
 itertools = "0.14.0"
 lerp = "0.5.0"
 num = "0.4.3"
-printpdf = "0.9"
 scirs2-interpolate = "0.5.0"
 ndarray = "0.17"
 sdocx = { path = "../sdocx" }

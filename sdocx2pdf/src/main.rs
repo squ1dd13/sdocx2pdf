@@ -1,9 +1,15 @@
-use std::{collections::HashMap, os::unix::fs::MetadataExt, time::Duration};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    os::unix::fs::MetadataExt,
+    path::Path,
+    time::Duration,
+};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use lopdf::dictionary;
 use num::ToPrimitive;
+use thiserror::Error;
 
 use crate::tool::Tool;
 
@@ -11,17 +17,139 @@ mod op_gen;
 mod stroke;
 mod tool;
 
+/// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
+/// the top or finds a (grand)*parent that contains the key.
+fn get_inherited_attr<'dc>(
+    mut current_dict: &'dc lopdf::Dictionary,
+    key: &[u8],
+    doc: &'dc lopdf::Document,
+) -> Option<&'dc lopdf::Object> {
+    loop {
+        if let Ok(v) = current_dict.get(key) {
+            return Some(v);
+        }
+
+        match current_dict.get(b"Parent") {
+            Ok(&lopdf::Object::Reference(parent_id)) => {
+                current_dict = doc.get_dictionary(parent_id).ok()?;
+            }
+
+            _ => return None,
+        };
+    }
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+enum EmbeddedPdfError {
+    Io(#[from] std::io::Error),
+    Lopdf(#[from] lopdf::Error),
+
+    #[error("page has no MediaBox entry")]
+    MissingMediaBox,
+
+    #[error("page has no Resources entry")]
+    MissingResources,
+}
+
+struct EmbeddedPdf {
+    /// The IDs in the destination PDF of the pages copied over from the source PDF, in order.
+    src_page_ids: Vec<lopdf::ObjectId>,
+}
+
+impl EmbeddedPdf {
+    fn embed(
+        src_name: impl AsRef<Path>,
+        media_storage: &mut sdocx::MediaStorage,
+        dest_pdf: &mut lopdf::Document,
+    ) -> Result<EmbeddedPdf, EmbeddedPdfError> {
+        // Open and parse the PDF we're embedding.
+        let mut src_pdf = lopdf::Document::load_from(media_storage.open_file(src_name)?)?;
+
+        // Renumber the objects in the source so their IDs don't collide with those in the
+        // destination. This lets us move objects from the source to the destination directly,
+        // including images, fonts, etc.
+        src_pdf.renumber_objects_with(dest_pdf.max_id + 1);
+
+        // `page_iter` is in order, so the nth element of this vector is the ID of the nth source
+        // page. This is useful because `sdocx` files refer to pages by indices.
+        let src_page_ids: Vec<_> = src_pdf.page_iter().collect();
+
+        // Move all the objects from the source over to the destination.
+        dest_pdf.objects.extend(src_pdf.objects);
+
+        // Having manually inserted objects, we must manually update the max ID.
+        dest_pdf.max_id = src_pdf.max_id;
+
+        Ok(EmbeddedPdf { src_page_ids })
+    }
+
+    /// Adds to `dest_pdf` an XObject containing the contents of the page at `index` in the source
+    /// PDF. The ID of the XObject is returned along with the width and height of the source page.
+    fn create_page_xobject(
+        &self,
+        index: u32,
+        dest_pdf: &mut lopdf::Document,
+    ) -> Result<(lopdf::ObjectId, f32, f32), EmbeddedPdfError> {
+        let page_id = self.src_page_ids[index as usize];
+
+        let (media_box, resources) = {
+            let dict = dest_pdf.get_object(page_id)?.as_dict()?;
+
+            (
+                get_inherited_attr(dict, b"MediaBox", dest_pdf)
+                    .ok_or(EmbeddedPdfError::MissingMediaBox)?,
+                get_inherited_attr(dict, b"Resources", dest_pdf)
+                    .ok_or(EmbeddedPdfError::MissingResources)?,
+            )
+        };
+
+        let (src_width, src_height) = {
+            // [x, y, width, height]. Can be `Integer`s or `Real`s, but `as_float` doesn't care
+            // which.
+            let a = media_box.as_array()?;
+
+            (
+                dest_pdf.dereference(&a[2])?.1.as_float()?,
+                dest_pdf.dereference(&a[3])?.1.as_float()?,
+            )
+        };
+
+        // Even though the source page won't show up in the destination as a normal page, the
+        // object is still in there, so we can ask the destination PDF for the content.
+        let content = dest_pdf.get_page_content(page_id)?;
+
+        let xobj_dict = lopdf::dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "FormType" => 1,
+            "BBox" => media_box.clone(),
+            "Resources" => resources.clone(),
+        };
+
+        // Add a `Stream` object containing the XObject stream.
+        let xobj_id = dest_pdf.add_object(lopdf::Object::Stream(lopdf::Stream::new(
+            xobj_dict, content,
+        )));
+
+        Ok((xobj_id, src_width, src_height))
+    }
+}
+
 fn main() {
-    let (document, mut _media_storage) = sdocx::Document::from_zip(
+    let (document, mut media_storage) = sdocx::Document::from_zip(
         // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/BMAN L8_260326_105435.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/GG W9_260423_100211.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Two pdfs mixed_260626_232741.sdocx",
+        // "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Nearly empty but long inf scroll_260624_170445.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145202.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145950_has_empty_page.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_150246_with_explicit_blank_page_last.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Much handwriting on pages_260625_184756.sdocx",
+        "/home/alex/projects/re/sdocx/sample_docs/Much handwriting on pages_260625_184756.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/Paged with handwriting_260624_142215.sdocx",
         // "/home/alex/projects/re/sdocx/sample_docs/long page with rotated squiggle_260624_155155.sdocx",
     )
@@ -74,6 +202,10 @@ fn main() {
     const A4_PORTRAIT_WIDTH_PT: f32 = 210.0 * 2.84526;
     const A4_PTRT_HEIGHT_PT: f32 = 297.0 * 2.84526;
 
+    // Maps the names of PDF files to `EmbeddedPdf`s that can be used to place pages from the PDFs
+    // into the output PDF.
+    let mut embedded_pdfs = HashMap::new();
+
     for (pos, page) in document.pages().iter().with_position() {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
 
@@ -96,7 +228,10 @@ fn main() {
         let page_w_pt = page_w_internal * pt_per_unit;
 
         let page_h_pt = {
-            if pageless && let Some(drawn_rect) = page.drawn_rect() {
+            if pageless
+                && page.embedded_pdf_pages().is_empty()
+                && let Some(drawn_rect) = page.drawn_rect()
+            {
                 // Since pageless documents are A4-width, the height of a page in an equivalent
                 // paged document is A4 height, 297 mm. The sdocx tends to report an extra
                 // page-height worth of empty space at the end of a pageless document. When the app
@@ -116,20 +251,75 @@ fn main() {
             }
         };
 
-        // todo: Construct the matrix manually and drop the `printpdf` dependency.
-        let mut operations = {
+        let mut operations = Vec::new();
+        let mut xobjects = lopdf::Dictionary::new();
+
+        for (emb_i, emb_page) in page.embedded_pdf_pages().iter().enumerate() {
+            let emb_pdf_name = emb_page.file().name();
+
+            // hack: `unwrap` here will cause everything to fail if the document embeds a
+            // sufficiently malformed PDF.
+
+            // Get an existing `EmbeddedPdf` for the PDF in question or, if one does not exist,
+            // create it by embedding the PDF into the one we're building.
+            let embedded_pdf = &*match embedded_pdfs.entry(emb_pdf_name) {
+                Entry::Occupied(occ) => occ.into_mut(),
+                Entry::Vacant(vac) => vac.insert(
+                    EmbeddedPdf::embed(emb_pdf_name, &mut media_storage, &mut lpdf).unwrap(),
+                ),
+            };
+
+            let (xobj_id, src_width_pt, src_height_pt) = embedded_pdf
+                .create_page_xobject(emb_page.page_index(), &mut lpdf)
+                .unwrap();
+
+            // We have to scale and translate the embedded page to fit inside the prescribed
+            // rectangle.
+            let (x_pt, y_pt, horiz_scale, vert_scale) = {
+                let sdocx::page::Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                } = emb_page.rect();
+
+                // y = 0 at the top in document space, so `bottom > top`.
+                let dest_width_units = (right - left) as f32;
+                let dest_height_units = (bottom - top) as f32;
+
+                let x_pt = left as f32 * pt_per_unit;
+                let horiz_scale = (dest_width_units * pt_per_unit) / src_width_pt;
+
+                // The document gives us the vertical position of the lower-left corner in document
+                // space, so we have to flip it. We don't use a negative vertical scale because the
+                // content of the page being embedded lives in PDF space, so is already the correct
+                // way up.
+                let y_pt = page_h_pt - bottom as f32 * pt_per_unit;
+                let vert_scale = (dest_height_units * pt_per_unit) / src_height_pt;
+
+                (x_pt, y_pt, horiz_scale, vert_scale)
+            };
+
+            // Name the XObject and add it to the XObject dictionary. The name doesn't matter, as
+            // long as it's unique.
+            let xobj_name = format!("embpage{emb_i}");
+            xobjects.set(xobj_name.clone(), xobj_id);
+
+            operations.extend([
+                op_gen::save_graphics_state(),
+                op_gen::set_transformation_matrix([horiz_scale, 0.0, 0.0, vert_scale, x_pt, y_pt]),
+                lopdf::content::Operation::new("Do", vec![xobj_name.into()]),
+                op_gen::restore_graphics_state(),
+            ]);
+        }
+
+        operations.push({
             // Document space has y = 0 at the top; PDF space has it at the bottom. Rather than
             // converting coordinates everywhere, we just flip everything on the horizontal axis
             // using a negative y scale followed by a translation. While doing that, we also scale
             // the document contents to fit our chosen page dimensions.
-            let matrix = printpdf::CurTransMat::combine_matrix(
-                printpdf::CurTransMat::Scale(pt_per_unit, -pt_per_unit).as_array(),
-                printpdf::CurTransMat::Translate(printpdf::Pt(0.0), printpdf::Pt(page_h_pt))
-                    .as_array(),
-            );
-
-            vec![op_gen::set_transformation_matrix(matrix)]
-        };
+            op_gen::set_transformation_matrix([pt_per_unit, 0.0, 0.0, -pt_per_unit, 0.0, page_h_pt])
+        });
 
         // Maps names to graphics states. This will go directly into the PDF.
         let mut graphics_states = lopdf::dictionary! {};
@@ -205,6 +395,7 @@ fn main() {
 
         let resources_id = lopdf::dictionary! {
             "ExtGState" => lpdf.add_object(graphics_states),
+            "XObject" => xobjects,
         };
 
         let page = lopdf::dictionary! {
@@ -236,6 +427,7 @@ fn main() {
     let doc_info_ref: lopdf::Object = lpdf
         .add_object(lopdf::dictionary! {
             "Title" => lopdf::Object::string_literal(document_name),
+            "Creator" => lopdf::Object::string_literal("sdocx2pdf"),
         })
         .into();
 
@@ -256,7 +448,12 @@ fn main() {
 
     write_spinner.enable_steady_tick(Duration::from_millis(130));
 
+    // Pruning unused objects is most important when embedding PDFs because there may be some large
+    // unused objects if only some of the PDF is embedded (or if the PDF being embedded is poorly
+    // optimised).
+    lpdf.prune_objects();
     lpdf.compress();
+
     lpdf.save_modern(&mut std::fs::File::create(out_path).expect("failed to open output file"))
         .expect("failed to write PDF");
 

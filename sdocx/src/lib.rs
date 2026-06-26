@@ -46,6 +46,7 @@ use std::io::Read;
 use thiserror::Error;
 
 pub use doc::Document;
+pub use doc::MediaStorage;
 pub use end_tag::{BackgroundTheme, DocumentType, PageModel, TextDirection};
 pub use page::object::DocObject;
 
