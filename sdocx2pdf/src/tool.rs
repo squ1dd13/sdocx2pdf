@@ -116,6 +116,21 @@ impl Tool {
         )
     }
 
+    fn is_pressure_sensitive(&self) -> bool {
+        matches!(
+            self,
+            Tool::FountainPen(_)
+                | Tool::InkPen {
+                    fixed_width: false,
+                    ..
+                }
+                | Tool::Pencil {
+                    fixed_opacity: false,
+                    ..
+                }
+        )
+    }
+
     /// Returns whether strokes drawn using this tool are always straight.
     fn is_straight_only(&self) -> bool {
         matches!(self, Tool::StraightHighlighter(_) | Tool::StraightMarker(_))
@@ -151,10 +166,12 @@ impl Tool {
     }
 
     /// Extends `ops` with the necessary operations to draw each slice of stroke events in
-    /// `strokes` using this tool. The strokes are drawn in order.
+    /// `strokes` using this tool. The strokes are drawn in order. Translucent strokes are drawn by
+    /// filling a `page_size` rectangle and clipping it to the shape of the stroke.
     pub fn draw_events<'e>(
         &self,
         egs_name: &str,
+        page_size: (f32, f32),
         strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
         ops: &mut Vec<lopdf::content::Operation>,
     ) -> Result<(), ()> {
@@ -170,29 +187,61 @@ impl Tool {
             op_gen::set_stroke_colour(r, g, b),
         ]);
 
-        // todo: Draw translucent strokes by filling the stroke's bounding box and clipping
-        // That should work perfectly if the colour is uniform along the stroke. It won't allow
-        // us to vary the colour along the stroke (e.g., for the pencil with variable opacity),
-        // but even then it's better than the current system.
-
         if self.is_straight_only() {
             for events in strokes {
                 draw_events_straight(events, size, ops);
             }
         } else {
-            let arc_mode = if self.is_like_highlighter() {
-                // Straight ends for highlighter strokes.
-                ArcMode::None
-            } else if a == 255 {
-                // Round ends and nice connections for opaque non-highlighter strokes.
-                ArcMode::All
+            let specify_only = a != 255;
+
+            let effective_size = if self.is_like_highlighter() {
+                size * 2.5
             } else {
-                // Round ends only but no interior arcs for translucent non-highlighter strokes.
-                ArcMode::FirstLastOnly
+                size
             };
 
-            for events in strokes {
-                draw_events_basic(events, size, arc_mode, ops);
+            let pressure_override = (!self.is_pressure_sensitive()).then_some(0.45);
+
+            if specify_only {
+                for events in strokes {
+                    ops.push(op_gen::save_graphics_state());
+
+                    draw_events_basic(
+                        events,
+                        effective_size,
+                        pressure_override,
+                        ArcMode::All,
+                        specify_only,
+                        ops,
+                    );
+
+                    ops.extend(op_gen::clip(WindingRule::NonZero));
+
+                    ops.extend([
+                        lopdf::content::Operation::new(
+                            "re",
+                            vec![
+                                0.0.into(),
+                                0.0.into(),
+                                page_size.0.into(),
+                                page_size.1.into(),
+                            ],
+                        ),
+                        lopdf::content::Operation::new("f", vec![]),
+                        op_gen::restore_graphics_state(),
+                    ]);
+                }
+            } else {
+                for events in strokes {
+                    draw_events_basic(
+                        events,
+                        effective_size,
+                        pressure_override,
+                        ArcMode::All,
+                        specify_only,
+                        ops,
+                    );
+                }
             }
         }
 
@@ -259,6 +308,7 @@ fn draw_bezier_pulley(
     points_tangents_radii: [(PdfPoint, PdfVector, f64); 4],
     draw_arcs: bool,
     last_segment_tan: &mut Option<PdfVector>,
+    specify_only: bool,
     ops: &mut Vec<lopdf::content::Operation>,
 ) -> Result<(), ()> {
     let [
@@ -290,10 +340,10 @@ fn draw_bezier_pulley(
 
     let start_to_first_third = (pos_first_third - start_pos).normalize();
 
-    // If the computed start direction is in opposition to the direction to the
-    // first third position, use the latter for the tangent so we aren't going back
-    // on ourselves. `start_to_first_third` should be finite, but we check the
-    // partial ordering so that if it is not, we retain the current finite tangent.
+    // If the computed start direction is in opposition to the direction to the first third
+    // position, use the latter for the tangent so we aren't going back on ourselves.
+    // `start_to_first_third` should be finite, but we check the partial ordering so that if it is
+    // not, we retain the current finite tangent.
     let scaled_tangent_start = if let Some(std::cmp::Ordering::Less) = scaled_tangent_start
         .dot(start_to_first_third)
         .partial_cmp(&0.0)
@@ -341,58 +391,44 @@ fn draw_bezier_pulley(
 
     use op_gen::PolygonPoint::{Control, Normal};
 
-    let bottom_to_top_left_points = [
-        Normal(bottom_left),
-        Control(cp_lower_mid_left),
-        Control(cp_upper_mid_left),
+    let top_to_bottom_left_points = [
         Normal(top_left),
+        Control(cp_upper_mid_left),
+        Control(cp_lower_mid_left),
+        Normal(bottom_left),
     ];
 
-    let top_to_bottom_right_points = [
-        Normal(top_right),
-        Control(cp_upper_mid_right),
-        Control(cp_lower_mid_right),
+    let bottom_to_top_right_points = [
         Normal(bottom_right),
+        Control(cp_lower_mid_right),
+        Control(cp_upper_mid_right),
+        Normal(top_right),
     ];
 
     let bottom_arc_lowest = start_pos - scaled_tangent_start;
     let top_arc_highest = end_pos + scaled_tangent_end;
 
-    let points = if let Some((
-        top_left_to_arc_highest_cps,
-        top_arc_highest_to_right_cps,
-        bottom_right_to_arc_lowest_cps,
-        bottom_arc_lowest_to_left_cps,
-    )) = draw_arcs
-        .then(|| {
-            // If we can't calculate the control points for all four arcs, we won't draw any of
-            // them. This is like a short-circuiting four-way zip that either gives us `None` or a
-            // tuple containing all of the control points.
-            bezier_arc_control_points(top_left, top_arc_highest, end_pos).and_then(|a| {
-                bezier_arc_control_points(top_arc_highest, top_right, end_pos).and_then(|b| {
-                    bezier_arc_control_points(bottom_right, bottom_arc_lowest, start_pos).and_then(
-                        |c| {
-                            bezier_arc_control_points(bottom_arc_lowest, bottom_left, start_pos)
-                                .map(|d| (a, b, c, d))
-                        },
-                    )
-                })
-            })
-        })
-        .flatten()
-    {
+    let points = if draw_arcs {
+        let (
+            top_right_to_arc_highest_cps,
+            top_arc_highest_to_left_cps,
+            bottom_left_to_arc_lowest_cps,
+            bottom_arc_lowest_to_right_cps,
+        ) = (
+            bezier_arc_control_points(top_right, top_arc_highest, end_pos).ok_or(())?,
+            bezier_arc_control_points(top_arc_highest, top_left, end_pos).ok_or(())?,
+            bezier_arc_control_points(bottom_left, bottom_arc_lowest, start_pos).ok_or(())?,
+            bezier_arc_control_points(bottom_arc_lowest, bottom_right, start_pos).ok_or(())?,
+        );
+
         // Points from bottom left to top left
         Either::Left(
-            bottom_to_top_left_points
+            bottom_to_top_right_points
                 .into_iter()
-                // Control points for top left arc
-                .chain(top_left_to_arc_highest_cps.map(Control))
-                // Common point for top arcs
+                .chain(top_right_to_arc_highest_cps.map(Control))
                 .chain(std::iter::once(Normal(top_arc_highest)))
-                // Control points for top right arc
-                .chain(top_arc_highest_to_right_cps.map(Control))
-                // Points from top right to bottom right
-                .chain(top_to_bottom_right_points)
+                .chain(top_arc_highest_to_left_cps.map(Control))
+                .chain(top_to_bottom_left_points)
                 .chain({
                     let it = if last_segment_tan.is_none_or(|tangent| {
                         tangent.angle_to(scaled_tangent_start).radians.abs() > f64::to_radians(20.0)
@@ -403,17 +439,12 @@ fn draw_bezier_pulley(
                         // the latter case, we round the beginning to make the connection look
                         // cleaner.
                         Some(
-                            // Control points for bottom right arc
-                            bottom_right_to_arc_lowest_cps
+                            bottom_left_to_arc_lowest_cps
                                 .map(Control)
                                 .into_iter()
-                                // Common point for bottom arcs
                                 .chain(std::iter::once(Normal(bottom_arc_lowest)))
-                                // Control points for bottom left arc
-                                .chain(bottom_arc_lowest_to_left_cps.map(Control))
-                                // Bottom left point (again - this time, to complete
-                                // the curve)
-                                .chain(std::iter::once(Normal(bottom_left))),
+                                .chain(bottom_arc_lowest_to_right_cps.map(Control))
+                                .chain(std::iter::once(Normal(bottom_right))),
                         )
                     } else {
                         None
@@ -428,16 +459,20 @@ fn draw_bezier_pulley(
         )
     } else {
         Either::Right(
-            bottom_to_top_left_points
+            bottom_to_top_right_points
                 .into_iter()
-                .chain(top_to_bottom_right_points),
+                .chain(top_to_bottom_left_points),
         )
     };
 
-    ops.extend(op_gen::draw_polygon(
-        points,
-        PolygonDrawMode::Fill(WindingRule::NonZero),
-    ));
+    if specify_only {
+        ops.extend(op_gen::specify_polygon(points));
+    } else {
+        ops.extend(op_gen::draw_polygon(
+            points,
+            PolygonDrawMode::Fill(WindingRule::NonZero),
+        ));
+    }
 
     Ok(())
 }
@@ -480,6 +515,7 @@ fn calc_pulley_line_points_acw_from_lower_right(
 fn draw_simple_pulley(
     [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
     use_arcs: bool,
+    specify_only: bool,
     ops: &mut Vec<lopdf::content::Operation>,
 ) -> Result<(), ()> {
     let [a_right, b_right, b_left, a_left] =
@@ -537,14 +573,14 @@ fn draw_simple_pulley(
         )
     };
 
-    ops.push(op_gen::save_graphics_state());
-
-    ops.extend(op_gen::draw_polygon(
-        points,
-        PolygonDrawMode::Fill(WindingRule::NonZero),
-    ));
-
-    ops.push(op_gen::restore_graphics_state());
+    if specify_only {
+        ops.extend(op_gen::specify_polygon(points));
+    } else {
+        ops.extend(op_gen::draw_polygon(
+            points,
+            PolygonDrawMode::Fill(WindingRule::NonZero),
+        ));
+    }
 
     Ok(())
 }
@@ -552,8 +588,118 @@ fn draw_simple_pulley(
 fn draw_simple_line(
     [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
     round_ends: bool,
+    specify_only: bool,
     ops: &mut Vec<lopdf::content::Operation>,
 ) {
+    if specify_only {
+        use op_gen::PolygonPoint::{Control, Normal};
+
+        let forwards = (b - a).normalize();
+
+        let left: PdfVector = (-forwards.y, forwards.x).into();
+        let right = -left;
+
+        if !forwards.is_finite() {
+            if !round_ends {
+                // A zero-length line with butt caps is invisible.
+                return;
+            }
+
+            // The points are equal. We need to draw a circle, but as we are specifying it as a
+            // path, we can only approximate it using Bézier curves.
+            let radius = (radius_a + radius_b) / 2.0;
+
+            let left = a + PdfVector::new(-radius, 0.0);
+            let right = a + PdfVector::new(radius, 0.0);
+            let top = a + PdfVector::new(0.0, radius);
+            let bottom = a + PdfVector::new(0.0, -radius);
+
+            // Calculate the control points for the arc in each quadrant.
+            // todo: Precompute these for the unit circle and translate as needed instead of
+            // calculating them every time.
+            let [q1_c1, q1_c2] = bezier_arc_control_points(right, top, a).unwrap();
+            let [q2_c1, q2_c2] = bezier_arc_control_points(top, left, a).unwrap();
+            let [q3_c1, q3_c2] = bezier_arc_control_points(left, bottom, a).unwrap();
+            let [q4_c1, q4_c2] = bezier_arc_control_points(bottom, right, a).unwrap();
+
+            ops.extend(op_gen::specify_polygon([
+                Normal(right),
+                Control(q1_c1),
+                Control(q1_c2),
+                Normal(top),
+                Control(q2_c1),
+                Control(q2_c2),
+                Normal(left),
+                Control(q3_c1),
+                Control(q3_c2),
+                Normal(bottom),
+                Control(q4_c1),
+                Control(q4_c2),
+                Normal(right),
+            ]));
+
+            return;
+        }
+
+        let bottom_right = a + right * radius_a;
+        let top_right = b + right * radius_b;
+        let top_left = b + left * radius_b;
+        let bottom_left = a + left * radius_a;
+
+        if !round_ends {
+            // A zero-length line with butt caps is invisible.
+            if !forwards.is_finite() {
+                return;
+            }
+
+            ops.extend(op_gen::specify_polygon([
+                Normal(bottom_right),
+                Normal(top_right),
+                Normal(top_left),
+                Normal(bottom_left),
+            ]));
+
+            return;
+        }
+
+        // Non-zero length line with round ends. We could make this look like the normal case where
+        // we take the mean radius, but since we have to draw a path instead of a line, we might as
+        // well take advantage of the fact we can use different widths at the start and end.
+        let bottom_arc_lowest = a - forwards * radius_a;
+        let top_arc_highest = b + forwards * radius_b;
+
+        let (
+            [top_right_to_arc_highest_cp1, top_right_to_arc_highest_cp2],
+            [top_arc_highest_to_left_cp1, top_arc_highest_to_left_cp2],
+            [bot_left_to_arc_lowest_cp1, bot_left_to_arc_lowest_cp2],
+            [bot_arc_lowest_to_right_cp1, bot_arc_lowest_to_right_cp2],
+        ) = (
+            bezier_arc_control_points(top_right, top_arc_highest, b).unwrap(),
+            bezier_arc_control_points(top_arc_highest, top_left, b).unwrap(),
+            bezier_arc_control_points(bottom_left, bottom_arc_lowest, a).unwrap(),
+            bezier_arc_control_points(bottom_arc_lowest, bottom_right, a).unwrap(),
+        );
+
+        ops.extend(op_gen::specify_polygon([
+            Normal(top_right),
+            Control(top_right_to_arc_highest_cp1),
+            Control(top_right_to_arc_highest_cp2),
+            Normal(top_arc_highest),
+            Control(top_arc_highest_to_left_cp1),
+            Control(top_arc_highest_to_left_cp2),
+            Normal(top_left),
+            Normal(bottom_left),
+            Control(bot_left_to_arc_lowest_cp1),
+            Control(bot_left_to_arc_lowest_cp2),
+            Normal(bottom_arc_lowest),
+            Control(bot_arc_lowest_to_right_cp1),
+            Control(bot_arc_lowest_to_right_cp2),
+            Normal(bottom_right),
+        ]));
+
+        return;
+    }
+
     ops.extend([
         op_gen::save_graphics_state(),
         if round_ends {
@@ -561,6 +707,8 @@ fn draw_simple_line(
         } else {
             op_gen::set_line_cap_butt()
         },
+        // The effective radius is the mean of the radii at `a` and `b`, so the _width_ of the line
+        // is the sum.
         op_gen::set_stroke_width((radius_a + radius_b) as f32),
     ]);
 
@@ -597,10 +745,15 @@ enum ArcMode {
 fn draw_events_basic<'e>(
     events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
+    pressure_override: Option<f64>,
     arc_mode: ArcMode,
+    specify_only: bool,
     ops: &mut Vec<lopdf::content::Operation>,
 ) {
     let pen_size: f64 = pen_size.into();
+
+    let pressure_to_circle_radius =
+        |p: f64, s: f64| -> f64 { pressure_to_circle_radius(pressure_override.unwrap_or(p), s) };
 
     let smooth = match StrokeOrDot::from_events(events) {
         StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke),
@@ -634,7 +787,7 @@ fn draw_events_basic<'e>(
         let is_very_short =
             visual_length < start_spread.max(end_spread) + start_spread.min(end_spread) * 0.1;
 
-        let is_quite_short = is_very_short || visual_length < start_spread + end_spread;
+        let is_quite_short = is_very_short || visual_length < 0.7 * (start_spread + end_spread);
 
         let want_arcs = match arc_mode {
             ArcMode::All => true,
@@ -692,6 +845,7 @@ fn draw_events_basic<'e>(
                 },
                 want_arcs,
                 &mut last_segment_tan,
+                specify_only,
                 ops,
             )
             .is_err()
@@ -702,8 +856,8 @@ fn draw_events_basic<'e>(
 
             // If the segment is quite short but not very short, try drawing a simple pulley.
             // If that doesn't work, or if the segment is very short, draw a simple line.
-            if is_very_short || draw_simple_pulley(points, want_arcs, ops).is_err() {
-                draw_simple_line(points, want_arcs, ops);
+            if is_very_short || draw_simple_pulley(points, want_arcs, specify_only, ops).is_err() {
+                draw_simple_line(points, want_arcs, specify_only, ops);
             }
         }
     }

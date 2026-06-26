@@ -178,6 +178,7 @@ fn main() {
 
                 tool.draw_events(
                     gs_name,
+                    (page_w_internal, page_h_internal),
                     strokes
                         .inspect(|_| strokes_handled += 1)
                         .map(|s| s.events()),

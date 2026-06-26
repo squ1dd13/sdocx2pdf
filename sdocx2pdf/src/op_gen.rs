@@ -108,9 +108,16 @@ impl PolygonDrawMode {
     }
 }
 
-fn specify_polygon<'p>(
-    mut points: impl Iterator<Item = PolygonPoint> + 'p,
-) -> impl Iterator<Item = Operation> {
+/// Constructs a closed path from `points` without closing the path object. This function may be
+/// used to create a path consisting of several polygon subpaths.
+pub fn specify_polygon<'p, P: IntoIterator<Item = PolygonPoint>>(
+    points: P,
+) -> impl Iterator<Item = Operation>
+where
+    P::IntoIter: 'p,
+{
+    let mut points = points.into_iter();
+
     let first_move = match points.next() {
         // Move to first point.
         Some(PolygonPoint::Normal(p)) => Operation::new("m", point_vec([p])),
@@ -151,7 +158,22 @@ pub fn draw_polygon<'p, P: IntoIterator<Item = PolygonPoint>>(
 where
     P::IntoIter: 'p,
 {
-    specify_polygon(points.into_iter()).chain(std::iter::once(mode.to_operation()))
+    specify_polygon(points).chain(std::iter::once(mode.to_operation()))
+}
+
+pub fn clip(rule: WindingRule) -> [Operation; 2] {
+    [
+        // Clip.
+        Operation::new(
+            match rule {
+                WindingRule::NonZero => "W",
+                WindingRule::EvenOdd => "W*",
+            },
+            vec![],
+        ),
+        // End the path without drawing it.
+        Operation::new("n", vec![]),
+    ]
 }
 
 pub fn restore_graphics_state() -> Operation {
