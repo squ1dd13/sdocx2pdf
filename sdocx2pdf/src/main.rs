@@ -25,11 +25,11 @@ mod tool;
 struct Args {
     #[arg(
         id = "IN",
-        help = "path to .sdocx file (or the equivalent directory for an unexported document)"
+        help = "Path to .sdocx file (or the equivalent directory for an unexported document)"
     )]
     doc: PathBuf,
 
-    #[arg(help = "path to write the PDF to")]
+    #[arg(help = "Path to write the PDF to")]
     out: PathBuf,
 }
 
@@ -261,8 +261,33 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mut operations = Vec::new();
+
+        // Maps names to graphics states. This will go directly into the PDF.
+        let mut graphics_states = lopdf::dictionary! {};
+
+        if let Some([b, g, r, a]) = page.background_colour() {
+            graphics_states.set(
+                "fillbg",
+                lopdf::dictionary! {
+                    "Type" => "ExtGState",
+                    // Fill alpha
+                    "ca" => a as f32 / 255.0,
+                },
+            );
+
+            operations.extend([
+                op_gen::save_graphics_state(),
+                op_gen::load_graphics_state("fillbg"),
+                op_gen::set_fill_colour(r, g, b),
+                op_gen::specify_rectangle([0.0, 0.0, page_w_pt, page_h_pt]),
+                op_gen::fill(),
+                op_gen::restore_graphics_state(),
+            ]);
+        }
+
         let mut xobjects = PdfDict::new();
 
+        // Add any embedded PDF pages before drawing the page objects.
         for (emb_i, emb_page) in page.embedded_pdf_pages().iter().enumerate() {
             let emb_pdf_name = emb_page.file().name();
 
@@ -334,9 +359,6 @@ fn main() -> anyhow::Result<()> {
             // the document contents to fit our chosen page dimensions.
             op_gen::set_transformation_matrix([pt_per_unit, 0.0, 0.0, -pt_per_unit, 0.0, page_h_pt])
         });
-
-        // Maps names to graphics states. This will go directly into the PDF.
-        let mut graphics_states = lopdf::dictionary! {};
 
         // Maps tools to graphics state names. We use this to build the other map while avoiding
         // duplicates. We could go without this second map and derive unique graphics state names
@@ -451,13 +473,15 @@ fn main() -> anyhow::Result<()> {
 
     let _ = multi_progress.clear();
 
+    let out_path_str = args.out.to_string_lossy();
+
     let write_spinner = ProgressBar::no_length()
         .with_style(
             ProgressStyle::with_template("{spinner} {wide_msg}")
                 .unwrap()
                 .tick_chars("-\\|/ "),
         )
-        .with_message(format!("Saving to '{}'...", args.out.to_string_lossy()));
+        .with_message(format!("Saving to '{}'...", out_path_str));
 
     write_spinner.enable_steady_tick(Duration::from_millis(130));
 
@@ -469,15 +493,18 @@ fn main() -> anyhow::Result<()> {
 
     lpdf.save_modern(
         &mut std::fs::File::create(&args.out)
-            .with_context(|| format!("Failed to create output file {:?}", args.out))?,
+            .with_context(|| format!("Failed to create output file '{out_path_str}'"))?,
     )
     .context("Failed to save PDF to output file")?;
 
-    let metadata_r = std::fs::metadata(args.out);
+    let metadata_r = std::fs::metadata(&args.out);
     write_spinner.finish_and_clear();
 
     if let Ok(metadata) = metadata_r {
-        eprintln!("Wrote {}.", indicatif::HumanBytes(metadata.size()));
+        eprintln!(
+            "Wrote {} to '{out_path_str}'.",
+            indicatif::HumanBytes(metadata.size())
+        );
     }
 
     Ok(())

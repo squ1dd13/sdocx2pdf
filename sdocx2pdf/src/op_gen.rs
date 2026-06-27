@@ -176,6 +176,14 @@ pub fn clip(rule: WindingRule) -> [Operation; 2] {
     ]
 }
 
+pub fn specify_rectangle([x, y, w, h]: [f32; 4]) -> Operation {
+    lopdf::content::Operation::new("re", vec![x.into(), y.into(), w.into(), h.into()])
+}
+
+pub fn fill() -> Operation {
+    Operation::new("f", vec![])
+}
+
 pub fn restore_graphics_state() -> Operation {
     Operation::new("Q", vec![])
 }

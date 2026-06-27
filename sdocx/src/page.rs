@@ -462,6 +462,10 @@ impl Page {
     pub const fn drawn_rect(&self) -> Option<Rect> {
         self.drawn_rect
     }
+
+    pub const fn background_colour(&self) -> Option<[u8; 4]> {
+        self.background_colour
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {

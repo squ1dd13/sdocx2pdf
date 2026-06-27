@@ -137,7 +137,6 @@ impl Tool {
     }
 
     pub fn create_egs(&self) -> lopdf::Dictionary {
-        // fixme: Units
         let mut dict = lopdf::dictionary! {
             "Type" => "ExtGState",
             // Round line cap style
@@ -218,16 +217,8 @@ impl Tool {
                     ops.extend(op_gen::clip(WindingRule::NonZero));
 
                     ops.extend([
-                        lopdf::content::Operation::new(
-                            "re",
-                            vec![
-                                0.0.into(),
-                                0.0.into(),
-                                page_size.0.into(),
-                                page_size.1.into(),
-                            ],
-                        ),
-                        lopdf::content::Operation::new("f", vec![]),
+                        op_gen::specify_rectangle([0.0, 0.0, page_size.0, page_size.1]),
+                        op_gen::fill(),
                         op_gen::restore_graphics_state(),
                     ]);
                 }
