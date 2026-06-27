@@ -28,13 +28,13 @@ enum BasicSplitMode {
     A4Landscape,
 }
 
-/// A tool for converting Samsung Notes documents to vectorised PDFs. "Vectorised" means that
+/// A tool for converting Samsung Notes documents to vector PDFs. "Vector" means that
 /// handwriting data is stored mathematically (as equations for curves) rather than as pixel data
 /// (an image). This makes writing clearer and easier to read.
 #[derive(Parser)]
 #[command(
     version,
-    about = "Converts Samsung Notes documents to vectorised PDFs",
+    about = "Converts Samsung Notes documents to vector PDFs",
     long_about
 )]
 struct Args {
