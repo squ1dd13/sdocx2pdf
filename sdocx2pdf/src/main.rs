@@ -8,7 +8,7 @@ use std::{
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
 use sdocx::{Document, DocumentError, ZipError};
@@ -19,10 +19,6 @@ use crate::tool::Tool;
 mod op_gen;
 mod stroke;
 mod tool;
-
-// fixme: If splitting extends a page, the background colour will not be extended
-// fixme: If splitting results in landscape pages, they won't be A4 because of how we set the width
-// todo: Defer setting the background colour until the split-page rescaling step if we're splitting
 
 #[derive(ValueEnum, Clone)]
 enum BasicSplitMode {
@@ -181,13 +177,15 @@ impl EmbeddedPdf {
         };
 
         let (src_width, src_height) = {
-            // [x, y, width, height]. Can be `Integer`s or `Real`s, but `as_float` doesn't care
-            // which.
+            // [left, bottom, right, top]. Can be `Integer`s or `Real`s, but `as_float` doesn't
+            // care which.
             let a = media_box.as_array()?;
 
             (
-                dest_pdf.dereference(&a[2])?.1.as_float()?,
-                dest_pdf.dereference(&a[3])?.1.as_float()?,
+                dest_pdf.dereference(&a[2])?.1.as_float()?
+                    - dest_pdf.dereference(&a[0])?.1.as_float()?,
+                dest_pdf.dereference(&a[3])?.1.as_float()?
+                    - dest_pdf.dereference(&a[1])?.1.as_float()?,
             )
         };
 
@@ -213,7 +211,7 @@ impl EmbeddedPdf {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Try to read the document as though it's a zip file.
     let (document, mut media_storage) = match Document::from_zip(&args.doc) {
@@ -241,6 +239,11 @@ fn main() -> anyhow::Result<()> {
         if pageless { "pageless" } else { "paged" }
     );
 
+    if !pageless {
+        args.auto_split = false;
+        args.basic_split = None;
+    }
+
     let multi_progress = MultiProgress::new();
 
     // Only show a progress bar for the pages if there is more than one.
@@ -266,7 +269,7 @@ fn main() -> anyhow::Result<()> {
         "Pages" => pages_id,
     };
 
-    let mut page_ids = Vec::with_capacity(document.pages().len());
+    let mut page_id_refs = Vec::with_capacity(document.pages().len());
 
     const A4_PTRT_WIDTH_PT: f32 = 210.0 * 2.84526;
     const A4_PTRT_HEIGHT_PT: f32 = 297.0 * 2.84526;
@@ -275,8 +278,7 @@ fn main() -> anyhow::Result<()> {
     // into the output PDF.
     let mut embedded_pdfs = HashMap::new();
 
-    let mut combined_page_height = 0.0;
-    let mut combined_page_width = 0.0;
+    let mut auto_split_points = Vec::new();
 
     for (pos, page) in document.pages().iter().with_position() {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
@@ -300,24 +302,45 @@ fn main() -> anyhow::Result<()> {
         let page_w_pt = page_w_internal * pt_per_unit;
 
         let page_h_pt = {
-            if pageless
-                && page.embedded_pdf_pages().is_empty()
-                && let Some(drawn_rect) = page.drawn_rect()
-            {
-                // Since pageless documents are A4-width, the height of a page in an equivalent
-                // paged document is A4 height, 297 mm. The sdocx tends to report an extra
-                // page-height worth of empty space at the end of a pageless document. When the app
-                // exports a PDF, this space is not included, and we don't want to include it
-                // either, so we subtract it from the height. Just to be safe, we make sure not to
-                // reduce the height below the combined height of the pages we'd need to hold the
-                // drawn content if this were a paged document.
+            if pageless && let Some(drawn_rect) = page.drawn_rect() {
+                // The sdocx tends to report an extra "page-height" worth of empty space at the end
+                // of a pageless document. When the app exports a PDF, this space is not included,
+                // and we don't want to include it either, so we subtract it from the height. Just
+                // to be safe, we make sure not to reduce the height below the combined height of
+                // the pages we'd need to hold the drawn content or embedded PDF content if this
+                // were a paged document.
 
-                let drawn_height_pt = (drawn_rect.bottom - drawn_rect.top) as f32 * pt_per_unit;
+                // Distance from the top of the document to the lowest point drawn to.
+                let drawn_floor_pt = drawn_rect.bottom as f32 * pt_per_unit;
 
-                let drawn_page_count = (drawn_height_pt / A4_PTRT_HEIGHT_PT).ceil();
-                let reduced_page_count = (page_h_internal * pt_per_unit) / A4_PTRT_HEIGHT_PT - 1.0;
+                // Find the rectangle of the embedded PDF page furthest down the document.
+                let lowest_pdf_rect = page
+                    .embedded_pdf_pages()
+                    .iter()
+                    .map(|epp| epp.rect())
+                    .max_by(|l, r| l.bottom.total_cmp(&r.bottom));
 
-                reduced_page_count.max(drawn_page_count) * A4_PTRT_HEIGHT_PT
+                let (floor_pt, assumed_page_height) = if let Some(rect_unit) = lowest_pdf_rect {
+                    // Distance from the top to the lowest point reached by a page of an embedded
+                    // PDF.
+                    let pdf_floor_pt = rect_unit.bottom as f32 * pt_per_unit;
+
+                    (
+                        pdf_floor_pt.max(drawn_floor_pt),
+                        // Assume the added space will be the same size as the last PDF page.
+                        (rect_unit.bottom - rect_unit.top) as f32 * pt_per_unit,
+                    )
+                } else {
+                    // Assume the added space will be the same height as an A4 page, as we've
+                    // nothing else to go on (and this is usually correct).
+                    (drawn_floor_pt, A4_PTRT_HEIGHT_PT)
+                };
+
+                let used_page_count = (floor_pt / assumed_page_height).ceil();
+                let reduced_page_count =
+                    (page_h_internal * pt_per_unit) / assumed_page_height - 1.0;
+
+                reduced_page_count.max(used_page_count) * assumed_page_height
             } else {
                 page_h_internal * pt_per_unit
             }
@@ -413,6 +436,17 @@ fn main() -> anyhow::Result<()> {
                 lopdf::content::Operation::new("Do", vec![xobj_name.into()]),
                 op_gen::restore_graphics_state(),
             ]);
+
+            if args.auto_split {
+                // If this is the first embedded page, it needs to go on a new page.
+                if auto_split_points.is_empty() {
+                    // Break at the top.
+                    auto_split_points.push(y_pt + vert_scale * src_height_pt);
+                }
+
+                // Break at the bottom.
+                auto_split_points.push(y_pt);
+            }
         }
 
         operations.push({
@@ -478,18 +512,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        combined_page_width += page_w_pt.round();
-        combined_page_height += page_h_pt.round();
-
-        // Media/trim/crop box for the page. (Trim box defaults to crop box, which defaults to
-        // media box.)
-        let media_box: Vec<lopdf::Object> = vec![
-            0.into(),
-            0.into(),
-            (page_w_pt.round() as i64).into(),
-            (page_h_pt.round() as i64).into(),
-        ];
-
         let content = lopdf::content::Content { operations };
 
         let contents_id = lpdf.add_object(lopdf::Stream::new(
@@ -502,25 +524,102 @@ fn main() -> anyhow::Result<()> {
             "XObject" => xobjects,
         };
 
-        let page = lopdf::dictionary! {
+        let page_base = lopdf::dictionary! {
             "Type" => "Page",
-            "MediaBox" => media_box,
             "Parent" => pages_id,
             "Resources" => resources_id,
             "Contents" => contents_id,
         };
 
-        let page_id = lpdf.new_object_id();
-        lpdf.set_object(page_id, page);
-        page_ids.push(lopdf::Object::Reference(page_id));
+        // Split pages if basic splitting is enabled or auto-splitting is enabled and working.
+        if args.basic_split.is_some() || (args.auto_split && !auto_split_points.is_empty()) {
+            let split_points = if !auto_split_points.is_empty() {
+                let mut asp = &auto_split_points[..];
+
+                // In a lot of cases, the first and last embedded PDF pages align with the
+                // beginning and end of the document. We use a 5pt margin to determine whether this
+                // is the case at either end. If it is, we ignore the relevant split.
+                if (page_h_pt - asp[0]) < 5.0 {
+                    asp = &asp[1..];
+                }
+
+                if asp.last().is_some_and(|&p| p < 5.0) {
+                    asp = &asp[..asp.len() - 1];
+                }
+
+                // Add precise points at the top and bottom of the document.
+                Either::Left(
+                    std::iter::once(page_h_pt)
+                        .chain(asp.iter().copied())
+                        .chain(std::iter::once(0.0)),
+                )
+            } else {
+                Either::Right({
+                    let split_page_height = match args.basic_split {
+                        Some(BasicSplitMode::A4Portrait) => A4_PTRT_HEIGHT_PT,
+                        Some(BasicSplitMode::A4Landscape) => {
+                            // This is a pageless document, so we've already scaled it down
+                            // to have A4 width. To get A4 aspect ratio (even if we don't currently
+                            // resize again to make things properly A4) we need
+                            A4_PTRT_WIDTH_PT / std::f32::consts::SQRT_2
+                        }
+                        // Per the outer `if`
+                        None => unreachable!(),
+                    };
+
+                    let split_page_count: u32 =
+                        (page_h_pt / split_page_height).ceil().to_u32().unwrap();
+
+                    // If the desired height doesn't perfectly divide the document height, we'll be
+                    // adding a bit onto the last page.
+                    let _last_split_page_extension =
+                        split_page_height - (page_h_pt % split_page_height);
+
+                    // fixme: That will mess up the background colour, because we only filled as
+                    // much as we needed before.
+
+                    (0..=split_page_count)
+                        .map(move |i| (i as f32).mul_add(-split_page_height, page_h_pt))
+                })
+            };
+
+            let page_tops_bottoms = split_points.tuple_windows::<(_, _)>();
+
+            for (top, bottom) in page_tops_bottoms {
+                // We use the same content and resources for all of the pages, but shift the media
+                // box to show different parts.
+                // fixme: Some PDF readers really don't like that and take ages to load the pages.
+                let mut page = page_base.clone();
+
+                page.set(
+                    b"MediaBox",
+                    vec![0.0.into(), bottom.into(), page_w_pt.into(), top.into()],
+                );
+
+                let page_id = lpdf.new_object_id();
+                lpdf.set_object(page_id, page);
+                page_id_refs.push(lopdf::Object::Reference(page_id));
+            }
+        } else {
+            let mut page = page_base;
+
+            page.set(
+                b"MediaBox",
+                vec![0.into(), 0.into(), page_w_pt.into(), page_h_pt.into()],
+            );
+
+            let page_id = lpdf.new_object_id();
+            lpdf.set_object(page_id, page);
+            page_id_refs.push(lopdf::Object::Reference(page_id));
+        }
     }
 
     lpdf.set_object(
         pages_id,
         lopdf::dictionary! {
             "Type" => "Pages",
-            "Count" => page_ids.len() as i64,
-            "Kids" => page_ids,
+            "Count" => page_id_refs.len() as i64,
+            "Kids" => page_id_refs,
         },
     );
 
