@@ -1,14 +1,17 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     os::unix::fs::MetadataExt,
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
+use anyhow::Context;
+use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
-use lopdf::dictionary;
+use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
+use sdocx::{Document, DocumentError, ZipError};
 use thiserror::Error;
 
 use crate::tool::Tool;
@@ -17,12 +20,25 @@ mod op_gen;
 mod stroke;
 mod tool;
 
+#[derive(Parser)]
+#[command(version, about = "Converts Samsung Notes documents to vectorised PDFs")]
+struct Args {
+    #[arg(
+        id = "IN",
+        help = "path to .sdocx file (or the equivalent directory for an unexported document)"
+    )]
+    doc: PathBuf,
+
+    #[arg(help = "path to write the PDF to")]
+    out: PathBuf,
+}
+
 /// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
 /// the top or finds a (grand)*parent that contains the key.
 fn get_inherited_attr<'dc>(
-    mut current_dict: &'dc lopdf::Dictionary,
+    mut current_dict: &'dc PdfDict,
     key: &[u8],
-    doc: &'dc lopdf::Document,
+    doc: &'dc Pdf,
 ) -> Option<&'dc lopdf::Object> {
     loop {
         if let Ok(v) = current_dict.get(key) {
@@ -43,7 +59,7 @@ fn get_inherited_attr<'dc>(
 #[error(transparent)]
 enum EmbeddedPdfError {
     Io(#[from] std::io::Error),
-    Lopdf(#[from] lopdf::Error),
+    Pdf(#[from] lopdf::Error),
 
     #[error("page has no MediaBox entry")]
     MissingMediaBox,
@@ -61,10 +77,10 @@ impl EmbeddedPdf {
     fn embed(
         src_name: impl AsRef<Path>,
         media_storage: &mut sdocx::MediaStorage,
-        dest_pdf: &mut lopdf::Document,
+        dest_pdf: &mut Pdf,
     ) -> Result<EmbeddedPdf, EmbeddedPdfError> {
         // Open and parse the PDF we're embedding.
-        let mut src_pdf = lopdf::Document::load_from(media_storage.open_file(src_name)?)?;
+        let mut src_pdf = Pdf::load_from(media_storage.open_file(src_name)?)?;
 
         // Renumber the objects in the source so their IDs don't collide with those in the
         // destination. This lets us move objects from the source to the destination directly,
@@ -89,7 +105,7 @@ impl EmbeddedPdf {
     fn create_page_xobject(
         &self,
         index: u32,
-        dest_pdf: &mut lopdf::Document,
+        dest_pdf: &mut Pdf,
     ) -> Result<(lopdf::ObjectId, f32, f32), EmbeddedPdfError> {
         let page_id = self.src_page_ids[index as usize];
 
@@ -136,41 +152,34 @@ impl EmbeddedPdf {
     }
 }
 
-fn main() {
-    let (document, mut media_storage) = sdocx::Document::from_zip(
-        // "/home/alex/projects/re/sdocx/sample_docs/TSI exam_260507_125853.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/FM C1_260525_134723.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Section2lectures-2_260218_125010.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/BMAN L8_260326_105435.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/GG W9_260423_100211.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Two pdfs mixed_260626_232741.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Different pen types_260623_171841.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Nearly empty but long inf scroll_260624_170445.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145202.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_145950_has_empty_page.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Landscape_260624_150246_with_explicit_blank_page_last.sdocx",
-        "/home/alex/projects/re/sdocx/sample_docs/Much handwriting on pages_260625_184756.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/Paged with handwriting_260624_142215.sdocx",
-        // "/home/alex/projects/re/sdocx/sample_docs/long page with rotated squiggle_260624_155155.sdocx",
-    )
-    .unwrap();
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // Try to read the document as though it's a zip file.
+    let (document, mut media_storage) = match Document::from_zip(&args.doc) {
+        Ok(v) => v,
+        // If that fails because it's a directory and not a zip, read the directory instead.
+        Err(DocumentError::Io(e) | DocumentError::Zip(ZipError::Io(e)))
+            if e.kind() == std::io::ErrorKind::IsADirectory =>
+        {
+            Document::from_dir(args.doc).context("Failed to read document as directory")?
+        }
+        Err(e) => return Err(e).context("Failed to read document as zip file"),
+    };
+
+    let mut lpdf = Pdf::with_version("1.5");
 
     let document_name = document.title_text().raw_string().unwrap_or("Invalid name");
 
-    eprintln!("Name is '{document_name}'");
-
-    let mut lpdf = lopdf::Document::with_version("1.5");
-
     let pageless = match document.page_model() {
-        sdocx::PageModel::Paged => {
-            eprintln!("This is a paged document");
-            false
-        }
-        sdocx::PageModel::Pageless => {
-            eprintln!("This is a pageless document");
-            true
-        }
+        sdocx::PageModel::Paged => false,
+        sdocx::PageModel::Pageless => true,
     };
+
+    eprintln!(
+        "Opened {} document '{document_name}'.",
+        if pageless { "pageless" } else { "paged" }
+    );
 
     let multi_progress = MultiProgress::new();
 
@@ -187,7 +196,7 @@ fn main() {
         None
     };
 
-    // (Used `printpdf::serialize::to_lopdf_doc` as a reference)
+    // (Used `printpdf::serialize::to_lopdf_doc` as a reference for the basic setup)
     let pages_id = lpdf.new_object_id();
 
     let catalog = lopdf::dictionary! {
@@ -252,26 +261,31 @@ fn main() {
         };
 
         let mut operations = Vec::new();
-        let mut xobjects = lopdf::Dictionary::new();
+        let mut xobjects = PdfDict::new();
 
         for (emb_i, emb_page) in page.embedded_pdf_pages().iter().enumerate() {
             let emb_pdf_name = emb_page.file().name();
-
-            // hack: `unwrap` here will cause everything to fail if the document embeds a
-            // sufficiently malformed PDF.
 
             // Get an existing `EmbeddedPdf` for the PDF in question or, if one does not exist,
             // create it by embedding the PDF into the one we're building.
             let embedded_pdf = &*match embedded_pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => vac.insert(
-                    EmbeddedPdf::embed(emb_pdf_name, &mut media_storage, &mut lpdf).unwrap(),
+                    EmbeddedPdf::embed(emb_pdf_name, &mut media_storage, &mut lpdf)
+                        .with_context(|| format!("Failed to embed PDF '{emb_pdf_name}'"))?,
                 ),
             };
 
+            let emb_page_index = emb_page.page_index();
+
             let (xobj_id, src_width_pt, src_height_pt) = embedded_pdf
-                .create_page_xobject(emb_page.page_index(), &mut lpdf)
-                .unwrap();
+                .create_page_xobject(emb_page_index, &mut lpdf)
+                .with_context(|| {
+                    format!(
+                        "Failed to embed page {} of PDF '{emb_pdf_name}'",
+                        emb_page_index + 1
+                    )
+                })?;
 
             // We have to scale and translate the embedded page to fit inside the prescribed
             // rectangle.
@@ -366,15 +380,16 @@ fn main() {
                         name
                     });
 
-                tool.draw_events(
+                if let Err(()) = tool.draw_events(
                     gs_name,
                     (page_w_internal, page_h_internal),
                     strokes
                         .inspect(|_| strokes_handled += 1)
                         .map(|s| s.events()),
                     &mut operations,
-                )
-                .unwrap();
+                ) {
+                    eprintln!("Failed to draw stroke");
+                }
             }
         }
 
@@ -390,7 +405,7 @@ fn main() {
 
         let contents_id = lpdf.add_object(lopdf::Stream::new(
             lopdf::dictionary! {},
-            content.encode().unwrap(),
+            content.encode().context("Failed to encode page content")?,
         ));
 
         let resources_id = lopdf::dictionary! {
@@ -436,15 +451,13 @@ fn main() {
 
     let _ = multi_progress.clear();
 
-    let out_path = "/tmp/doc.pdf";
-
     let write_spinner = ProgressBar::no_length()
         .with_style(
             ProgressStyle::with_template("{spinner} {wide_msg}")
                 .unwrap()
                 .tick_chars("-\\|/ "),
         )
-        .with_message(format!("Saving to '{out_path}'"));
+        .with_message(format!("Saving to '{}'...", args.out.to_string_lossy()));
 
     write_spinner.enable_steady_tick(Duration::from_millis(130));
 
@@ -454,11 +467,18 @@ fn main() {
     lpdf.prune_objects();
     lpdf.compress();
 
-    lpdf.save_modern(&mut std::fs::File::create(out_path).expect("failed to open output file"))
-        .expect("failed to write PDF");
+    lpdf.save_modern(
+        &mut std::fs::File::create(&args.out)
+            .with_context(|| format!("Failed to create output file {:?}", args.out))?,
+    )
+    .context("Failed to save PDF to output file")?;
 
-    let mb = f64::from(std::fs::metadata("/tmp/doc.pdf").unwrap().size() as u32) / 1000000f64;
+    let metadata_r = std::fs::metadata(args.out);
     write_spinner.finish_and_clear();
 
-    eprintln!("{mb} MB");
+    if let Ok(metadata) = metadata_r {
+        eprintln!("Wrote {}.", indicatif::HumanBytes(metadata.size()));
+    }
+
+    Ok(())
 }

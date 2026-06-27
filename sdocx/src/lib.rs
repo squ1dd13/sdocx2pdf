@@ -45,10 +45,10 @@ use byte_stream::{ByteStreamLe, ReadStringError, TryParse};
 use std::io::Read;
 use thiserror::Error;
 
-pub use doc::Document;
-pub use doc::MediaStorage;
+pub use doc::{Document, DocumentError, MediaStorage};
 pub use end_tag::{BackgroundTheme, DocumentType, PageModel, TextDirection};
 pub use page::object::DocObject;
+pub use zip::result::ZipError;
 
 mod bits;
 mod byte_stream;
