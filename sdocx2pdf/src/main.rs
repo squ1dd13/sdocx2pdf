@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
@@ -20,17 +20,77 @@ mod op_gen;
 mod stroke;
 mod tool;
 
+// fixme: If splitting extends a page, the background colour will not be extended
+// fixme: If splitting results in landscape pages, they won't be A4 because of how we set the width
+// todo: Defer setting the background colour until the split-page rescaling step if we're splitting
+
+#[derive(ValueEnum, Clone)]
+enum BasicSplitMode {
+    #[value(help = "Split the document into portrait A4 pages")]
+    A4Portrait,
+    #[value(help = "Split the document into landscape A4 pages")]
+    A4Landscape,
+}
+
+/// A tool for converting Samsung Notes documents to vectorised PDFs. "Vectorised" means that
+/// handwriting data is stored mathematically (as equations for curves) rather than as pixel data
+/// (an image). This makes writing clearer and easier to read.
 #[derive(Parser)]
-#[command(version, about = "Converts Samsung Notes documents to vectorised PDFs")]
+#[command(
+    version,
+    about = "Converts Samsung Notes documents to vectorised PDFs",
+    long_about
+)]
 struct Args {
-    #[arg(
-        id = "IN",
-        help = "Path to .sdocx file (or the equivalent directory for an unexported document)"
-    )]
+    /// The path to the Samsung Notes document to be converted. This is typically an SDOCX file
+    /// (.sdocx).
+    ///
+    /// The Windows app stores unexported documents as directories that have the same internal
+    /// structure as SDOCX files. You can also pass the path to one of these directories, or to a
+    /// directory containing the contents of an unzipped SDOCX file.
+    #[arg(id = "IN", help = "Path to .sdocx file", long_help)]
     doc: PathBuf,
 
-    #[arg(help = "Path to write the PDF to")]
+    /// The path to which the produced PDF will be written. If it already exists, the file will be
+    /// overwritten.
+    #[arg(help = "Path to write the PDF to", long_help)]
     out: PathBuf,
+
+    /// Inserts page breaks into pageless documents between pages of any embedded PDFs.
+    /// Disabled by default.
+    ///
+    /// By default, a pageless document will be converted to a PDF containing a long single page.
+    /// With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are
+    /// inserted to match the page breaks in the embedded PDFs. For example, if you import a
+    /// five-page PDF into a blank pageless document and annotate it, auto-splitting will give you
+    /// a five-page PDF rather than a single-page PDF.
+    ///
+    /// This option does nothing when converting a paged document. It also does nothing for
+    /// pageless documents that do not embed any PDFs; see the basic splitting option.
+    #[arg(
+        long,
+        help = "Add page breaks to pageless documents matching breaks in any embedded PDFs",
+        long_help
+    )]
+    auto_split: bool,
+
+    /// Specifies the page-splitting behaviour used for pageless documents when auto-splitting is
+    /// not in effect, either because it is disabled or because the document being converted does
+    /// not embed any PDFs.
+    ///
+    /// Basic splitting is disabled by default, resulting in long single-page PDFs when
+    /// auto-splitting is not used. To use basic splitting only, specify a mode and do not enable
+    /// auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting
+    /// is used as a fallback when there are no PDFs embedded in the document. If auto-splitting is
+    /// enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those
+    /// that don't will not be split at all.
+    #[arg(
+        long,
+        help = "Page-splitting mode for pageless documents without embedded PDFs \
+        or for when auto-splitting is disabled",
+        long_help
+    )]
+    basic_split: Option<BasicSplitMode>,
 }
 
 /// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
@@ -208,12 +268,15 @@ fn main() -> anyhow::Result<()> {
 
     let mut page_ids = Vec::with_capacity(document.pages().len());
 
-    const A4_PORTRAIT_WIDTH_PT: f32 = 210.0 * 2.84526;
+    const A4_PTRT_WIDTH_PT: f32 = 210.0 * 2.84526;
     const A4_PTRT_HEIGHT_PT: f32 = 297.0 * 2.84526;
 
     // Maps the names of PDF files to `EmbeddedPdf`s that can be used to place pages from the PDFs
     // into the output PDF.
     let mut embedded_pdfs = HashMap::new();
+
+    let mut combined_page_height = 0.0;
+    let mut combined_page_width = 0.0;
 
     for (pos, page) in document.pages().iter().with_position() {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
@@ -232,7 +295,7 @@ fn main() -> anyhow::Result<()> {
         // the app, this results in A4-sized pages for both portrait and lanscape. For pageless
         // documents and for the app's "long portrait" option, the width is that of A4, with the
         // height scaled accordingly.
-        let pt_per_unit = A4_PORTRAIT_WIDTH_PT / page_w_internal.min(page_h_internal);
+        let pt_per_unit = A4_PTRT_WIDTH_PT / page_w_internal.min(page_h_internal);
 
         let page_w_pt = page_w_internal * pt_per_unit;
 
@@ -415,8 +478,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Media/trim/crop box for the page.
-        let mtc_box: Vec<lopdf::Object> = vec![
+        combined_page_width += page_w_pt.round();
+        combined_page_height += page_h_pt.round();
+
+        // Media/trim/crop box for the page. (Trim box defaults to crop box, which defaults to
+        // media box.)
+        let media_box: Vec<lopdf::Object> = vec![
             0.into(),
             0.into(),
             (page_w_pt.round() as i64).into(),
@@ -437,9 +504,7 @@ fn main() -> anyhow::Result<()> {
 
         let page = lopdf::dictionary! {
             "Type" => "Page",
-            "MediaBox" => mtc_box.clone(),
-            "TrimBox" => mtc_box.clone(),
-            "CropBox" => mtc_box,
+            "MediaBox" => media_box,
             "Parent" => pages_id,
             "Resources" => resources_id,
             "Contents" => contents_id,
