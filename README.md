@@ -6,7 +6,7 @@ sdocx2pdf is a tool for converting Samsung Notes documents to vector PDFs. Vecto
 handwriting using smooth curves that appear crisp at any resolution. This is unlike the PDFs that
 the Samsung Notes apps themselves export, which are _raster_ PDFs: they represent the handwriting
 using finite-resolution images, making it appear pixelated. The aim of sdocx2pdf is to produce a
-PDF that looks close to how the note looks in the Samsung Notes app.
+vector PDF that looks close to how the unexported note looks in the app.
 
 This repository contains `sdocx`, a library crate, and `sdocx2pdf`, a binary crate. The former
 implements a library for parsing Samsung's proprietary SDOCX format; the latter uses that library
@@ -69,6 +69,8 @@ converted PDF. However, I expect sdocx2pdf to work to some degree on all
 <p style="background-color: yellow">technical details</p>
 
 <p style="background-color: yellow">right now it is very error-sensitive by design in order to make it easy to keep the library up-to-date - not ideal for a tool, so will make it more resilient</p>
+
+<p style="background-color: yellow">collapsible help text</p>
 
 [^1]:
     Technically, there are some types of objects that could exist but which the apps never create
