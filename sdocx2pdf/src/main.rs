@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -667,7 +666,7 @@ fn main() -> anyhow::Result<()> {
     if let Ok(metadata) = metadata_r {
         eprintln!(
             "Wrote {} to '{out_path_str}'.",
-            indicatif::HumanBytes(metadata.size())
+            indicatif::HumanBytes(metadata.len())
         );
     }
 
