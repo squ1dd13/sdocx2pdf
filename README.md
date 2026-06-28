@@ -173,9 +173,9 @@ points. For some pens, the width of the bean is determined using pressure.
     any object that you can add to a document in the Android app.
 
 [^3]:
-    To reduce file size, the full bean is not always created. The round ends make for better
-    connections, because the overlap prevents hairline gaps between beans, but there is still an
-    overlap if the end of one bean is round and the start of the next bean is flat. Except for
-    sharp corners, where the rounding on the beans produces a nice rounded corner, sdocx2pdf will
-    avoid rounding both ends of the beans to save on file size. The best way to see what I mean is
-    to change the filling operations to stroking operations.
+    The full bean is not always created. The round ends make for better connections, because the
+    overlap prevents hairline gaps between beans, but there is still an overlap if the end of one
+    bean is round and the start of the next bean is flat. Except for sharp corners, where the
+    rounding on the beans produces a nice rounded corner, sdocx2pdf will avoid rounding both ends
+    of the beans to save on file size. The best way to see this is to change the filling operations
+    to stroking operations in the code.
