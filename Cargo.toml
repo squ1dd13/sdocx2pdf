@@ -1,3 +1,6 @@
 [workspace]
 members = ["sdocx", "sdocx2pdf"]
 resolver = "3"
+
+[workspace.package]
+license = "MIT"
