@@ -45,7 +45,8 @@ reproduce). These too will hopefully improve with time.
 
 ## Usage
 
-1. Download the correct version of sdocx2pdf for your computer.
+1. Go to the [latest release](https://github.com/squ1dd13/sdocx2pdf/releases/latest) and download
+   the correct version of sdocx2pdf for your computer.
 2. On your device with Samsung Notes, open a note you wish to convert.
 3. Use either 'Save note as Samsung Notes file' or 'Share note as Samsung Notes file' to get an
    SDOCX file for the note onto your computer.
