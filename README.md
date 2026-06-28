@@ -23,7 +23,7 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
   PDF (with searchable/selectable text) using sdocx2pdf.
 
 There are options for splitting pageless documents into pages based either on page length or on the
-page breaks in any embedded PDFs. You can also choose to export a pageless document as a long
+page breaks in any embedded PDFs. You can also choose to convert a pageless document to a long
 single-page PDF.
 
 These capabilities precisely fit my personal use case: I annotate documents and take notes in
