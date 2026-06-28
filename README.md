@@ -1,4 +1,4 @@
-<p align="center"><img src="./sdocx2pdf.svg" width="30%" alt="'sdocx2pdf' in handwriting"></p>
+<p align="center"><img src="./sdocx2pdf.svg" width="40%" alt="'sdocx2pdf' in handwriting"></p>
 
 # sdocx2pdf&nbsp;&ndash;&#32;convert Samsung Notes documents to vector PDFs
 
@@ -177,7 +177,3 @@ points. For some pens, the width of the bean is determined using pressure.
     sharp corners, where the rounding on the beans produces a nice rounded corner, sdocx2pdf will
     avoid rounding both ends of the beans to save on file size. The best way to see what I mean is
     to change the filling operations to stroking operations.
-
-```
-
-```
