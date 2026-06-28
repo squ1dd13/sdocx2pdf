@@ -14,8 +14,9 @@ Notes file' (giving you a `.sdocx` file).
 
 ## Capabilities
 
-sdocx2pdf reads the handwriting data in SDOCX files, represents it mathematically using smooth
-curves, and produces a PDF containing those curves. Currently, you can
+sdocx2pdf runs on Linux, macOS and Windows and can work with SDOCX files produced by the Samsung
+Notes apps for Android and Windows. It reads the handwriting data in the files, represents it
+mathematically using smooth curves, and produces a PDF containing those curves. Currently, you can
 
 - write notes by hand in SNotes and get a vector PDF of your handwriting using sdocx2pdf; and
 - annotate PDFs by hand in SNotes and get a vector PDF with your handwriting on top of the original
