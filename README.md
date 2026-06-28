@@ -109,22 +109,22 @@ Options:
 
 ## Device compatibility
 
-I only own a Galaxy Tab S11 and the S Pen it came with, so have done all my testing of handwriting
-features with those. It is possible that differences in polling rate for different device/pen
-combinations could affect the stored handwriting data, and therefore the appearance of the
-converted PDF. I expect sdocx2pdf will work to some degree regardless of the hardware used to
+I only own a Galaxy Tab S11 and the S Pen it came with, so I have done all my testing of
+handwriting features with those. It is possible that differences in polling rate for different
+device/pen combinations could affect the stored handwriting data, and therefore the appearance of
+the converted PDF. I expect sdocx2pdf will work to some degree regardless of the hardware used to
 produce the note, but I don't know yet.
 
 ## Technical details
 
 This repository contains two crates: `sdocx`, a library crate, and `sdocx2pdf`, the binary crate
 implementing the tool. Both were written by a human (me :wave:). sdocx2pdf is built on the library,
-which parses the SDOCX format almost completely.[^2] The limitations described above are down to
+which parses the SDOCX format almost completely.[^2] The limitations described above are due to
 sdocx2pdf not implementing the output logic for all the features of SNotes documents. Note that
 `sdocx2pdf` was written over a long time while I was experimenting with different ways to draw the
-handwriting, so the code is very messy (right now). `sdocx`, on the other hand, was easier to write
-and the code is fairly clean. The library features extensive error reporting to make it easier to
-update when Samsung updates the file format.
+handwriting, so the code is very messy (right now). `sdocx`, on the other hand, was easier to
+write, and the code is fairly clean. The library features extensive error reporting to make it
+easier to update when Samsung updates the file format.
 
 I have mostly focused on handwriting. (Accordingly, the way it is converted is stupidly
 complicated.) SDOCX represents handwriting as a list of events. A single event gives a position, a
@@ -138,7 +138,7 @@ the handwriting and discard the rest.
 sdocx2pdf finds the [curvature](https://en.wikipedia.org/wiki/Curvature) along the stroke and uses
 it to identify the [inflection points](https://en.wikipedia.org/wiki/Inflection_point) and
 [vertices](<https://en.wikipedia.org/wiki/Vertex_(curve)>). Along with the positions of the first
-and last events, these are considered the 'key features' of the curve, and are always included in
+and last events, these are considered the 'key features' of the curve and are always included in
 the output. Some points between these features are also included in order to ensure the difference
 in tangent angle between adjacent sampled points stays below a certain threshold. Otherwise, it
 becomes difficult to connect the points nicely using cubic Bézier curves, which is what sdocx2pdf
@@ -160,9 +160,9 @@ are calculated so that the body of the bean roughly follows the shape of the str
 points. For some pens, the width of the bean is determined using pressure.
 
 [^1]:
-    In fact, the Windows app stores documents in an extracted SDOCX format which sdocx2pdf
-    supports. Once you've found them, you can just give sdocx2pdf the path to the folder
-    corresponding to the note you'd like to convert.
+    In fact, the Windows app stores documents in an extracted SDOCX format that sdocx2pdf supports.
+    Once you've found them, you can just give sdocx2pdf the path to the folder corresponding to the
+    note you'd like to convert.
 
 [^2]:
     Technically, there are some types of objects that could exist but which the apps never create
