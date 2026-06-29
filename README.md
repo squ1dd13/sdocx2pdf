@@ -31,6 +31,23 @@ lectures using SNotes. I'd like to be able to read my work on devices that do no
 exporting to PDF is ideal. However, using the native PDF export feature in SNotes produces
 pixelated PDFs that are unpleasant to read. sdocx2pdf solves this problem.
 
+<p>
+<details>
+
+<summary>Sample PDF page</summary>
+
+To give you an idea of what this all means in practice, here is a page from a PDF produced by
+sdocx2pdf v0.1.1. It has been converted to SVG so that it can be included in this README. (Note
+that the green marker at the bottom has been outlined manually using the fountain pen.) You may be
+able to tell that the fountain pen is the first-class citizen here.
+
+<p align="center">
+   <img src="./demo.svg" width="60%" alt="A sample PDF page produced by the tool">
+</p>
+
+</details>
+</p>
+
 At present, sdocx2pdf understands but ignores all note features other than handwriting and embedded
 PDFs. Thus, it does not yet produce PDFs containing images, shapes, typed text, web links or
 paintings. It can still process documents that use these features, but it will not include them in
