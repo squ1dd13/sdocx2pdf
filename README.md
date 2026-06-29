@@ -36,10 +36,10 @@ pixelated PDFs that are unpleasant to read. sdocx2pdf solves this problem.
 
 <summary>Sample PDF page</summary>
 
-To give you an idea of what this all means in practice, here is a page from a PDF produced by
-sdocx2pdf v0.1.1. It has been converted to SVG so that it can be included in this README. (Note
-that the green marker at the bottom has been outlined manually using the fountain pen.) You may be
-able to tell that the fountain pen is the first-class citizen here.
+Here is a page from a PDF produced by sdocx2pdf v0.1.1. It has been converted to SVG so that it can
+be included in this README. (Note that the green marker at the bottom has been outlined manually
+using the fountain pen.) You may be able to tell that the fountain pen is the first-class citizen
+here.
 
 <p align="center">
    <img src="./demo.svg" width="60%" alt="A sample PDF page produced by the tool">
