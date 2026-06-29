@@ -10,7 +10,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
-use sdocx::{Document, DocumentError, ZipError};
+use sdocx::Document;
 use thiserror::Error;
 
 use crate::tool::Tool;
@@ -212,17 +212,12 @@ impl EmbeddedPdf {
 fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
 
-    // Try to read the document as though it's a zip file.
-    let (document, mut media_storage) = match Document::from_zip(&args.doc) {
-        Ok(v) => v,
-        // If that fails because it's a directory and not a zip, read the directory instead.
-        Err(DocumentError::Io(e) | DocumentError::Zip(ZipError::Io(e)))
-            if e.kind() == std::io::ErrorKind::IsADirectory =>
-        {
-            Document::from_dir(args.doc).context("Failed to read document as directory")?
-        }
-        Err(e) => return Err(e).context("Failed to read document as zip file"),
-    };
+    let (document, mut media_storage) = Document::from_zip(&args.doc).or_else(move |e| {
+        Document::from_dir(args.doc)
+            .context("Failed to read document as a zip file or a directory")
+            // Attach the error we got when we tried opening it as a zip file.
+            .context(e)
+    })?;
 
     let mut lpdf = Pdf::with_version("1.5");
 
