@@ -40,9 +40,9 @@ On the left is a page from a PDF produced by Samsung Notes; on the right is the 
 PDF produced by sdocx2pdf v0.1.1 when given the same document. Both pages have been converted to
 SVG so they can be included in this README. You may be able to tell that the fountain pen is the
 first-class citizen in the sdocx2pdf output. Note that the black outline around the green marker at
-the bottom is drawn on using the fountain pen; it is not a part of the marker pen. If you click on
-the two images to view them at a larger size, you will see how much clearer the handwriting is in
-the sdocx2pdf output (even if my handwriting is still terrible).
+the bottom is drawn on using the fountain pen; it is not a part of the marker pen. If you zoom in
+on the images, you will see how much clearer the handwriting is in the sdocx2pdf output (even if my
+handwriting is still terrible).
 
 <p align="center">
    <img src="./demo_raster.svg" width="40%" alt="A sample PDF page produced by Samsung Notes">
