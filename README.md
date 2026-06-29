@@ -147,12 +147,12 @@ becomes difficult to connect the points nicely using cubic Bézier curves, which
 does.
 
 The actual handwriting processing pipeline is roughly this: clean the events; interpolate the
-position and pressure data; upsample; apply a Gaussian filter to the upsampled position and
-pressure in the time domain, finding the first and second time derivatives of position along the
-way; calculate the curvature of the filtered stroke from the derivatives; interpolate the upsampled
-and filtered position, pressure and curvature to obtain continuous functions, now of arc length,
-not time; find the key features using the curvature; and place points strategically between the key
-features to reduce the maximum angle change between points.
+position and pressure data; upsample; eliminate jitter by applying a Gaussian filter to the
+upsampled position and pressure in the time domain, finding the first and second time derivatives
+of position along the way; calculate the curvature of the filtered stroke from the derivatives;
+interpolate the upsampled and filtered position, pressure and curvature to obtain continuous
+functions, now of arc length, not time; find the key features using the curvature; and place points
+strategically between the key features to reduce the maximum angle change between points.
 
 To draw the stroke in the PDF, sdocx2pdf joins adjacent points by filling between Bézier curves
 that are combined to form the shape of an
