@@ -40,8 +40,7 @@ Another current limitation of sdocx2pdf is that it does not precisely replicate 
 the various writing tools. For example, the calligraphy pen looks exactly the same as the fountain
 pen because I have not yet invested any time in trying to make it look like it does in SNotes.
 Similarly, the pencil, calligraphy brush and ink pen are not yet distinguished from the fountain
-pen (though they have different default widths, and width is something that sdocx2pdf _does_
-reproduce). These too will hopefully improve with time.
+pen. These too will hopefully improve with time.
 
 Finally, handwriting that has been modified by the 'Handwriting Help' features is less
 information-dense than usual, and at the moment gets smoothed out a bit too much.
