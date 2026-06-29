@@ -43,6 +43,9 @@ Similarly, the pencil, calligraphy brush and ink pen are not yet distinguished f
 pen (though they have different default widths, and width is something that sdocx2pdf _does_
 reproduce). These too will hopefully improve with time.
 
+Finally, handwriting that has been modified by the 'Handwriting Help' features is less
+information-dense than usual, and at the moment gets smoothed out a bit too much.
+
 ## Usage
 
 1. Go to the [latest release](https://github.com/squ1dd13/sdocx2pdf/releases/latest) and download
