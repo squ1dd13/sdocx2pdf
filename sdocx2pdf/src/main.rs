@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     path::{Path, PathBuf},
+    process::ExitCode,
     time::Duration,
 };
 
@@ -10,7 +11,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
-use sdocx::Document;
+use sdocx::{Document, DocumentError, MediaStorage};
 use thiserror::Error;
 
 use crate::tool::Tool;
@@ -18,6 +19,8 @@ use crate::tool::Tool;
 mod op_gen;
 mod stroke;
 mod tool;
+
+const DETAILED_ERRORS_ARG_NAME: &str = "--detailed-errors";
 
 #[derive(ValueEnum, Clone)]
 enum BasicSplitMode {
@@ -86,6 +89,13 @@ struct Args {
         long_help
     )]
     basic_split: Option<BasicSplitMode>,
+
+    // ! - Do not rename this without changing `DETAILED_ERRORS_ARG_NAME` to match.
+    #[arg(
+        long,
+        help = "Show (very) detailed error messages if opening/parsing/converting fails"
+    )]
+    detailed_errors: bool,
 }
 
 /// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
@@ -209,16 +219,11 @@ impl EmbeddedPdf {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let mut args = Args::parse();
-
-    let (document, mut media_storage) = Document::from_zip(&args.doc).or_else(move |e| {
-        Document::from_dir(args.doc)
-            .context("Failed to read document as a zip file or a directory")
-            // Attach the error we got when we tried opening it as a zip file.
-            .context(e)
-    })?;
-
+fn main_convert(
+    document: Document,
+    mut media_storage: MediaStorage,
+    mut args: Args,
+) -> anyhow::Result<()> {
     let mut lpdf = Pdf::with_version("1.5");
 
     let document_name = document.title_text().raw_string().unwrap_or("Invalid name");
@@ -666,4 +671,87 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_report_request(detailed: bool) {
+    if !detailed {
+        eprintln!("For more detailed error messages, rerun with '{DETAILED_ERRORS_ARG_NAME}'.");
+    }
+
+    eprintln!(
+        "If you believe this should have worked, please file an issue on GitHub: \
+        https://github.com/squ1dd13/sdocx2pdf/issues/new."
+    );
+
+    if detailed {
+        eprintln!("Include the whole of this error message in your report.");
+    } else {
+        eprintln!(
+            "Include the whole of the error message you get \
+            with '{DETAILED_ERRORS_ARG_NAME}' in your report."
+        )
+    }
+}
+
+fn print_indented_string(s: String) {
+    for line in s.lines() {
+        eprintln!("    {line}");
+    }
+}
+
+fn print_double_open_error(err_for_zip: DocumentError, err_for_dir: DocumentError, detailed: bool) {
+    eprintln!("Tried opening as both a zip file and a directory, but got an error each time.");
+    eprintln!();
+    eprintln!("Got this error when trying to open as a zip:");
+
+    print_indented_string(if detailed {
+        format!("{err_for_zip:#?}")
+    } else {
+        format!("{err_for_zip}")
+    });
+
+    eprintln!();
+    eprintln!("Got this error when trying to open as a directory:");
+
+    print_indented_string(if detailed {
+        format!("{err_for_dir:#?}")
+    } else {
+        format!("{err_for_dir}")
+    });
+
+    eprintln!();
+    print_report_request(detailed);
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+    let detailed_errors = args.detailed_errors;
+
+    let (document, media_storage) = match Document::from_zip(&args.doc) {
+        Ok(v) => v,
+        Err(err_for_zip) => match Document::from_dir(&args.doc) {
+            Ok(v) => v,
+            Err(err_for_dir) => {
+                print_double_open_error(err_for_zip, err_for_dir, detailed_errors);
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    if let Err(err) = main_convert(document, media_storage, args) {
+        eprintln!("Encountered an error when converting the document:");
+
+        print_indented_string(if detailed_errors {
+            format!("{err:#?}")
+        } else {
+            format!("{err}")
+        });
+
+        eprintln!();
+        print_report_request(detailed_errors);
+
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
 }
