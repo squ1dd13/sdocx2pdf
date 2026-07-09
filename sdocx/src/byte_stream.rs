@@ -452,6 +452,17 @@ impl<T> BoundedStream for Take<T> {
 }
 
 #[macro_export]
+macro_rules! if_any_left {
+    ($bdd_reader:ident, $then:expr) => {
+        if $bdd_reader.n_remaining() > 0 {
+            Some($then)
+        } else {
+            None
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! _read_size_and_vec_inner {
     ($sz_read_as_usize:expr, $idx:ident => $elem:expr$(,)?) => {{
         let count: usize = $sz_read_as_usize;

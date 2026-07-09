@@ -6,7 +6,7 @@ use crate::{
         UnfinishedParsingError,
     },
     context::TryParseWithContext,
-    impl_try_from_for_optional_from, unpack_bool_flag,
+    if_any_left, impl_try_from_for_optional_from, unpack_bool_flag,
 };
 use chrono::{DateTime, Utc};
 use num::FromPrimitive;
@@ -97,9 +97,10 @@ pub enum PageModel {
 
 impl_try_from_for_optional_from!(PageModel, u16, from_u16, pub InvalidPageModelError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug, FromPrimitive, Default)]
 pub enum DocumentType {
     /// `UNLOCKED_DOC`
+    #[default]
     UnlockedDoc = 0,
     /// `LOCKED_SDOC`
     LockedSdoc = 1,
@@ -115,25 +116,27 @@ pub enum DocumentType {
 
 impl_try_from_for_optional_from!(DocumentType, u16, from_u16, pub InvalidDocumentTypeError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug, FromPrimitive, Default)]
 pub enum TextDirection {
     /// `TEXT_DIRECTION_LTR`
     LeftToRight = 0,
     /// `TEXT_DIRECTION_RTL`
     RightToLeft = 1,
     /// `TEXT_DIRECTION_DEFAULT`
+    #[default]
     Default = 2,
 }
 
 impl_try_from_for_optional_from!(TextDirection, u32, from_u32, pub InvalidTextDirectionError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug, FromPrimitive, Default)]
 pub enum BackgroundTheme {
     /// `THEME_LIGHT`
     Light = 0,
     /// `THEME_DARK`
     Dark = 1,
     /// `THEME_DEFAULT`
+    #[default]
     Default = 2,
 }
 
@@ -192,18 +195,18 @@ pub struct EndTag {
     last_viewed_page_index: u32,
     pub page_model: PageModel,
     document_type: DocumentType,
-    owner_id: String,
+    owner_id: Option<String>,
     encryption_info: Option<EncryptionInfo>,
-    display_created_time: DateTime<Utc>,
-    display_modified_time: DateTime<Utc>,
-    last_recognised_data_modified_time: DateTime<Utc>,
-    fixed_font: String,
+    display_created_time: Option<DateTime<Utc>>,
+    display_modified_time: Option<DateTime<Utc>>,
+    last_recognised_data_modified_time: Option<DateTime<Utc>>,
+    fixed_font: Option<String>,
     fixed_text_direction: TextDirection,
     fixed_background_theme: BackgroundTheme,
-    server_check_point: i64,
-    new_orientation: Orientation,
-    min_unknown_version: u32,
-    app_custom_data: String,
+    server_check_point: Option<i64>,
+    new_orientation: Option<Orientation>,
+    min_unknown_version: Option<u32>,
+    app_custom_data: Option<String>,
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
@@ -224,8 +227,8 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
         // The file's SDK type is indicated by a string at the end. Before parsing anything
         // significant, we have to go and find that string to make sure it matches the SDK type we
         // are trying to parse for.
-        {
-            reader.seek(SeekFrom::End(-ident_len_i))?;
+        let mut payload_reader = {
+            let payload_len = reader.seek(SeekFrom::End(-ident_len_i))?;
 
             let mut last_bytes = Vec::with_capacity(ident.len());
             reader.read_to_end(&mut last_bytes)?;
@@ -240,14 +243,16 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
 
             // Go back to the beginning so we can actually parse the tag.
             reader.seek(SeekFrom::Start(0))?;
-        }
 
-        let format_version = reader.read_u32_le()?;
-        let note_uuid = reader.read_short_u16_string()?;
-        let last_modified_time = reader.read_timestamp()?;
+            reader.take(payload_len)
+        };
+
+        let format_version = payload_reader.read_u32_le()?;
+        let note_uuid = payload_reader.read_short_u16_string()?;
+        let last_modified_time = payload_reader.read_timestamp()?;
 
         let is_landscape = {
-            let mut property_flags: CheckedBitfield = reader.read_u32_le()?.into();
+            let mut property_flags: CheckedBitfield = payload_reader.read_u32_le()?.into();
             unpack_bool_flag!(property_flags, 1 => v);
 
             property_flags.ensure_none_set_unchecked()?;
@@ -255,34 +260,40 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
             v
         };
 
-        let cover_image = reader.read_short_u16_string()?;
+        let cover_image = payload_reader.read_short_u16_string()?;
 
         // Notice the two different types here:
-        let note_width = reader.read_u32_le()?;
-        let note_height = reader.read_f32_le()?;
+        let note_width = payload_reader.read_u32_le()?;
+        let note_height = payload_reader.read_f32_le()?;
 
-        let app_name = reader.read_short_u16_string()?;
-        let app_version = AppVersion::try_parse(&mut reader)?;
+        let app_name = payload_reader.read_short_u16_string()?;
+        let app_version = AppVersion::try_parse(&mut payload_reader)?;
 
-        let min_format_version = reader.read_u32_le()?;
+        let min_format_version = payload_reader.read_u32_le()?;
 
-        let created_time = reader.read_timestamp()?;
-        let last_viewed_page_index = reader.read_u32_le()?;
+        let created_time = payload_reader.read_timestamp()?;
+        let last_viewed_page_index = payload_reader.read_u32_le()?;
 
-        let page_model: PageModel = reader.read_u16_le()?.try_into()?;
-        let document_type: DocumentType = reader.read_u16_le()?.try_into()?;
+        let page_model: PageModel = payload_reader.read_u16_le()?.try_into()?;
 
-        let owner_id = reader.read_short_u16_string()?;
+        // Everything after the page model is optional.
+        let document_type: DocumentType =
+            if_any_left!(payload_reader, payload_reader.read_u16_le()?.try_into()?)
+                .unwrap_or_default();
 
-        if let n_to_skip @ 1.. = reader.read_u32_le()? {
+        let owner_id = if_any_left!(payload_reader, payload_reader.read_short_u16_string()?);
+
+        if let Some(n_to_skip @ 1..) = if_any_left!(payload_reader, payload_reader.read_u32_le()?) {
             eprintln!(
                 "Warning: Skipping {n_to_skip} bytes in end tag. There must be something there!"
             );
 
-            reader.seek_relative(n_to_skip.into())?;
+            payload_reader.seek_relative(n_to_skip.into())?;
         }
 
-        if let _encryption_data_size @ 1.. = reader.read_u32_le()? {
+        let encryption_info = if let Some(_encryption_data_size @ 1..) =
+            if_any_left!(payload_reader, payload_reader.read_u32_le()?)
+        {
             // Notes are exported unencrypted (usually?). If the encryption data is present, it
             // could mean that the note is actually encrypted, in which case we won't be able to do
             // much with it. You could probably get this to happen if you tried to read an end tag
@@ -291,29 +302,36 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
                 "Warning: Encryption data present, but it shouldn't be if this is an exported file"
             );
 
-            Some(EncryptionInfo::try_parse(&mut reader)?)
+            Some(EncryptionInfo::try_parse(&mut payload_reader)?)
         } else {
             None
         };
 
-        let display_created_time = reader.read_timestamp()?;
-        let display_modified_time = reader.read_timestamp()?;
-        let last_recognised_data_modified_time = reader.read_timestamp()?;
+        let display_created_time = if_any_left!(payload_reader, payload_reader.read_timestamp()?);
+        let display_modified_time = if_any_left!(payload_reader, payload_reader.read_timestamp()?);
+        let last_recognised_data_modified_time =
+            if_any_left!(payload_reader, payload_reader.read_timestamp()?);
 
-        let fixed_font = reader.read_short_u16_string()?;
-        let fixed_text_direction: TextDirection = reader.read_u32_le()?.try_into()?;
-        let fixed_background_theme: BackgroundTheme = reader.read_u32_le()?.try_into()?;
+        let fixed_font = if_any_left!(payload_reader, payload_reader.read_short_u16_string()?);
 
-        let server_check_point = reader.read_i64_le()?;
+        let fixed_text_direction =
+            if_any_left!(payload_reader, payload_reader.read_u32_le()?.try_into()?)
+                .unwrap_or_default();
 
-        let new_orientation: Orientation = reader.read_u32_le()?.try_into()?;
-        let min_unknown_version = reader.read_u32_le()?;
+        let fixed_background_theme =
+            if_any_left!(payload_reader, payload_reader.read_u32_le()?.try_into()?)
+                .unwrap_or_default();
 
-        let app_custom_data = reader.read_long_u16_string()?;
+        let server_check_point = if_any_left!(payload_reader, payload_reader.read_i64_le()?);
 
-        // Only thing left in our `Take` should be the ident.
-        reader.seek_relative(ident_len_i)?;
-        reader.ensure_eof()?;
+        let new_orientation =
+            if_any_left!(payload_reader, payload_reader.read_u32_le()?.try_into()?);
+
+        let min_unknown_version = if_any_left!(payload_reader, payload_reader.read_u32_le()?);
+
+        let app_custom_data = if_any_left!(payload_reader, payload_reader.read_long_u16_string()?);
+
+        payload_reader.ensure_eof()?;
 
         Ok(EndTag {
             sdk_type: *sdk_type,
@@ -332,7 +350,7 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
             page_model,
             document_type,
             owner_id,
-            encryption_info: None,
+            encryption_info,
             display_created_time,
             display_modified_time,
             last_recognised_data_modified_time,
