@@ -5,7 +5,7 @@ use crate::{
         Point, Rect,
         object::{
             base::{HasObjectBase, ObjectBase},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{Path, PathParseError},
         },
@@ -34,6 +34,7 @@ pub enum LineParseError {
     Io(#[from] std::io::Error),
     Base(#[from] ShapeBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     ConnectorType(#[from] InvalidConnectorTypeError),
     Path(#[from] PathParseError),
     Unfinished(#[from] UnfinishedParsingError),
@@ -63,7 +64,7 @@ impl<R: Read + Seek> TryParse<R> for Line {
     fn try_parse(stream: &mut R) -> Result<Line, LineParseError> {
         let shape_base = ShapeBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 8)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 8)?;
 
         let connector_type: ConnectorType = stream.read_u8()?.try_into()?;
         let start_direction = stream.read_u8()?;
@@ -77,7 +78,7 @@ impl<R: Read + Seek> TryParse<R> for Line {
         let original_rect = Rect::try_parse_f64(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => default_pen_name_id: stream.read_u32_le()?;
@@ -86,7 +87,7 @@ impl<R: Read + Seek> TryParse<R> for Line {
             3 => path: Path::try_parse(&mut stream)?;
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Line {

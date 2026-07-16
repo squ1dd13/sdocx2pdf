@@ -6,7 +6,7 @@ use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, ReadStringError, TryParse, UnfinishedParsingError},
     page::object::{
         base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-        header::{ObjectHeader, ObjectHeaderError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     },
     unpack_bool_flag, unpack_field_flags,
 };
@@ -17,14 +17,14 @@ pub enum AudioParseError {
     Io(#[from] io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
+    Unfinished(#[from] UnfinishedParsingError),
 
     #[error("failed to read title string")]
     Title(#[source] ReadStringError),
 
     #[error("failed to read play time string")]
     PlayTime(#[source] ReadStringError),
-
-    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -46,11 +46,11 @@ impl<R: Read + Seek> TryParse<R> for Audio {
     fn try_parse(stream: &mut R) -> Result<Audio, AudioParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 10)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 10)?;
 
-        unpack_bool_flag!(header.property_flags_mut(), 0 => is_recorded);
+        unpack_bool_flag!(flag_block.property_flags_mut(), 0 => is_recorded);
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => attached_file_id: stream.read_u32_le()?;
@@ -62,7 +62,7 @@ impl<R: Read + Seek> TryParse<R> for Audio {
                 stream.read_short_u16_string().map_err(AudioParseError::PlayTime)?;
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Audio {

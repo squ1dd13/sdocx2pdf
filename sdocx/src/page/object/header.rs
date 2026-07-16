@@ -28,6 +28,24 @@ pub enum FlagBlockError {
     UnhandledField(#[source] UnhandledBitsError),
 }
 
+/// Flag block structure.
+///
+/// A common pattern in the binary format is to prefix serialised data with three fields: a "flex
+/// offset", a set of property flags, and a set of field flags. The property flags are stored as a
+/// variable-length bitfield and interpreted as on/off settings. The field flags are encoded in the
+/// same way, but specific bits are used to indicate the presence of specific "flex fields". Flex
+/// fields, where present, are in the "flex area". The flex area is located at some logical
+/// reference point plus the flex offset, and usually begins after any fixed fields (that is,
+/// fields which are always present); these fixed fields typically come directly after the field
+/// flags.
+///
+/// To fully deserialise an object encoded using a flag block, it is necessary to read the flex
+/// offset, the property flags, the field flags, and the fixed data, before using the flex offset
+/// to seek to the beginning of the flex area, from which point the field flags can be used to
+/// parse the flex fields.
+///
+/// This structure keeps ownership of the flags and offset and provides utilities for working with
+/// them.
 pub struct FlagBlock {
     flex_offset: u32,
     property_flags: CheckedBitfield,
@@ -35,6 +53,7 @@ pub struct FlagBlock {
 }
 
 impl FlagBlock {
+    /// Reads a flag block from `stream`.
     pub fn try_parse<R: Read>(mut stream: R) -> Result<FlagBlock, FlagBlockError> {
         let flex_offset = stream.read_u32_le()?;
 
@@ -51,6 +70,8 @@ impl FlagBlock {
         })
     }
 
+    /// Provides access to the property flags. A mutable reference is returned so that the bitfield
+    /// can keep track of which bits have been checked.
     pub const fn property_flags_mut(&mut self) -> &mut CheckedBitfield {
         &mut self.property_flags
     }
@@ -102,6 +123,7 @@ impl FlagBlock {
         Ok(&mut self.field_flags)
     }
 
+    /// Returns an error iff any property or field flags that are set have not been checked.
     pub fn ensure_flags_used(self) -> Result<(), FlagBlockError> {
         self.property_flags
             .ensure_none_set_unchecked()
@@ -129,11 +151,15 @@ pub enum ObjectHeaderError {
     },
 }
 
+/// Reads an object header (binary size, data type, flag block) from `stream`. Returns the flag
+/// block and a stream that can read up to the end of the object data, but no further.
+///
+/// Returns an error if the data type read does not match `expected_data_type`.
 pub fn try_parse_object_header<R: Read>(
     stream: R,
     expected_data_type: u16,
 ) -> Result<(FlagBlock, BlindWindow<R>), ObjectHeaderError> {
-    let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+    let mut stream = stream.inclusive_blind_window()?;
 
     let data_type = stream.read_u16_le()?;
 
@@ -145,32 +171,4 @@ pub fn try_parse_object_header<R: Read>(
     }
 
     Ok((FlagBlock::try_parse(&mut stream)?, stream))
-}
-
-// Wrapper for `FlagBlock`, which used to be `ObjectHeader`.
-// todo: Remove uses of `ObjectHeader` and just use `FlagBlock`.
-pub struct ObjectHeader(FlagBlock);
-
-impl ObjectHeader {
-    pub fn try_parse<R: Read>(
-        stream: R,
-        expected_data_type: u16,
-    ) -> Result<(ObjectHeader, BlindWindow<R>), ObjectHeaderError> {
-        try_parse_object_header(stream, expected_data_type).map(|(fb, bw)| (ObjectHeader(fb), bw))
-    }
-
-    pub const fn property_flags_mut(&mut self) -> &mut CheckedBitfield {
-        self.0.property_flags_mut()
-    }
-
-    pub fn init_flex<'me, R: Read + Seek>(
-        &'me mut self,
-        reader: &mut BlindWindow<R>,
-    ) -> std::io::Result<&'me mut CheckedBitfield> {
-        self.0.init_flex(reader)
-    }
-
-    pub fn ensure_flags_used(self) -> Result<(), ObjectHeaderError> {
-        self.0.ensure_flags_used().map_err(Into::into)
-    }
 }

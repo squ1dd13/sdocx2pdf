@@ -293,6 +293,19 @@ pub trait ByteStreamLe: Read {
             .map_err(|_| TakeInclusiveLengthPrefixedError::SizeTooSmall(frame_size))
     }
 
+    /// Like `take_inclusive_length_prefixed`, but returning a blind window.
+    fn inclusive_blind_window(
+        mut self,
+    ) -> Result<BlindWindow<Self>, TakeInclusiveLengthPrefixedError>
+    where
+        Self: Sized,
+    {
+        let frame_size = self.read_u32_le()?;
+        Window::new_at(self, 4, frame_size.into())
+            .map_err(|_| TakeInclusiveLengthPrefixedError::SizeTooSmall(frame_size))
+            .map(Into::into)
+    }
+
     // todo: Just use `reader.read_u32_le().map(|v| reader.take(v.into()))?`
     /// Reads `size: u32` from `self` and returns a wrapper that can read at most `size` further
     /// bytes from `self`.

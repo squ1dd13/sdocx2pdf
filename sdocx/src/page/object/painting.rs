@@ -8,7 +8,7 @@ use crate::{
         Rect,
         object::{
             base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         },
     },
     unpack_field_flags,
@@ -20,6 +20,7 @@ pub enum PaintingParseError {
     Io(#[from] std::io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     Unfinished(#[from] UnfinishedParsingError),
 }
 
@@ -43,9 +44,9 @@ impl<R: Read + Seek> TryParse<R> for Painting {
     fn try_parse(stream: &mut R) -> Result<Painting, PaintingParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 14)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 14)?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => attached_file_id: stream.read_u32_le()?;
@@ -55,7 +56,7 @@ impl<R: Read + Seek> TryParse<R> for Painting {
             4 => original_rect: Rect::try_parse_f64(&mut stream)?;
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Painting {

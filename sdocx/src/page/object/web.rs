@@ -6,7 +6,7 @@ use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, ReadStringError, TryParse, UnfinishedParsingError},
     page::object::{
         base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-        header::{ObjectHeader, ObjectHeaderError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     },
     unpack_field_flags,
 };
@@ -17,6 +17,7 @@ pub enum WebParseError {
     Io(#[from] std::io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     Unfinished(#[from] UnfinishedParsingError),
 
     #[error("failed to read title string")]
@@ -54,9 +55,9 @@ impl<R: Read + Seek> TryParse<R> for Web {
     fn try_parse(stream: &mut R) -> Result<Web, WebParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 13)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 13)?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => attached_html_file_id: stream.read_u32_le()?;
@@ -73,7 +74,7 @@ impl<R: Read + Seek> TryParse<R> for Web {
             6 => view_type: stream.read_u32_le()?;
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Web {

@@ -7,7 +7,7 @@ use crate::{
     context::{DocumentContext, TryParseWithContext},
     page::object::{
         base::{HasObjectBase, ObjectBase},
-        header::{ObjectHeader, ObjectHeaderError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
     },
     unpack_field_flags,
@@ -19,6 +19,7 @@ pub enum TextParseError {
     Io(#[from] io::Error),
     Shape(#[from] ShapeParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     BadBorderType(#[from] InvalidBorderTypeError),
     Unfinished(#[from] UnfinishedParsingError),
 }
@@ -49,9 +50,9 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Text {
             },
         )?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 2)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 2)?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             1 => border_colour: stream.read_4_bytes()?;
@@ -63,7 +64,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Text {
         shape.shape_data.border_width = border_width;
         shape.shape_data.border_type = border_type;
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Text { shape })

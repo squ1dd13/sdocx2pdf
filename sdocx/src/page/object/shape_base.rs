@@ -9,7 +9,7 @@ use crate::{
         Point,
         object::{
             base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shared::{
                 ColourType, GradientColour, GradientType, InvalidColourTypeError,
                 InvalidGradientTypeError,
@@ -24,26 +24,14 @@ use std::io::{Read, Seek};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum LineColourEffectParseError {
-    #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
     BadSize(#[from] TakeInclusiveLengthPrefixedError),
-
-    #[error("failed to parse property flags")]
     PropertyFlags(#[from] ReadBitfieldError),
-
-    #[error("one or more properties were unhandled")]
     UnhandledProperty(#[from] UnhandledBitsError),
-
-    #[error(transparent)]
     ColourType(#[from] InvalidColourTypeError),
-
-    #[error(transparent)]
     GradientType(#[from] InvalidGradientTypeError),
-
-    #[error(transparent)]
     Unfinished(#[from] UnfinishedParsingError),
 }
 
@@ -241,30 +229,19 @@ struct ConnectionPoint {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum ShapeBaseParseError {
-    #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
     Base(#[from] ObjectBaseParseError),
-
-    #[error(transparent)]
+    FlagBlock(#[from] FlagBlockError),
     Header(#[from] ObjectHeaderError),
+    LineColourEffect(#[from] LineColourEffectParseError),
+    LineStyleEffect(#[from] LineStyleEffectParseError),
+    String(#[from] ReadStringError),
+    Unfinished(#[from] UnfinishedParsingError),
 
     #[error("element count {0} is too large")]
     TooManyElements(u32),
-
-    #[error(transparent)]
-    LineColourEffect(#[from] LineColourEffectParseError),
-
-    #[error(transparent)]
-    LineStyleEffect(#[from] LineStyleEffectParseError),
-
-    #[error(transparent)]
-    String(#[from] ReadStringError),
-
-    #[error(transparent)]
-    Unfinished(#[from] UnfinishedParsingError),
 }
 
 #[derive(Debug)]
@@ -287,7 +264,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
     fn try_parse(stream: &mut R) -> Result<ShapeBase, ShapeBaseParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 6)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 6)?;
 
         let points_of_connection = read_u32_sized_vec!(
             stream,
@@ -311,7 +288,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
 
         let _skip = stream.read_u8()?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             // missing 0, 1
@@ -329,7 +306,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
             ), else vec![];
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(ShapeBase {

@@ -9,7 +9,7 @@ use crate::{
         Rect,
         object::{
             base::{HasObjectBase, ObjectBase},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
         },
     },
@@ -22,6 +22,7 @@ pub enum ImageParseError {
     Io(#[from] io::Error),
     Shape(#[from] ShapeParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     BadBorderType(#[from] InvalidBorderTypeError),
     Unfinished(#[from] UnfinishedParsingError),
 }
@@ -46,30 +47,23 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {
             },
         )?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 3)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 3)?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             // (missing 0)
-
             1 => crop_rect: Rect::try_parse_i32(&mut stream)?;
-
             // (missing 2)
-
             3 => border_colour: stream.read_4_bytes()?;
             4 => border_width: stream.read_f32_le()?;
             5 => border_type: stream.read_u16_le()?.try_into()?;
-
             // (missing 6, 7, 8)
-
             9 => border_image_bind_id: stream.read_u32_le()?;
             10 => border_image_nine_patch_rect: Rect::try_parse_i32(&mut stream)?;
             11 => border_line_width: Rect::try_parse_f32(&mut stream)?;
             12 => border_image_nine_patch_width: stream.read_u32_le()?;
-
             // (missing 13, 14, 15, 16)
-
             17 => original_rect: Rect::try_parse_f64(&mut stream)?;
             18 => original_image_bind_id: stream.read_u32_le()?;
         });
@@ -88,7 +82,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {
         shape.image_data.original_rect = original_rect;
         shape.image_data.original_image_id = original_image_bind_id;
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Image { shape })

@@ -9,7 +9,7 @@ use crate::{
         Rect,
         object::{
             base::{HasObjectBase, ObjectBase},
-            header::{FlagBlock, FlagBlockError, ObjectHeader, ObjectHeaderError},
+            header::{FlagBlock, FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape::{
                 InvalidTextAutoFitTypeError, Shape, ShapeParseContext, ShapeParseError,
                 TextAutoFitType,
@@ -252,6 +252,7 @@ pub enum TableParseError {
     Io(#[from] io::Error),
     Shape(#[from] ShapeParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     Row(#[from] RowParseError),
     BadTextAutoFitType(#[from] InvalidTextAutoFitTypeError),
     Border(#[from] FullBorderStyleParseError),
@@ -299,15 +300,15 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Table {
             },
         )?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 22)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 22)?;
 
-        unpack_bool_flags!(header.property_flags_mut(), {
+        unpack_bool_flags!(flag_block.property_flags_mut(), {
             0 => is_heading_column_enabled;
             1 => is_heading_row_enabled;
             2 => is_max_height_enabled;
         });
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => min_column_width: stream.read_f32_le()?, else 10.0;
@@ -342,7 +343,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Table {
             13 => cell_background_colour: stream.read_u32_le()?;
         });
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Table {

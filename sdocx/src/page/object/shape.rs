@@ -9,7 +9,7 @@ use crate::{
         Point, Rect,
         object::{
             base::{HasObjectBase, ObjectBase},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape_base::{ShapeBase, ShapeBaseParseError},
             shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
             text_core::{self, CommonParseContext},
@@ -211,11 +211,9 @@ enum ShapeType {
 impl_try_from_for_optional_from!(ShapeType, u32, from_u32, pub InvalidShapeTypeError);
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum FillColourEffectParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
-
-    #[error("failed to read property flags")]
     PropertyFlags(#[from] ReadBitfieldError),
 
     #[error("invalid gradient type ID {0}")]
@@ -307,15 +305,13 @@ impl FillImageEffect {
 }
 
 #[derive(Error, Debug)]
+#[error(transparent)]
 pub enum FillEffectParseError {
-    #[error("io error")]
     Io(#[from] io::Error),
+    ColourEffect(#[from] FillColourEffectParseError),
 
     #[error("invalid fill effect type {0}")]
     BadEffectType(u8),
-
-    #[error("failed to parse fill colour effect")]
-    ColourEffect(#[from] FillColourEffectParseError),
 }
 
 #[derive(Debug)]
@@ -543,7 +539,17 @@ pub enum ShapeParseError {
     Io(#[from] io::Error),
     Base(#[from] ShapeBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     BadShapeType(#[from] InvalidShapeTypeError),
+    BadHintTextStyle(#[from] InvalidHintTextStyleError),
+    BadEllipsisType(#[from] InvalidEllipsisTypeError),
+    BadTextAutoFitType(#[from] InvalidTextAutoFitTypeError),
+    BadImeActionType(#[from] InvalidImeActionTypeError),
+    BadTextInputType(#[from] InvalidTextInputTypeError),
+    TextCommon(#[from] text_core::CommonParseError),
+    BadTextAreaType(#[from] InvalidTextAreaTypeError),
+    FillEffect(#[from] FillEffectParseError),
+    Unfinished(#[from] UnfinishedParsingError),
 
     #[error("failed to parse template path")]
     TemplatePath(#[source] PathParseError),
@@ -551,19 +557,8 @@ pub enum ShapeParseError {
     #[error("template path stream was not exhausted")]
     UnfinishedPath(#[source] UnfinishedParsingError),
 
-    TextCommon(#[from] text_core::CommonParseError),
-    BadTextAreaType(#[from] InvalidTextAreaTypeError),
-    FillEffect(#[from] FillEffectParseError),
-
     #[error("failed to read hint text")]
     HintText(#[source] ReadStringError),
-
-    BadHintTextStyle(#[from] InvalidHintTextStyleError),
-    BadEllipsisType(#[from] InvalidEllipsisTypeError),
-    BadTextAutoFitType(#[from] InvalidTextAutoFitTypeError),
-    BadImeActionType(#[from] InvalidImeActionTypeError),
-    BadTextInputType(#[from] InvalidTextInputTypeError),
-    Unfinished(#[from] UnfinishedParsingError),
 }
 
 pub struct ShapeParseContext<'fr, 'sr> {
@@ -595,9 +590,9 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
     ) -> Result<Shape, ShapeParseError> {
         let shape_base = ShapeBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 7)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 7)?;
 
-        let property_flags = header.property_flags_mut();
+        let property_flags = flag_block.property_flags_mut();
 
         unpack_bool_flags!(property_flags, {
             0 => template_is_flipped_horizontally;
@@ -639,7 +634,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
             .then(|| Rect::try_parse_f64(&mut stream))
             .transpose()?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         // todo: SPen::ObjectShapeTemplateFactory::NewTemplate
 
@@ -692,7 +687,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
 
         // todo: See SPen::ObjectShapeBinaryHandler::ApplyOwnBinary_ShapeRefresh (_document.dll)
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Shape {

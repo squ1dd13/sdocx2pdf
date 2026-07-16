@@ -17,7 +17,7 @@ use crate::{
         Point,
         object::{
             base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{ObjectHeader, ObjectHeaderError},
+            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         },
     },
     unpack_bool_flags, unpack_field_flags,
@@ -316,6 +316,7 @@ pub enum StrokeParseError {
     Io(#[from] io::Error),
     Base(#[from] ObjectBaseParseError),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     BadToolType(#[from] InvalidToolTypeError),
     NoSuchString(#[from] NoSuchRegisteredStringError),
     BadDashType(#[from] InvalidDashTypeError),
@@ -401,9 +402,9 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
     ) -> Result<Stroke, StrokeParseError> {
         let object_base = ObjectBase::try_parse(stream)?;
 
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 1)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 1)?;
 
-        let property_flags = header.property_flags_mut();
+        let property_flags = flag_block.property_flags_mut();
 
         unpack_bool_flags!(property_flags, {
             0 => is_curve_enabled;
@@ -430,7 +431,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
 
         let tool_type: ToolType = stream.read_u16_le()?.try_into()?;
 
-        let field_check_flags = header.init_flex(&mut stream)?;
+        let field_check_flags = flag_block.init_flex(&mut stream)?;
 
         // What follows is equivalent to
         // `SPen::ObjectStrokeBinaryHandler::m_ApplyBinary_FlexibleData`.
@@ -467,7 +468,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             eprintln!("Warning: Read unknown stroke field (value {unk})");
         };
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(Stroke {

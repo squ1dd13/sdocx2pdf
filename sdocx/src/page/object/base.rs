@@ -19,7 +19,7 @@ use crate::{
     impl_try_from_for_optional_from,
     page::{
         Point, Rect,
-        object::header::{ObjectHeader, ObjectHeaderError},
+        object::header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     },
     read_size_and_map, read_size_and_vec, unpack_bool_flags, unpack_field_flags,
 };
@@ -175,6 +175,7 @@ pub trait HasObjectBase {
 pub enum ObjectBaseParseError {
     Io(#[from] std::io::Error),
     Header(#[from] ObjectHeaderError),
+    FlagBlock(#[from] FlagBlockError),
     Bundle(#[from] BundleParseError),
     Timestamp(#[from] ReadTimestampError),
     String(#[from] ReadStringError),
@@ -187,9 +188,9 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
     type ParseError = ObjectBaseParseError;
 
     fn try_parse(stream: &mut R) -> Result<ObjectBase, ObjectBaseParseError> {
-        let (mut header, mut stream) = ObjectHeader::try_parse(stream, 0)?;
+        let (mut flag_block, mut stream) = try_parse_object_header(stream, 0)?;
 
-        let property_flags = header.property_flags_mut();
+        let property_flags = flag_block.property_flags_mut();
 
         unpack_bool_flags!(property_flags, {
             0 => is_rotatable;
@@ -213,7 +214,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
         let timestamp_int = stream.read_u32_le()?;
         let resize_mode: ResizeMode = stream.read_u8()?.try_into()?;
 
-        let field_flags = header.init_flex(&mut stream)?;
+        let field_flags = flag_block.init_flex(&mut stream)?;
 
         unpack_field_flags!(field_flags, {
             0 => angle: stream.read_f32_le()?;
@@ -257,7 +258,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             );
         }
 
-        header.ensure_flags_used()?;
+        flag_block.ensure_flags_used()?;
         stream.ensure_eof()?;
 
         Ok(ObjectBase {
