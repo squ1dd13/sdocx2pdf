@@ -83,13 +83,16 @@ pub enum PolygonPoint {
 #[derive(Debug, Clone, Copy)]
 pub enum WindingRule {
     NonZero,
+    #[expect(dead_code)]
     EvenOdd,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum PolygonDrawMode {
     Fill(WindingRule),
+    #[expect(dead_code)]
     Stroke,
+    #[expect(dead_code)]
     CloseFillAndStroke(WindingRule),
 }
 

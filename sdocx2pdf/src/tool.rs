@@ -712,9 +712,11 @@ fn draw_simple_line(
 #[derive(Clone, Copy)]
 enum ArcMode {
     /// Do not draw any arcs.
+    #[expect(dead_code)]
     None,
 
     /// Draw arcs only on the first and last segments of the stroke.
+    #[expect(dead_code)]
     FirstLastOnly,
 
     /// Draw arcs on all segments.
