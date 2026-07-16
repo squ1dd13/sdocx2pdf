@@ -163,6 +163,7 @@ pub struct ObjectBase {
     thumbnail_bind_id: Option<u32>,
     pivot: Option<Point>,
     group_id: Option<String>,
+    page_idx: Option<u32>,
 }
 
 pub trait HasObjectBase {
@@ -246,6 +247,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             17 => thumbnail_bind_id: stream.read_u32_le()?;
             18 => pivot: Point::try_parse_f64(&mut stream)?;
             19 => group_id: stream.read_short_u16_string()?;
+            20 => page_idx: stream.read_u32_le()?;
         });
 
         if unknown_somethings.is_some() || unknown_20.is_some() {
@@ -292,6 +294,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             thumbnail_bind_id,
             pivot,
             group_id,
+            page_idx,
         })
     }
 }

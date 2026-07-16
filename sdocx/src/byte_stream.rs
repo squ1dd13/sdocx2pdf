@@ -100,7 +100,6 @@ impl<T> std::fmt::Debug for BlindWindow<T> {
 impl<T> Window<T> {
     /// Returns a window into `inner` providing access to at most `length` bytes from the current
     /// position.
-    #[expect(dead_code)]
     pub const fn new(inner: T, length: u64) -> Window<T> {
         Window {
             inner,
@@ -109,9 +108,9 @@ impl<T> Window<T> {
         }
     }
 
-    /// Returns a window into `inner` providing access to `length - local_pos` bytes after
-    /// and `local_pos` bytes before the current position; that is, a window of `length` bytes
-    /// such that the next byte in `inner` is considered the `(local_pos)`th byte in the window.
+    /// Returns a window into `inner` providing access to `length - local_pos` bytes after and
+    /// `local_pos` bytes before the current position; that is, a window of `length` bytes such
+    /// that the next byte in `inner` is considered the `(local_pos)`th byte in the window.
     ///
     /// If `local_pos == 0`, this is equivalent to `new`.
     ///
@@ -303,6 +302,15 @@ pub trait ByteStreamLe: Read {
     {
         let size: u64 = self.read_u32_le()?.into();
         Ok(self.take(size))
+    }
+
+    /// Like `take_exclusive_length_prefixed`, but returning a blind window.
+    fn exclusive_blind_window(mut self) -> io::Result<BlindWindow<Self>>
+    where
+        Self: Sized,
+    {
+        let size = self.read_u32_le()?;
+        Ok(Window::new(self, size.into()).into())
     }
 
     /// Reads exactly `n` bytes into a `Vec`, and returns it.

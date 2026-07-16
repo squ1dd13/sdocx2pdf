@@ -11,15 +11,9 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
-pub enum ObjectHeaderError {
+pub enum FlagBlockError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    BadSize(#[from] TakeInclusiveLengthPrefixedError),
-
-    #[error("expected data type {is}, not {not}")]
-    WrongDataType { is: u16, not: u16 },
 
     #[error("failed to parse property flags")]
     PropertyFlags(#[source] ReadBitfieldError),
@@ -34,50 +28,37 @@ pub enum ObjectHeaderError {
     UnhandledField(#[source] UnhandledBitsError),
 }
 
-pub struct ObjectHeader {
+pub struct FlagBlock {
     flex_offset: u32,
     property_flags: CheckedBitfield,
     field_flags: CheckedBitfield,
 }
 
-impl ObjectHeader {
-    pub fn try_parse<R: Read>(
-        reader: R,
-        expected_data_type: u16,
-    ) -> Result<(ObjectHeader, BlindWindow<R>), ObjectHeaderError> {
-        let mut reader: BlindWindow<_> = reader.take_inclusive_length_prefixed()?.into();
-
-        let data_type = reader.read_u16_le()?;
-
-        if data_type != expected_data_type {
-            return Err(ObjectHeaderError::WrongDataType {
-                is: data_type,
-                not: expected_data_type,
-            });
-        }
-
-        let flex_offset = reader.read_u32_le()?;
+impl FlagBlock {
+    pub fn try_parse<R: Read>(mut stream: R) -> Result<FlagBlock, FlagBlockError> {
+        let flex_offset = stream.read_u32_le()?;
 
         let property_flags =
-            CheckedBitfield::try_parse(&mut reader).map_err(ObjectHeaderError::PropertyFlags)?;
+            CheckedBitfield::try_parse(&mut stream).map_err(FlagBlockError::PropertyFlags)?;
 
         let field_flags =
-            CheckedBitfield::try_parse(&mut reader).map_err(ObjectHeaderError::FieldFlags)?;
+            CheckedBitfield::try_parse(&mut stream).map_err(FlagBlockError::FieldFlags)?;
 
-        Ok((
-            ObjectHeader {
-                flex_offset,
-                property_flags,
-                field_flags,
-            },
-            reader,
-        ))
+        Ok(FlagBlock {
+            flex_offset,
+            property_flags,
+            field_flags,
+        })
     }
 
     pub const fn property_flags_mut(&mut self) -> &mut CheckedBitfield {
         &mut self.property_flags
     }
 
+    /// Seeks to the flex offset and returns a mutable reference to the field flags so the fields
+    /// can be read immediately using the flags.
+    ///
+    /// `reader` must have position 0 at the point the flex offset is relative to.
     pub fn init_flex<'me, R: Read + Seek>(
         &'me mut self,
         reader: &mut BlindWindow<R>,
@@ -121,15 +102,75 @@ impl ObjectHeader {
         Ok(&mut self.field_flags)
     }
 
-    pub fn ensure_flags_used(self) -> Result<(), ObjectHeaderError> {
+    pub fn ensure_flags_used(self) -> Result<(), FlagBlockError> {
         self.property_flags
             .ensure_none_set_unchecked()
-            .map_err(ObjectHeaderError::UnhandledProperty)?;
+            .map_err(FlagBlockError::UnhandledProperty)?;
 
         self.field_flags
             .ensure_none_set_unchecked()
-            .map_err(ObjectHeaderError::UnhandledField)?;
+            .map_err(FlagBlockError::UnhandledField)?;
 
         Ok(())
+    }
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum ObjectHeaderError {
+    Io(#[from] std::io::Error),
+    BadSize(#[from] TakeInclusiveLengthPrefixedError),
+    FlagBlock(#[from] FlagBlockError),
+
+    #[error("expected data type {is}, not {not}")]
+    WrongDataType {
+        is: u16,
+        not: u16,
+    },
+}
+
+pub fn try_parse_object_header<R: Read>(
+    stream: R,
+    expected_data_type: u16,
+) -> Result<(FlagBlock, BlindWindow<R>), ObjectHeaderError> {
+    let mut stream: BlindWindow<_> = stream.take_inclusive_length_prefixed()?.into();
+
+    let data_type = stream.read_u16_le()?;
+
+    if data_type != expected_data_type {
+        return Err(ObjectHeaderError::WrongDataType {
+            is: data_type,
+            not: expected_data_type,
+        });
+    }
+
+    Ok((FlagBlock::try_parse(&mut stream)?, stream))
+}
+
+// Wrapper for `FlagBlock`, which used to be `ObjectHeader`.
+// todo: Remove uses of `ObjectHeader` and just use `FlagBlock`.
+pub struct ObjectHeader(FlagBlock);
+
+impl ObjectHeader {
+    pub fn try_parse<R: Read>(
+        stream: R,
+        expected_data_type: u16,
+    ) -> Result<(ObjectHeader, BlindWindow<R>), ObjectHeaderError> {
+        try_parse_object_header(stream, expected_data_type).map(|(fb, bw)| (ObjectHeader(fb), bw))
+    }
+
+    pub const fn property_flags_mut(&mut self) -> &mut CheckedBitfield {
+        self.0.property_flags_mut()
+    }
+
+    pub fn init_flex<'me, R: Read + Seek>(
+        &'me mut self,
+        reader: &mut BlindWindow<R>,
+    ) -> std::io::Result<&'me mut CheckedBitfield> {
+        self.0.init_flex(reader)
+    }
+
+    pub fn ensure_flags_used(self) -> Result<(), ObjectHeaderError> {
+        self.0.ensure_flags_used().map_err(Into::into)
     }
 }

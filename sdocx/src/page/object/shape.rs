@@ -486,7 +486,7 @@ enum EllipsisType {
 impl_try_from_for_optional_from!(EllipsisType, u8, from_u8, pub InvalidEllipsisTypeError);
 
 #[derive(Debug, FromPrimitive)]
-enum TextAutoFitType {
+pub enum TextAutoFitType {
     /// `AUTO_FIT_OPTION_NONE`
     None = 0,
     /// `AUTO_FIT_OPTION_HORIZONTAL`
@@ -668,6 +668,8 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
             9 => hint_text: stream.read_short_u16_string().map_err(ShapeParseError::HintText)?;
             10 => hint_text_colour: stream.read_4_bytes()?;
             11 => hint_text_font_size: stream.read_f32_le()?;
+
+            // Note: Fields are not serialised in bit order. Here's 22:
             22 => hint_text_style: stream.read_u8()?.try_into()?;
 
             12 => ellipsis_type: stream.read_u8()?.try_into()?;

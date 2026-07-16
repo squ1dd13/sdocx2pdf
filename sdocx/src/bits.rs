@@ -117,7 +117,7 @@ macro_rules! read_flags {
 
 #[macro_export]
 macro_rules! impl_try_from_for_optional_from {
-    ($target:ty, $prim:ty, $fromfn:ident, $v:vis $errtype:ident) => {
+    ($target:ty, $prim:ty, $fromfn:ident, $v:vis $errtype:ident $(,)?) => {
         #[derive(thiserror::Error, Debug)]
         #[error("invalid value {bad_value} for {}", stringify!($target))]
         $v struct $errtype {

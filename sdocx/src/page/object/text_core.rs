@@ -5,11 +5,15 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{BoundedStream, ByteStreamLe, ReadStringError, TryParse, UnfinishedParsingError},
+    bits::{CheckedBitfield, UnhandledBitsError},
+    byte_stream::{
+        BlindWindow, BoundedStream, ByteStreamLe, ReadStringError, TryParse,
+        UnfinishedParsingError, Window,
+    },
     context::{DocumentContext, TryParseWithContext},
-    impl_try_from_for_optional_from,
+    if_any_left, impl_try_from_for_optional_from,
     page::object::{DocObject, DocObjectParseContext, DocObjectParseError},
-    read_u16_sized_vec, read_u32_sized_vec,
+    read_u16_sized_vec, read_u32_sized_vec, unpack_bool_flags,
 };
 
 #[derive(Debug, FromPrimitive)]
@@ -191,10 +195,48 @@ impl<R: Read> TryParse<R> for Paragraph {
     }
 }
 
+#[derive(Debug, FromPrimitive)]
+enum InTextLayoutOption {
+    /// `LAYOUT_OPTION_BLOCK`
+    Block = 0,
+    /// `LAYOUT_OPTION_INLINE`
+    Inline = 1,
+    /// `LAYOUT_OPTION_BLOCK_WITH_MARGIN_SMALL`
+    BlockSmallMargin = 2,
+    /// `LAYOUT_OPTION_BLOCK_WITH_MARGIN_MEDIUM`
+    BlockMediumMargin = 3,
+}
+
+impl_try_from_for_optional_from!(
+    InTextLayoutOption,
+    u32,
+    from_u32,
+    pub InvalidInTextLayoutOptionError,
+);
+
+#[derive(Debug, FromPrimitive)]
+enum InTextLayoutConstraint {
+    /// `LAYOUT_CONSTRAINT_NORMAL`
+    Normal = 0,
+    /// `LAYOUT_CONSTRAINT_OVER_PAGES_OVERLAP_PADDING`
+    OverPagesOverlapPadding = 1,
+    /// `LAYOUT_CONSTRAINT_OVER_PAGES`
+    OverPages = 2,
+}
+
+impl_try_from_for_optional_from!(
+    InTextLayoutConstraint,
+    u32,
+    from_u32,
+    pub InvalidInTextLayoutConstraintError,
+);
+
 #[derive(Debug)]
 #[expect(dead_code)]
 struct InlineObject {
-    position: u32,
+    index_in_text: u32,
+    layout_option: Option<InTextLayoutOption>,
+    layout_constraint: Option<InTextLayoutConstraint>,
     object: DocObject,
 }
 
@@ -216,12 +258,21 @@ pub enum CommonParseError {
     #[error("{0} is too big to be a valid object type")]
     ObjectTypeTooBig(u32),
 
+    #[error("one or more inline object list flags were set but not checked")]
+    UnhandledInlineObjectListFlags(#[source] UnhandledBitsError),
+
     // The object we were trying to parse could include text, in which case the error may contain a
     // `CommonParseError`. `Box` here is to avoid recursion.
     InlineObject(#[from] Box<DocObjectParseError>),
 
+    BadLayoutOption(#[from] InvalidInTextLayoutOptionError),
+    BadLayoutConstraint(#[from] InvalidInTextLayoutConstraintError),
+
     #[error("object span was unfinished")]
     ObjectSpanUnfinished(#[source] UnfinishedParsingError),
+
+    #[error("object in span was unfinished")]
+    ObjectInObjectSpanUnfinished(#[source] UnfinishedParsingError),
 
     #[error(transparent)]
     Unfinished(#[from] UnfinishedParsingError),
@@ -297,39 +348,64 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, CommonParseContext<'a, 'a>> for 
             read_u16_sized_vec!(stream, (stream.read_u32_le()?, stream.read_u32_le()?));
 
         let inline_objects = if format_version >= 2035 && {
-            // This is stored as a Boolean but written explicitly as a 32-bit integer.
-            let inline_objects_present = stream.read_u32_le()? != 0;
+            let mut flags = CheckedBitfield::from(stream.read_u32_le()?);
 
-            // todo: ??
-            let _zero = stream.read_u32_le()?;
+            unpack_bool_flags!(flags, {
+                0 => any_present;
+            });
 
-            inline_objects_present
+            flags
+                .ensure_none_set_unchecked()
+                .map_err(CommonParseError::UnhandledInlineObjectListFlags)?;
+
+            // It's 64 bits really, so read a second 32-bit bitfield. None of the bits should be
+            // set.
+            CheckedBitfield::from(stream.read_u32_le()?)
+                .ensure_none_set_unchecked()
+                .map_err(CommonParseError::UnhandledInlineObjectListFlags)?;
+
+            any_present
         } {
             read_u32_sized_vec!(stream, CommonParseError::TooManyElements, {
                 let mut obj_stream = (&mut stream).take_exclusive_length_prefixed()?;
 
-                let _obj_size = obj_stream.read_u32_le()?;
+                let obj_size = obj_stream.read_u32_le()?;
 
-                // This could be a single byte...
                 let object_type: u8 = {
+                    // This could be a single byte...
                     let object_type = obj_stream.read_u32_le()?;
                     object_type
                         .try_into()
                         .map_err(|_| CommonParseError::ObjectTypeTooBig(object_type))?
                 };
 
-                // `_obj_size` is exactly the size of this:
-                let object = DocObject::try_parse_with_ctx(
-                    &mut obj_stream,
-                    &DocObjectParseContext {
-                        object_type,
-                        doc_ctx,
-                    },
-                )
-                .map_err(Box::new)?;
+                let object = {
+                    let mut inner_stream: BlindWindow<_> =
+                        Window::new(&mut obj_stream, obj_size.into()).into();
+
+                    let obj = DocObject::try_parse_with_ctx(
+                        &mut inner_stream,
+                        &DocObjectParseContext {
+                            object_type,
+                            doc_ctx,
+                        },
+                    )
+                    .map_err(Box::new)?;
+
+                    inner_stream
+                        .ensure_eof()
+                        .map_err(CommonParseError::ObjectSpanUnfinished)?;
+
+                    obj
+                };
 
                 let span = InlineObject {
-                    position: obj_stream.read_u32_le()?,
+                    index_in_text: obj_stream.read_u32_le()?,
+                    layout_option: if_any_left!(obj_stream, obj_stream.read_u32_le()?.try_into()?),
+                    layout_constraint: if_any_left!(
+                        obj_stream,
+                        obj_stream.read_u32_le()?.try_into()?
+                    ),
                     object,
                 };
 

@@ -10,6 +10,7 @@ use crate::{
         painting::{Painting, PaintingParseError},
         shape::{Shape, ShapeParseContext, ShapeParseError},
         stroke::{Stroke, StrokeParseError},
+        table::{Table, TableParseError},
         text::{Text, TextParseError},
         web::{Web, WebParseError},
     },
@@ -27,6 +28,7 @@ mod shape;
 mod shape_base;
 mod shared;
 pub mod stroke;
+mod table;
 pub mod text;
 mod text_core;
 mod web;
@@ -75,6 +77,7 @@ pub enum DocObjectParseError {
     Text(#[from] TextParseError),
     Voice(#[from] AudioParseError),
     Web(#[from] WebParseError),
+    Table(#[from] TableParseError),
 
     Opaque(#[from] OpaqueObjectParseError),
 
@@ -113,8 +116,11 @@ pub enum DocObject {
     /// `WCon_ObjectFormula`; extends `WCon_ObjectBase`
     Formula(OpaqueObject),
 
-    /// `WCon_ObjectTable`; extends `WCon_ObjectBase`
-    Table(OpaqueObject),
+    /// `WCon_ObjectTable`; extends `WCon_ObjectShape`
+    Table(Box<Table>),
+
+    /// `WCon_ObjectCodeBlock`; extends `WCon_ObjectBase`
+    CodeBlock(OpaqueObject),
 
     /// `WCon_ObjectWeb`; extends `WCon_ObjectBase`
     Web(Box<Web>),
@@ -176,6 +182,8 @@ impl<'a> TryParseWithContext<dyn SeekableByteStreamLe + 'a, DocObjectParseContex
             13 => DocObject::Web(Box::new(TryParse::try_parse(stream)?)),
             14 => DocObject::Painting(Box::new(TryParse::try_parse(stream)?)),
 
+            22 => DocObject::Table(Box::new(Table::try_parse_with_ctx(stream, doc_ctx)?)),
+
             _ => {
                 let object = OpaqueObject::try_parse(stream)?;
 
@@ -204,8 +212,8 @@ impl<'a> TryParseWithContext<dyn SeekableByteStreamLe + 'a, DocObjectParseContex
                         eprintln!("Warning: Maths objects are not yet supported");
                         object
                     }),
-                    22 => DocObject::Table({
-                        eprintln!("Warning: Tables are not yet supported");
+                    23 => DocObject::CodeBlock({
+                        eprintln!("Warning: Code blocks are not yet supported");
                         object
                     }),
 
@@ -227,10 +235,11 @@ impl DocObject {
             DocObject::Audio(voice_object) => voice_object.object_base(),
             DocObject::Web(web_object) => web_object.object_base(),
             DocObject::Painting(painting_object) => painting_object.object_base(),
+            DocObject::Table(table_object) => table_object.object_base(),
 
             DocObject::Container(object)
             | DocObject::Formula(object)
-            | DocObject::Table(object)
+            | DocObject::CodeBlock(object)
             | DocObject::Link(object)
             | DocObject::Maths(object)
             | DocObject::Plot(object)
