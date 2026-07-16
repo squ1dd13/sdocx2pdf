@@ -676,11 +676,24 @@ fn main_convert(
 fn print_report_request(detailed: bool) {
     if !detailed {
         eprintln!("For more detailed error messages, rerun with '{DETAILED_ERRORS_ARG_NAME}'.");
+        eprintln!();
+    }
+
+    eprintln!("If you believe this should have worked, please do the following:");
+    eprint!("  1. Ensure you are using the latest version of sdocx2pdf. ");
+
+    if let Some(ver) = CARGO_PKG_VERSION {
+        eprint!("You are currently using version {ver}. ");
     }
 
     eprintln!(
-        "If you believe this should have worked, please file an issue on GitHub: \
-        https://github.com/squ1dd13/sdocx2pdf/issues/new."
+        "You can find the latest version at https://github.com/squ1dd13/sdocx2pdf/releases/latest. \
+    If you are not using it, update and try again."
+    );
+
+    eprint!(
+        "  2. If you are on the latest version or if the problem persists after updating, \
+    report an issue on GitHub at https://github.com/squ1dd13/sdocx2pdf/issues/new. "
     );
 
     if detailed {
@@ -689,7 +702,7 @@ fn print_report_request(detailed: bool) {
         eprintln!(
             "Include the whole of the error message you get \
             with '{DETAILED_ERRORS_ARG_NAME}' in your report."
-        )
+        );
     }
 }
 
@@ -700,6 +713,7 @@ fn print_indented_string(s: String) {
 }
 
 fn print_double_open_error(err_for_zip: DocumentError, err_for_dir: DocumentError, detailed: bool) {
+    eprintln!();
     eprintln!("Tried opening as both a zip file and a directory, but got an error each time.");
     eprintln!();
     eprintln!("Got this error when trying to open as a zip:");
@@ -723,9 +737,25 @@ fn print_double_open_error(err_for_zip: DocumentError, err_for_dir: DocumentErro
     print_report_request(detailed);
 }
 
+const CARGO_PKG_VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+
+fn print_intro() {
+    if let Some(ver) = CARGO_PKG_VERSION {
+        eprint!("This is sdocx2pdf {ver}. ");
+    } else {
+        eprint!("Unable to determine sdocx2pdf version. ");
+    }
+
+    eprintln!(
+        "You can check for updates at https://github.com/squ1dd13/sdocx2pdf/releases/latest."
+    );
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
     let detailed_errors = args.detailed_errors;
+
+    print_intro();
 
     let (document, media_storage) = match Document::from_zip(&args.doc) {
         Ok(v) => v,
