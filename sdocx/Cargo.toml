@@ -17,3 +17,4 @@ zip = { version = "8", default-features = false, features = [
     "deflate64",
 ] }
 either = "1.16.0"
+strum = { version = "0.28", features = ["derive"] }

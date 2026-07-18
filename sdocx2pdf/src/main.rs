@@ -463,52 +463,14 @@ fn main_convert(
         let mut tool_graphics_state_names = HashMap::new();
 
         for layer in page.layers() {
-            let objects = layer.objects();
-            let mut strokes_handled = 0;
-
-            let objects_bar = multi_progress
-                .add(ProgressBar::new(objects.len() as _))
-                .with_style(
-                    ProgressStyle::with_template(
-                        "Processing objects [{bar:40}] {percent}% [{pos}/{len}]",
-                    )
-                    .unwrap()
-                    .progress_chars("# "),
-                );
-
-            let strokes =
-                objects
-                    .iter()
-                    .inspect(|_| objects_bar.inc(1))
-                    .filter_map(|obj| match obj {
-                        sdocx::DocObject::Stroke(stroke) => Some(stroke),
-                        _ => None,
-                    });
-
-            let strokes_by_tool = strokes.chunk_by(|stroke| Tool::for_stroke(stroke));
-
-            for (tool, strokes) in &strokes_by_tool {
-                // Get the extended graphics state required by this tool, creating it if it does
-                // not yet exist.
-                let gs_name = tool_graphics_state_names
-                    .entry(tool.clone())
-                    .or_insert_with(|| {
-                        let name = format!("egs{}", graphics_states.len());
-                        graphics_states.set(name.clone(), tool.create_egs());
-                        name
-                    });
-
-                if let Err(()) = tool.draw_events(
-                    gs_name,
-                    (page_w_internal, page_h_internal),
-                    strokes
-                        .inspect(|_| strokes_handled += 1)
-                        .map(|s| s.events()),
-                    &mut operations,
-                ) {
-                    eprintln!("Failed to draw stroke");
-                }
-            }
+            draw_page_layer(
+                layer,
+                (page_w_internal, page_h_internal),
+                &mut operations,
+                &mut graphics_states,
+                &mut tool_graphics_state_names,
+                &multi_progress,
+            );
         }
 
         let content = lopdf::content::Content { operations };
@@ -671,6 +633,58 @@ fn main_convert(
     }
 
     Ok(())
+}
+
+// Hastily factored out of the main conversion code.
+// todo: Create a conversion context to hold operations, graphics states, etc.
+fn draw_page_layer(
+    layer: &sdocx::page::Layer,
+    page_size: (f32, f32),
+    ops: &mut Vec<lopdf::content::Operation>,
+    graphics_states: &mut PdfDict,
+    tool_graphics_state_names: &mut HashMap<Tool, String>,
+    mul_prog: &MultiProgress,
+) {
+    let objects = layer.objects();
+
+    let objects_bar = mul_prog
+        .add(ProgressBar::new(objects.len() as _))
+        .with_style(
+            ProgressStyle::with_template("Processing objects [{bar:40}] {percent}% [{pos}/{len}]")
+                .unwrap()
+                .progress_chars("# "),
+        );
+
+    let strokes = objects
+        .iter()
+        .inspect(|_| objects_bar.inc(1))
+        .filter_map(|obj| match obj {
+            sdocx::DocObject::Stroke(stroke) => Some(stroke),
+            _other => {
+                // eprintln!("Warning: Ignoring object '{}'", <&'static str>::from(other));
+                None
+            }
+        });
+
+    let strokes_by_tool = strokes.chunk_by(|stroke| Tool::for_stroke(stroke));
+
+    for (tool, strokes) in &strokes_by_tool {
+        // Get the extended graphics state required by this tool, creating it if it does not yet
+        // exist.
+        let gs_name = tool_graphics_state_names
+            .entry(tool.clone())
+            .or_insert_with(|| {
+                let name = format!("egs{}", graphics_states.len());
+                graphics_states.set(name.clone(), tool.create_egs());
+                name
+            });
+
+        let draw_result = tool.draw_events(gs_name, page_size, strokes.map(|s| s.events()), ops);
+
+        if let Err(()) = draw_result {
+            eprintln!("Failed to draw stroke");
+        }
+    }
 }
 
 fn print_report_request(detailed: bool) {
