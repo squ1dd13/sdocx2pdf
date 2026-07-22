@@ -8,6 +8,7 @@ use crate::{
     page::{
         Point, Rect,
         object::{
+            LineColourEffect, LineStyleEffect,
             base::{HasObjectBase, ObjectBase},
             header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape_base::{ShapeBase, ShapeBaseParseError},
@@ -20,10 +21,11 @@ use crate::{
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::io::{self, Read, Seek};
+use strum::Display;
 use thiserror::Error;
 
 #[derive(Debug, FromPrimitive)]
-enum ShapeType {
+pub enum ShapeType {
     /// `TYPE_UNKNOWN`
     Unknown = 0,
     /// `TYPE_OVAL`
@@ -223,9 +225,9 @@ pub enum FillColourEffectParseError {
 // C.f. `LineColourEffect`, which is very similar but is serialised differently.
 #[derive(Debug)]
 #[expect(dead_code)]
-struct FillColourEffect {
+pub struct FillColourEffect {
     solid_colour: [u8; 4],
-    colour_type: ColourType,
+    pub colour_type: ColourType,
     gradient_rotatable: bool,
     gradient_type: GradientType,
     angle: i16,
@@ -270,11 +272,15 @@ impl FillColourEffect {
             colours,
         })
     }
+
+    pub const fn solid_colour_bgra(&self) -> [u8; 4] {
+        self.solid_colour
+    }
 }
 
 #[derive(Debug)]
 #[expect(dead_code)]
-struct FillImageEffect {
+pub struct FillImageEffect {
     image_type: u8,
     image_id: i32,
     nine_patch_rect: Rect,
@@ -314,9 +320,8 @@ pub enum FillEffectParseError {
     BadEffectType(u8),
 }
 
-#[derive(Debug)]
-#[expect(dead_code)]
-enum FillEffect {
+#[derive(Debug, Display)]
+pub enum FillEffect {
     Background {
         transparency: f32,
     },
@@ -576,6 +581,24 @@ pub struct Shape {
     pub(crate) image_data: ImageData,
 
     control_points: Vec<Point>,
+}
+
+impl Shape {
+    pub fn path(&self) -> Option<&Path> {
+        self.shape_data.template.as_ref().map(|t| &t.path)
+    }
+
+    pub fn line_colour_effect(&self) -> Option<&LineColourEffect> {
+        self.shape_base.line_colour_effect()
+    }
+
+    pub fn line_style(&self) -> Option<&LineStyleEffect> {
+        self.shape_base.line_style()
+    }
+
+    pub const fn fill_effect(&self) -> Option<&FillEffect> {
+        self.shape_data.fill_effect.as_ref()
+    }
 }
 
 impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for Shape {

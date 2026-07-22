@@ -37,9 +37,9 @@ pub enum LineColourEffectParseError {
 
 #[derive(Debug)]
 #[expect(dead_code)]
-struct LineColourEffect {
+pub struct LineColourEffect {
     gradient_rotatable: bool,
-    colour_type: ColourType,
+    pub colour_type: ColourType,
     solid_colour: [u8; 4],
     gradient_type: GradientType,
     angle: u16,
@@ -71,10 +71,28 @@ impl LineColourEffect {
 
         Ok(effect)
     }
+
+    pub const fn solid_colour_bgra(&self) -> [u8; 4] {
+        self.solid_colour
+    }
+}
+
+impl Default for LineColourEffect {
+    fn default() -> Self {
+        Self {
+            gradient_rotatable: false,
+            colour_type: ColourType::Solid,
+            solid_colour: [0, 0, 0, 255],
+            gradient_type: GradientType::Linear,
+            angle: 0,
+            radial_gradient_pos: (0.0, 0.0).into(),
+            colours: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, FromPrimitive)]
-enum CapType {
+pub enum CapType {
     /// `CAP_TYPE_BUTT`
     Butt = 0,
     /// `CAP_TYPE_ROUND`
@@ -86,7 +104,7 @@ enum CapType {
 impl_try_from_for_optional_from!(CapType, u8, from_u8, pub InvalidCapTypeError);
 
 #[derive(Debug, FromPrimitive)]
-enum CompoundType {
+pub enum CompoundType {
     /// `COMPOUND_TYPE_SIMPLE`
     Simple = 0,
     /// `COMPOUND_TYPE_DOUBLE`
@@ -102,7 +120,7 @@ enum CompoundType {
 impl_try_from_for_optional_from!(CompoundType, u8, from_u8, pub InvalidCompoundTypeError);
 
 #[derive(Debug, FromPrimitive)]
-enum DashType {
+pub enum DashType {
     /// `DASH_TYPE_SOLID`
     Solid = 0,
     /// `DASH_TYPE_ROUND_DOT`
@@ -124,7 +142,7 @@ enum DashType {
 impl_try_from_for_optional_from!(DashType, u8, from_u8, pub InvalidDashTypeError);
 
 #[derive(Debug, FromPrimitive)]
-enum ArrowSize {
+pub enum ArrowSize {
     /// `ARROW_SIZE_NORMAL`
     Normal = 0,
     /// `ARROW_SIZE_SMALL`
@@ -136,7 +154,7 @@ enum ArrowSize {
 impl_try_from_for_optional_from!(ArrowSize, u8, from_u8, pub InvalidArrowSizeError);
 
 #[derive(Debug, FromPrimitive)]
-enum ArrowShape {
+pub enum ArrowShape {
     /// `ARROW_TYPE_NONE`
     None = 0,
     /// `ARROW_TYPE_ARROW`
@@ -154,7 +172,7 @@ enum ArrowShape {
 impl_try_from_for_optional_from!(ArrowShape, u8, from_u8, pub InvalidArrowShapeError);
 
 #[derive(Debug, FromPrimitive)]
-enum JoinType {
+pub enum JoinType {
     /// `JOIN_TYPE_MITER`
     Miter = 0,
     /// `JOIN_TYPE_ROUND`
@@ -182,17 +200,16 @@ pub enum LineStyleEffectParseError {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct LineStyleEffect {
-    width: f32,
-    compound_type: CompoundType,
-    dash_type: DashType,
-    cap_type: CapType,
-    join_type: JoinType,
-    begin_arrow_shape: ArrowShape,
-    begin_arrow_size: ArrowSize,
-    end_arrow_shape: ArrowShape,
-    end_arrow_size: ArrowSize,
+pub struct LineStyleEffect {
+    pub width: f32,
+    pub compound_type: CompoundType,
+    pub dash_type: DashType,
+    pub cap_type: CapType,
+    pub join_type: JoinType,
+    pub begin_arrow_shape: ArrowShape,
+    pub begin_arrow_size: ArrowSize,
+    pub end_arrow_shape: ArrowShape,
+    pub end_arrow_size: ArrowSize,
 }
 
 impl LineStyleEffect {
@@ -218,6 +235,22 @@ impl LineStyleEffect {
             end_arrow_shape: buf[6].try_into()?,
             end_arrow_size: buf[7].try_into()?,
         })
+    }
+}
+
+impl Default for LineStyleEffect {
+    fn default() -> Self {
+        Self {
+            width: 2.0,
+            compound_type: CompoundType::Simple,
+            dash_type: DashType::Solid,
+            cap_type: CapType::Butt,
+            join_type: JoinType::Miter,
+            begin_arrow_shape: ArrowShape::None,
+            begin_arrow_size: ArrowSize::Normal,
+            end_arrow_shape: ArrowShape::None,
+            end_arrow_size: ArrowSize::Normal,
+        }
     }
 }
 
@@ -256,6 +289,16 @@ pub struct ShapeBase {
     // one uses only the `point` field, while the other uses both `point` and `uuids`.
     connection_points: Vec<ConnectionPoint>,
     points_of_connection: Vec<Point>,
+}
+
+impl ShapeBase {
+    pub const fn line_colour_effect(&self) -> Option<&LineColourEffect> {
+        self.line_colour_effect.as_ref()
+    }
+
+    pub const fn line_style(&self) -> Option<&LineStyleEffect> {
+        self.line_style_effect.as_ref()
+    }
 }
 
 impl<R: Read + Seek> TryParse<R> for ShapeBase {

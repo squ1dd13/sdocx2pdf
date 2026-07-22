@@ -34,6 +34,13 @@ pub mod text;
 mod text_core;
 mod web;
 
+pub use shape::{FillColourEffect, FillEffect, FillImageEffect, ShapeType};
+pub use shape_base::{
+    ArrowShape, ArrowSize, CapType, CompoundType, DashType, JoinType, LineColourEffect,
+    LineStyleEffect,
+};
+pub use shared::{ColourType, GradientColour, GradientType, Path, PathSegment};
+
 #[derive(Error, Debug)]
 #[error(transparent)]
 pub enum OpaqueObjectParseError {

@@ -11,12 +11,13 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
-use sdocx::{Document, DocumentError, MediaStorage};
+use sdocx::{Document, DocumentError, MediaStorage, page::object::stroke::Event};
 use thiserror::Error;
 
 use crate::tool::Tool;
 
 mod op_gen;
+mod shape;
 mod stroke;
 mod tool;
 
@@ -655,35 +656,117 @@ fn draw_page_layer(
                 .progress_chars("# "),
         );
 
-    let strokes = objects
-        .iter()
-        .inspect(|_| objects_bar.inc(1))
-        .filter_map(|obj| match obj {
-            sdocx::DocObject::Stroke(stroke) => Some(stroke),
-            _other => {
-                // eprintln!("Warning: Ignoring object '{}'", <&'static str>::from(other));
-                None
-            }
-        });
-
-    let strokes_by_tool = strokes.chunk_by(|stroke| Tool::for_stroke(stroke));
-
-    for (tool, strokes) in &strokes_by_tool {
-        // Get the extended graphics state required by this tool, creating it if it does not yet
-        // exist.
-        let gs_name = tool_graphics_state_names
-            .entry(tool.clone())
-            .or_insert_with(|| {
-                let name = format!("egs{}", graphics_states.len());
-                graphics_states.set(name.clone(), tool.create_egs());
-                name
+    // Consecutive stokes very often use the same tool. To reduce the size of the output PDF, we
+    // can process chains of such strokes in one go, loading the necessary graphics state only
+    // once and then using it for all the strokes rather than loading the same graphics state for
+    // every stroke.
+    let chunked_objects =
+        objects
+            .iter()
+            .inspect(|_| objects_bar.inc(1))
+            .chunk_by(|&obj| match obj {
+                sdocx::DocObject::Stroke(stroke) => Some(Tool::for_stroke(stroke)),
+                _non_stroke => None,
             });
 
-        let draw_result = tool.draw_events(gs_name, page_size, strokes.map(|s| s.events()), ops);
+    for (opt_stroke_tool, objects) in &chunked_objects {
+        if let Some(tool) = opt_stroke_tool {
+            // This is a chunk of strokes that all use `tool`.
 
-        if let Err(()) = draw_result {
-            eprintln!("Failed to draw stroke");
+            // Get the event slice for each stroke.
+            let stroke_events = objects.map(|o| {
+                let sdocx::DocObject::Stroke(s) = o else {
+                    unreachable!()
+                };
+
+                s.events()
+            });
+
+            draw_stroke_chunk_events(
+                stroke_events,
+                tool,
+                page_size,
+                ops,
+                graphics_states,
+                tool_graphics_state_names,
+            );
+
+            continue;
         }
+
+        // This is a chunk of non-strokes.
+        for object in objects {
+            let path_err = match object {
+                sdocx::DocObject::Line(line) => {
+                    if line.has_control_points() {
+                        eprintln!("Warning: Ignoring line control points");
+                    }
+
+                    shape::draw_path_segments(
+                        // Line objects tend to include a path, but the field is technically
+                        // optional. The start and end points are guaranteed to be present, so we
+                        // make our own path from those.
+                        &shape::straight_line_segments(line.start(), line.end()),
+                        line.colour_effect(),
+                        line.style(),
+                        // No fill
+                        None,
+                        graphics_states,
+                        ops,
+                    )
+                }
+
+                sdocx::DocObject::Shape(shape) => {
+                    if let Some(path) = shape.path() {
+                        shape::draw_path_segments(
+                            path.segments(),
+                            shape.line_colour_effect(),
+                            shape.line_style(),
+                            shape.fill_effect(),
+                            graphics_states,
+                            ops,
+                        )
+                    } else {
+                        eprintln!("Warning: Ignoring shape that has no path");
+                        continue;
+                    }
+                }
+
+                _other => {
+                    // eprintln!("Warning: Ignoring object '{}'", <&'static str>::from(other));
+                    continue;
+                }
+            };
+
+            if let Err(err) = path_err {
+                eprintln!("Warning: Failed to draw path: {err:?}");
+            }
+        }
+    }
+}
+
+fn draw_stroke_chunk_events<'e>(
+    stroke_events: impl IntoIterator<Item = &'e [Event]>,
+    tool: Tool,
+    page_size: (f32, f32),
+    ops: &mut Vec<lopdf::content::Operation>,
+    graphics_states: &mut PdfDict,
+    tool_graphics_state_names: &mut HashMap<Tool, String>,
+) {
+    // Get the graphics state for the tool, creating it if it does not yet exist.
+    let gs_name = tool_graphics_state_names
+        .entry(tool.clone())
+        .or_insert_with(|| {
+            let name = format!("egs{}", graphics_states.len());
+            graphics_states.set(name.clone(), tool.create_egs());
+            name
+        });
+
+    // Draw all the strokes with the tool.
+    let draw_result = tool.draw_events(gs_name, page_size, stroke_events, ops);
+
+    if let Err(()) = draw_result {
+        eprintln!("Failed to draw strokes");
     }
 }
 

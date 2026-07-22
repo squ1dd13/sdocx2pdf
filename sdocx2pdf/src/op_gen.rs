@@ -111,6 +111,22 @@ impl PolygonDrawMode {
     }
 }
 
+pub fn move_to(p: PdfPoint) -> Operation {
+    Operation::new("m", point_vec([p]))
+}
+
+pub fn line_to(p: PdfPoint) -> Operation {
+    Operation::new("l", point_vec([p]))
+}
+
+pub fn cubic_to(cp1: PdfPoint, cp2: PdfPoint, p3: PdfPoint) -> Operation {
+    Operation::new("c", point_vec([cp1, cp2, p3]))
+}
+
+pub fn close_subpath() -> Operation {
+    Operation::new("h", vec![])
+}
+
 /// Constructs a closed path from `points` without closing the path object. This function may be
 /// used to create a path consisting of several polygon subpaths.
 pub fn specify_polygon<'p, P: IntoIterator<Item = PolygonPoint>>(
@@ -123,7 +139,7 @@ where
 
     let first_move = match points.next() {
         // Move to first point.
-        Some(PolygonPoint::Normal(p)) => Operation::new("m", point_vec([p])),
+        Some(PolygonPoint::Normal(p)) => move_to(p),
         Some(PolygonPoint::Control(_)) => panic!("first polygon point cannot be a control point"),
         None => return Either::Left(std::iter::empty()),
     };
@@ -133,7 +149,7 @@ where
             .chain(std::iter::from_fn(move || {
                 Some(match points.next()? {
                     // Use "line to" for normal points.
-                    PolygonPoint::Normal(p) => Operation::new("l", point_vec([p])),
+                    PolygonPoint::Normal(p) => line_to(p),
                     // If this is a Bézier control point, we need another control point followed by
                     // a normal point to specify the entire curve.
                     PolygonPoint::Control(cp1) => {
@@ -145,12 +161,12 @@ where
                             panic!("missing end point for cubic Bézier");
                         };
 
-                        Operation::new("c", point_vec([cp1, cp2, p3]))
+                        cubic_to(cp1, cp2, p3)
                     }
                 })
             }))
             // Close the path.
-            .chain(std::iter::once(Operation::new("h", vec![]))),
+            .chain(std::iter::once(close_subpath())),
     )
 }
 
@@ -185,6 +201,14 @@ pub fn specify_rectangle([x, y, w, h]: [f32; 4]) -> Operation {
 
 pub fn fill() -> Operation {
     Operation::new("f", vec![])
+}
+
+pub fn stroke() -> Operation {
+    Operation::new("S", vec![])
+}
+
+pub fn fill_and_stroke() -> Operation {
+    Operation::new("B", vec![])
 }
 
 pub fn restore_graphics_state() -> Operation {

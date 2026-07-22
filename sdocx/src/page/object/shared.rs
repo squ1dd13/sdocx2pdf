@@ -8,12 +8,15 @@ use crate::{
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
+use strum::Display;
 use thiserror::Error;
 
 /// A segment of a `Path`. Variant names are based on `SpenPath` constants.
-#[derive(Debug)]
-#[expect(dead_code)]
-enum PathSegment {
+///
+/// Variants here correspond to methods on
+/// [`android.graphics.Path`](https://developer.android.com/reference/android/graphics/Path).
+#[derive(Debug, Clone, Copy)]
+pub enum PathSegment {
     /// `TYPE_MOVETO`; 1
     MoveTo(Point),
 
@@ -21,13 +24,17 @@ enum PathSegment {
     LineTo(Point),
 
     /// `TYPE_QUADTO`; 3
-    QuadTo(Point, Point),
+    QuadTo { cp1: Point, p2: Point },
 
     /// `TYPE_CUBICTO`; 4
-    CubicTo(Point, Point, Point),
+    CubicTo { cp1: Point, cp2: Point, p3: Point },
 
     /// `TYPE_ARCTO`; 5
-    ArcTo(Rect, f64, f64),
+    ArcTo {
+        oval: Rect,
+        start_angle: f64,
+        sweep_angle: f64,
+    },
 
     /// `TYPE_CLOSE`; 6
     Close,
@@ -49,35 +56,34 @@ pub enum PathParseError {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct Path {
     segments: Vec<PathSegment>,
 }
 
 impl Path {
-    pub fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<Path, PathParseError> {
+    pub(crate) fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<Path, PathParseError> {
         Ok(Path {
             segments: read_u32_sized_vec!(stream, PathParseError::TooManySegments, {
                 match stream.read_u8()? {
                     1 => PathSegment::MoveTo(Point::try_parse_f64(stream)?),
                     2 => PathSegment::LineTo(Point::try_parse_f64(stream)?),
 
-                    3 => PathSegment::QuadTo(
-                        Point::try_parse_f64(stream)?,
-                        Point::try_parse_f64(stream)?,
-                    ),
+                    3 => PathSegment::QuadTo {
+                        cp1: Point::try_parse_f64(stream)?,
+                        p2: Point::try_parse_f64(stream)?,
+                    },
 
-                    4 => PathSegment::CubicTo(
-                        Point::try_parse_f64(stream)?,
-                        Point::try_parse_f64(stream)?,
-                        Point::try_parse_f64(stream)?,
-                    ),
+                    4 => PathSegment::CubicTo {
+                        cp1: Point::try_parse_f64(stream)?,
+                        cp2: Point::try_parse_f64(stream)?,
+                        p3: Point::try_parse_f64(stream)?,
+                    },
 
-                    5 => PathSegment::ArcTo(
-                        Rect::try_parse_f64(stream)?,
-                        stream.read_f64_le()?,
-                        stream.read_f64_le()?,
-                    ),
+                    5 => PathSegment::ArcTo {
+                        oval: Rect::try_parse_f64(stream)?,
+                        start_angle: stream.read_f64_le()?,
+                        sweep_angle: stream.read_f64_le()?,
+                    },
 
                     6 => PathSegment::Close,
                     7 => PathSegment::AddOval(Rect::try_parse_f64(stream)?),
@@ -87,9 +93,13 @@ impl Path {
             }),
         })
     }
+
+    pub fn segments(&self) -> &[PathSegment] {
+        &self.segments
+    }
 }
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive, Display)]
 pub enum ColourType {
     /// `COLOR_SOLID`
     Solid = 0,
@@ -100,6 +110,12 @@ pub enum ColourType {
 }
 
 impl_try_from_for_optional_from!(ColourType, u8, from_u8, pub InvalidColourTypeError);
+
+impl ColourType {
+    pub const fn is_solid(self) -> bool {
+        matches!(self, ColourType::Solid)
+    }
+}
 
 #[derive(Debug, FromPrimitive)]
 pub enum GradientType {
@@ -116,7 +132,6 @@ pub enum GradientType {
 impl_try_from_for_optional_from!(GradientType, u8, from_u8, pub InvalidGradientTypeError);
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct GradientColour {
     pub colour: [u8; 4],
     pub position: f32,

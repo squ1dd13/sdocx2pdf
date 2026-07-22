@@ -4,6 +4,7 @@ use crate::{
     page::{
         Point, Rect,
         object::{
+            LineColourEffect, LineStyleEffect,
             base::{HasObjectBase, ObjectBase},
             header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
             shape_base::{ShapeBase, ShapeBaseParseError},
@@ -56,6 +57,28 @@ pub struct Line {
     pen_style_id: Option<u32>,
     pen_name_id: Option<u32>,
     path: Option<Path>,
+}
+
+impl Line {
+    pub const fn start(&self) -> Point {
+        self.start_point
+    }
+
+    pub const fn end(&self) -> Point {
+        self.end_point
+    }
+
+    pub fn colour_effect(&self) -> Option<&LineColourEffect> {
+        self.shape_base.line_colour_effect()
+    }
+
+    pub fn style(&self) -> Option<&LineStyleEffect> {
+        self.shape_base.line_style()
+    }
+
+    pub const fn has_control_points(&self) -> bool {
+        !self.control_points.is_empty()
+    }
 }
 
 impl<R: Read + Seek> TryParse<R> for Line {

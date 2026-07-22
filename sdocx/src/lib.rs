@@ -16,7 +16,6 @@
     clippy::float_cmp_const,
     clippy::float_equality_without_abs,
     keyword_idents,
-    clippy::missing_const_for_fn,
     clippy::missing_panics_doc,
     clippy::mod_module_files,
     non_ascii_idents,
