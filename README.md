@@ -18,9 +18,13 @@ sdocx2pdf runs on Linux, macOS and Windows and can work with SDOCX files produce
 Notes apps for Android and Windows. It reads the handwriting data in the files, represents it
 mathematically using smooth curves, and produces a PDF containing those curves. Currently, you can
 
-- write notes by hand in SNotes and get a vector PDF of your handwriting using sdocx2pdf; and
-- annotate PDFs by hand in SNotes and get a vector PDF with your handwriting on top of the original
-  PDF (with searchable/selectable text) using sdocx2pdf.
+- write notes by hand and draw shapes in SNotes and get a vector PDF of your work using sdocx2pdf;
+  and
+- add handwriting and shapes to PDFs by hand in SNotes and get a vector PDF with your annotations
+  on top of the original PDF (with searchable/selectable text) using sdocx2pdf.
+
+**As of sdocx2pdf v0.2.0, handwriting, shapes and embedded PDFs are represented in converted
+documents.**
 
 There are options for splitting pageless documents into pages based either on page length or on the
 page breaks in any embedded PDFs. You can also choose to convert a pageless document to a long
@@ -31,10 +35,10 @@ lectures using SNotes. I'd like to be able to read my work on devices that do no
 exporting to PDF is ideal. However, using the native PDF export feature in SNotes produces
 pixelated PDFs that are unpleasant to read. sdocx2pdf solves this problem.
 
-At present, sdocx2pdf understands but ignores all note features other than handwriting and embedded
-PDFs. Thus, it does not yet produce PDFs containing images, shapes, typed text, web links or
-paintings. It can still process documents that use these features, but it will not include them in
-the PDF. I intend to improve sdocx2pdf by adding support for these things in the future.
+sdocx2pdf understands but ignores a number of note features. It does not yet include images, typed
+text, web links, paintings or arrow heads on lines in output PDFs. It can still process documents
+that use these features, however. I intend to improve sdocx2pdf by adding support for these things
+in the future.
 
 Another current limitation of sdocx2pdf is that it does not precisely replicate the features of all
 the various writing tools. For example, the calligraphy pen looks exactly the same as the fountain
@@ -114,20 +118,23 @@ Options:
       --auto-split
           Inserts page breaks into pageless documents between pages of any embedded PDFs. Disabled by default.
 
-          By default, a pageless document will be converted to a PDF containing a long single page. With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are inserted to match the page breaks in the embedded PDFs. For example, if you import a five-page PDF into a blank pageless document and annotate it, auto-splitting will give you a five-page PDF
-          rather than a single-page PDF.
+          By default, a pageless document will be converted to a PDF containing a long single page. With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are inserted to match the page breaks in the embedded PDFs. For example, if you import a five-page PDF
+          into a blank pageless document and annotate it, auto-splitting will give you a five-page PDF rather than a single-page PDF.
 
           This option does nothing when converting a paged document. It also does nothing for pageless documents that do not embed any PDFs; see the basic splitting option.
 
       --basic-split <BASIC_SPLIT>
           Specifies the page-splitting behaviour used for pageless documents when auto-splitting is not in effect, either because it is disabled or because the document being converted does not embed any PDFs.
 
-          Basic splitting is disabled by default, resulting in long single-page PDFs when auto-splitting is not used. To use basic splitting only, specify a mode and do not enable auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting is used as a fallback when there are no PDFs embedded in the document. If auto-splitting is enabled but
-          basic splitting is not, documents that embed PDFs will be auto-split, but those that don't will not be split at all.
+          Basic splitting is disabled by default, resulting in long single-page PDFs when auto-splitting is not used. To use basic splitting only, specify a mode and do not enable auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting is used as a
+          fallback when there are no PDFs embedded in the document. If auto-splitting is enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those that don't will not be split at all.
 
           Possible values:
           - a4-portrait:  Split the document into portrait A4 pages
           - a4-landscape: Split the document into landscape A4 pages
+
+      --detailed-errors
+          Show (very) detailed error messages if opening/parsing/converting fails
 ```
 
 </details>
