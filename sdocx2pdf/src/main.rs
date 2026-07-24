@@ -14,7 +14,7 @@ use num::ToPrimitive;
 use sdocx::{Document, DocumentError, MediaStorage, page::object::stroke::Event};
 use thiserror::Error;
 
-use crate::tool::Tool;
+use crate::tool::{report_missing_colours, Tool};
 
 mod op_gen;
 mod shape;
@@ -632,6 +632,8 @@ fn main_convert(
             indicatif::HumanBytes(metadata.len())
         );
     }
+
+    report_missing_colours();
 
     Ok(())
 }
