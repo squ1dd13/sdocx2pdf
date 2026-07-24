@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
@@ -12,6 +13,22 @@ use crate::{
     op_gen::{self, PdfPoint, PdfVector, PolygonDrawMode, WindingRule},
     stroke::{ContinuousStroke, StrokeOrDot},
 };
+
+/// Counts strokes whose colour field is missing from the document (see `try_for_stroke`). These
+/// are drawn in black; the total is reported once by `report_missing_colours` after conversion.
+static MISSING_COLOUR_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Emits a single warning summarising how many strokes had no colour and were drawn in black.
+/// Does nothing if every stroke had a colour. Call once after all strokes have been processed.
+pub fn report_missing_colours() {
+    let count = MISSING_COLOUR_COUNT.load(Ordering::Relaxed);
+    if count > 0 {
+        eprintln!(
+            "Warning: {}; falling back to black. ({count})",
+            ToolPropertyError::NoColour
+        );
+    }
+}
 
 /// Basic information used by all tools.
 ///
@@ -57,9 +74,23 @@ impl Tool {
     fn try_for_stroke(stroke: &Stroke) -> Result<Tool, ToolPropertyError> {
         let name = stroke.pen_name().ok_or(ToolPropertyError::NoName)?;
 
+        // Some strokes (e.g. those drawn with InkPen2) do not serialise a colour field at all,
+        // so `stroke.colour()` returns `None`. Rather than aborting the whole conversion, count
+        // the missing colour (preserving the original NoColour signal) and fall back to opaque
+        // black, which is the correct colour for the vast majority of ink strokes. The count is
+        // reported once via `report_missing_colours` instead of warning per stroke, since
+        // documents can contain thousands of such strokes.
+        let colour_bgra = match stroke.colour() {
+            Some(colour) => colour,
+            None => {
+                MISSING_COLOUR_COUNT.fetch_add(1, Ordering::Relaxed);
+                [0, 0, 0, 255]
+            }
+        };
+
         let basics = Basics {
             size: stroke.pen_size().ok_or(ToolPropertyError::NoSize)?.into(),
-            colour_bgra: stroke.colour().ok_or(ToolPropertyError::NoColour)?,
+            colour_bgra,
         };
 
         Ok(match name.as_ref() {
