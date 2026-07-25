@@ -23,7 +23,7 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
 - add handwriting and shapes to PDFs by hand in SNotes and get a vector PDF with your annotations
   on top of the original PDF (with searchable/selectable text) using sdocx2pdf.
 
-**As of sdocx2pdf v0.2.0, handwriting, shapes and embedded PDFs are represented in converted
+**As of sdocx2pdf v0.2.1, handwriting, shapes and embedded PDFs are represented in converted
 documents.**
 
 There are options for splitting pageless documents into pages based either on page length or on the
