@@ -36,9 +36,8 @@ exporting to PDF is ideal. However, using the native PDF export feature in SNote
 pixelated PDFs that are unpleasant to read. sdocx2pdf solves this problem.
 
 sdocx2pdf understands but ignores a number of note features. It does not yet include images, typed
-text, web links, paintings or arrow heads on lines in output PDFs. It can still process documents
-that use these features, however. I intend to improve sdocx2pdf by adding support for these things
-in the future.
+text, web links or paintings in output PDFs. It can still process documents that use these
+features, however. I intend to improve sdocx2pdf by adding support for these things in the future.
 
 Another current limitation of sdocx2pdf is that it does not precisely replicate the features of all
 the various writing tools. For example, the calligraphy pen looks exactly the same as the fountain

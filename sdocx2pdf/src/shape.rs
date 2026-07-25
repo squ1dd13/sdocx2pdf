@@ -1,156 +1,39 @@
+use euclid::{Angle, Point2D, Transform2D};
 use lopdf::{content::Operation, dictionary};
 use sdocx::page::{
     Point,
     object::{
-        ArrowShape, CapType, CompoundType, FillEffect, JoinType, LineColourEffect, LineStyleEffect,
-        PathSegment,
+        ArrowShape, CapType, FillEffect, JoinType, LineColourEffect, LineStyleEffect, PathSegment,
     },
 };
 use thiserror::Error;
 
-use crate::op_gen::{self, PdfPoint};
+use crate::op_gen::{self, PdfPoint, PdfSpace, PdfVector};
 
-fn lce_to_solid_bgra(lce: &LineColourEffect) -> [u8; 4] {
-    if !lce.colour_type.is_solid() {
-        eprintln!(
-            "Warning: Only solid line colours are supported; found '{}'",
-            lce.colour_type
-        );
-    }
+// --▶
+// Vertices are named for an arrowhead pointing to the right.
+const NORMAL_ARROW: [PdfPoint; 3] = [
+    // Top
+    PdfPoint::new(-1.0, -0.5),
+    // Apex
+    PdfPoint::new(0.0, 0.0),
+    // Bottom
+    PdfPoint::new(-1.0, 0.5),
+];
 
-    lce.solid_colour_bgra()
+/// Returns `[top, apex, bottom]` if the angle to the horizontal is zero, and the transformed
+/// equivalents otherwise.
+fn normal_arrow_vertices_ordered(
+    apex_at: Point2D<f64, PdfSpace>,
+    angle_to_horizontal: Angle<f64>,
+    size_unit: f64,
+) -> [PdfPoint; 3] {
+    let tx = Transform2D::<f64, PdfSpace, PdfSpace>::scale(size_unit, size_unit)
+        .then_rotate(angle_to_horizontal)
+        .then_translate(apex_at.to_vector());
+
+    NORMAL_ARROW.map(|p| tx.transform_point(p))
 }
-
-fn fe_to_solid_bgra(fe: &FillEffect) -> Option<[u8; 4]> {
-    match fe {
-        FillEffect::Colour(fce) => {
-            if !fce.colour_type.is_solid() {
-                eprintln!(
-                    "Warning: Only solid fill colours are supported; found colour type '{}'",
-                    fce.colour_type
-                );
-            }
-
-            Some(fce.solid_colour_bgra())
-        }
-
-        other => {
-            eprintln!(
-                "Warning: Only solid fill colours are supported; effect '{}' will be ignored",
-                other
-            );
-
-            None
-        }
-    }
-}
-
-fn doc_point_to_pdf(p: sdocx::page::Point) -> PdfPoint {
-    <(f64, f64)>::from(p).into()
-}
-
-fn create_fill_alpha_graphics_state(fill_alpha: u8) -> lopdf::Dictionary {
-    lopdf::dictionary! {
-        "Type" => "ExtGState",
-        "ca" => (fill_alpha as f32) / 255.0,
-    }
-}
-
-fn create_full_graphics_state(
-    stroke_alpha: u8,
-    fill_alpha: Option<u8>,
-    line_style: &LineStyleEffect,
-) -> lopdf::Dictionary {
-    let mut dict = lopdf::dictionary! {
-        "Type" => "ExtGState",
-        "LW" => line_style.width,
-        "LC" => match line_style.cap_type {
-            CapType::Butt => 0,
-            CapType::Round => 1,
-            CapType::Square => 2,
-        },
-        "LJ" => match line_style.join_type {
-            JoinType::Miter => 0,
-            JoinType::Round => 1,
-            JoinType::Bevel => 2,
-        },
-        "CA" => (stroke_alpha as f32) / 255.0,
-    };
-
-    if let Some(fill_alpha) = fill_alpha {
-        dict.set("ca", (fill_alpha as f32) / 255.0);
-    }
-
-    if !matches!(
-        (&line_style.begin_arrow_shape, &line_style.end_arrow_shape),
-        (&ArrowShape::None, &ArrowShape::None)
-    ) {
-        // eprintln!(
-        //     "Warning: Arrow shapes are not yet supported; found {:?} and {:?}",
-        //     line_style.begin_arrow_shape, line_style.end_arrow_shape
-        // );
-    }
-
-    if !matches!(line_style.compound_type, CompoundType::Simple) {
-        // eprintln!(
-        //     "Warning: Compound types are not yet supported; found {:?}",
-        //     line_style.compound_type
-        // );
-    }
-
-    dict
-}
-
-pub fn straight_line_segments(a: Point, b: Point) -> [PathSegment; 2] {
-    [PathSegment::MoveTo(a), PathSegment::LineTo(b)]
-}
-
-// // ShapeDrawingLineEffect::setArrowSize
-// fn arrow_size_unit(stroke_width: f32, size: ArrowSize) -> f32 {
-//     match size {
-//         ArrowSize::Normal => (stroke_width * 3.0) + 10.0,
-//         ArrowSize::Small => (stroke_width * 2.5) + 5.0,
-//         ArrowSize::Big => (stroke_width * 4.0) + 15.0,
-//     }
-// }
-
-// // --▶
-// // These Unicode pictures show the heads pointing to the right, but the points are for a head
-// // pointing upwards.
-// const NORMAL_ARROW: [Point2D<f32, ()>; 3] = [
-//     // Bottom left
-//     Point2D::new(-0.5, 1.0),
-//     // Apex
-//     Point2D::new(0.0, 0.0),
-//     // Bottom right
-//     Point2D::new(0.5, 1.0),
-// ];
-
-// // --➤
-// const STEALTH_ARROW: [Point2D<f32, ()>; 4] = [
-//     // Indented point in the middle
-//     Point2D::new(0.0, 0.5),
-//     // Bottom left
-//     Point2D::new(-0.5, 1.0),
-//     // Apex
-//     Point2D::new(0.0, 0.0),
-//     // Bottom right
-//     Point2D::new(0.5, 1.0),
-// ];
-
-// // --◆
-// const DIAMOND_ARROW: [Point2D<f32, ()>; 4] = [
-//     // Top vertex
-//     Point2D::new(0.0, -std::f32::consts::FRAC_1_SQRT_2),
-//     // Right vertex
-//     Point2D::new(std::f32::consts::FRAC_1_SQRT_2, 0.0),
-//     // Bottom vertex
-//     Point2D::new(0.0, std::f32::consts::FRAC_1_SQRT_2),
-//     // Left vertex
-//     Point2D::new(-std::f32::consts::FRAC_1_SQRT_2, 0.0),
-// ];
-
-// There's also the open arrow, but it also uses the stroke width, not just the unit size.
 
 #[derive(Debug, Error)]
 pub enum PathDrawingError {
@@ -170,85 +53,92 @@ pub enum PathDrawingError {
     BadQuad,
 }
 
-pub fn draw_path_segments(
-    segments: &[PathSegment],
-    line_colour: Option<&LineColourEffect>,
-    line_style: Option<&LineStyleEffect>,
-    fill_effect: Option<&FillEffect>,
+struct StrokeStyle {
+    bgra: [u8; 4],
+    width: f32,
+    join: JoinType,
+    cap: CapType,
+}
+
+fn draw_path_with_shape_style(
+    stroke_style: Option<StrokeStyle>,
+    fill_bgra: Option<[u8; 4]>,
     graphics_states: &mut lopdf::Dictionary,
     ops: &mut Vec<Operation>,
+    path_fn: impl FnOnce(&mut Vec<Operation>) -> Result<(), PathDrawingError>,
 ) -> Result<(), PathDrawingError> {
-    if line_colour.is_none() && line_style.is_none() && fill_effect.is_none() {
+    let (filling, stroking) = (fill_bgra.is_some(), stroke_style.is_some());
+
+    if !filling && !stroking {
         return Err(PathDrawingError::NothingToDo);
     }
 
-    segments_to_ops(segments, ops)?;
-
+    let op_count_pre = ops.len();
     ops.push(op_gen::save_graphics_state());
 
-    // todo: Everything here would be simpler with a single type for LC/LS/FC which handles
-    // defaults and the creation of graphics states - in other words, a "shape tool" type. We could
-    // then reuse tools and graphics states like we do for strokes.
-    let fill_colour_bgra = fill_effect.and_then(fe_to_solid_bgra);
+    let mut graphics_state = None;
 
-    if line_colour.is_some() || line_style.is_some() {
-        // We stroke if we have either a colour or style, but we might not have been given both.
-        let [line_b, line_g, line_r, line_a] = line_colour
-            .map(lce_to_solid_bgra)
-            .unwrap_or_else(|| lce_to_solid_bgra(&LineColourEffect::default()));
+    if let Some(StrokeStyle {
+        bgra: [b, g, r, a],
+        width,
+        join,
+        cap,
+    }) = stroke_style
+    {
+        ops.push(op_gen::set_stroke_colour(r, g, b));
 
-        let line_style = match line_style {
-            Some(ls) => ls,
-            None => &LineStyleEffect::default(),
-        };
+        graphics_state = Some(lopdf::dictionary! {
+            "Type" => "ExtGState",
+            "LW" => width,
+            "CA" => (a as f32) / 255.0,
+            "LC" => match cap {
+                CapType::Butt => 0,
+                CapType::Round => 1,
+                CapType::Square => 2,
+            },
+            "LJ" => match join {
+                JoinType::Miter => 0,
+                JoinType::Round => 1,
+                JoinType::Bevel => 2,
+            },
+        });
+    }
 
-        let graphics_state =
-            create_full_graphics_state(line_a, fill_colour_bgra.map(|[.., a]| a), line_style);
+    if let Some([b, g, r, a]) = fill_bgra {
+        ops.push(op_gen::set_fill_colour(r, g, b));
 
-        let gs_name = format!("egs{}", graphics_states.len());
-        graphics_states.set(gs_name.clone(), graphics_state);
+        // If the fill is not opaque, we need an extended graphics state for the alpha.
+        if a < 255 {
+            let ca = (a as f32) / 255.0;
 
-        ops.extend([
-            op_gen::load_graphics_state(&gs_name),
-            op_gen::set_stroke_colour(line_r, line_g, line_b),
-        ]);
-
-        if let Some([fb, fg, fr, _]) = fill_colour_bgra {
-            ops.extend([
-                op_gen::set_fill_colour(fr, fg, fb),
-                op_gen::fill_and_stroke(),
-            ]);
-        } else {
-            ops.push(op_gen::stroke());
-        }
-    } else {
-        match fill_colour_bgra {
-            // If we are not stroking, we only need an extended graphics state if the fill colour
-            // is not opaque.
-            #![allow(non_contiguous_range_endpoints)]
-            Some([fb, fg, fr, fill_alpha @ ..255]) => {
-                let gs_name = format!("egs{}", graphics_states.len());
-
-                graphics_states.set(
-                    gs_name.clone(),
-                    create_fill_alpha_graphics_state(fill_alpha),
-                );
-
-                ops.extend([
-                    op_gen::load_graphics_state(&gs_name),
-                    op_gen::set_fill_colour(fr, fg, fb),
-                    op_gen::fill(),
-                ]);
+            if let Some(graphics_state) = graphics_state.as_mut() {
+                graphics_state.set("ca", ca);
+            } else {
+                graphics_state = Some(lopdf::dictionary! {
+                    "Type" => "ExtGState",
+                    "ca" => ca,
+                });
             }
-
-            Some([fb, fg, fr, _]) => {
-                ops.extend([op_gen::set_fill_colour(fr, fg, fb), op_gen::fill()])
-            }
-
-            // No fill colour. Should be unreachable as we would only get here if neither stroking
-            // nor filling.
-            None => (),
         }
+    }
+
+    if let Some(graphics_state) = graphics_state {
+        let name = format!("egs{}", graphics_states.len());
+        ops.push(op_gen::load_graphics_state(&name));
+        graphics_states.set(name, graphics_state);
+    }
+
+    if let Err(err) = path_fn(ops) {
+        // Remove the operations added.
+        ops.truncate(op_count_pre);
+        return Err(err);
+    };
+
+    match (filling, stroking) {
+        (true, true) => ops.push(op_gen::fill_and_stroke()),
+        (true, false) => ops.push(op_gen::fill()),
+        (false, true) => ops.push(op_gen::stroke()),
+        _ => (),
     }
 
     ops.push(op_gen::restore_graphics_state());
@@ -256,7 +146,11 @@ pub fn draw_path_segments(
     Ok(())
 }
 
-fn segments_to_ops(
+fn doc_point_to_pdf(p: sdocx::page::Point) -> PdfPoint {
+    <(f64, f64)>::from(p).into()
+}
+
+fn specify_path_by_segments(
     segments: &[PathSegment],
     ops: &mut Vec<Operation>,
 ) -> Result<(), PathDrawingError> {
@@ -314,6 +208,7 @@ fn segments_to_ops(
                     op_gen::cubic_to(cp1, cp2, end)
                 }
 
+                // todo: Implement these
                 PathSegment::ArcTo { .. } => break 'op_block Err(PathDrawingError::ArcUnsupported),
                 PathSegment::AddOval(..) => break 'op_block Err(PathDrawingError::OvalUnsupported),
 
@@ -335,4 +230,263 @@ fn segments_to_ops(
     }
 
     Ok(())
+}
+
+fn check_line_style(ls: &LineStyleEffect) {
+    match (ls.compound_type, ls.dash_type) {
+        (sdocx::page::object::CompoundType::Simple, sdocx::page::object::DashType::Solid) => (),
+        (_, _) => {
+            eprintln!(
+                "Warning: Alternative compound line types and dash types are not yet supported"
+            );
+        }
+    }
+}
+
+pub fn draw_line(
+    start: Point,
+    end: Point,
+    lc: Option<&LineColourEffect>,
+    ls: Option<&LineStyleEffect>,
+    graphics_states: &mut lopdf::Dictionary,
+    ops: &mut Vec<Operation>,
+) -> Result<(), PathDrawingError> {
+    let start: PdfPoint = (start.x, start.y).into();
+    let end: PdfPoint = (end.x, end.y).into();
+
+    let op_count_pre = ops.len();
+    ops.push(op_gen::save_graphics_state());
+
+    let lc = match lc {
+        Some(lc) => lc,
+        None => &LineColourEffect::default(),
+    };
+
+    let ls = match ls {
+        Some(ls) => {
+            check_line_style(ls);
+            ls
+        }
+        None => &LineStyleEffect::default(),
+    };
+
+    let line_vec = end - start;
+    let line_angle = line_vec.angle_from_x_axis();
+
+    let start_arrow_points = match ls.begin_arrow_shape {
+        ArrowShape::None => None,
+        arrow_shape => {
+            if !matches!(arrow_shape, ArrowShape::Arrow) {
+                // todo: Implement other arrowheads
+                eprintln!("Warning: Only the basic arrowhead is implemented");
+            }
+
+            Some(normal_arrow_vertices_ordered(
+                start,
+                // Arrow at the start points away from the end, so rotate 180 degrees.
+                line_angle + Angle::pi(),
+                ls.begin_arrow_size.unit(ls.width as _),
+            ))
+        }
+    };
+
+    let end_arrow_points = match ls.end_arrow_shape {
+        ArrowShape::None => None,
+        arrow_shape => {
+            if !matches!(arrow_shape, ArrowShape::Arrow) {
+                eprintln!("Warning: Only the basic arrowhead is implemented");
+            }
+
+            Some(normal_arrow_vertices_ordered(
+                end,
+                line_angle,
+                ls.end_arrow_size.unit(ls.width as _),
+            ))
+        }
+    };
+
+    match (start_arrow_points, end_arrow_points) {
+        (None, None) => (),
+
+        // If there are arrowheads, we need to clip the line so that it does not poke out from
+        // behind them. At an end where there is an arrowhead, the clipping path conforms to the
+        // shape of the arrow. At an end where there is not, we need the line to fit inside the
+        // clipping path. To do that, we assume the line has butt caps and think of it as a
+        // rectangle. The corners of the clipping path at the non-arrow end are found by padding
+        // this rectangle with some multiple of the stroke width such that regardless of the line
+        // caps, the padded rectangle contains the line.
+        (sap, eap) => {
+            let width = ls.width as f64;
+            let no_arrow_clip_pad = width * 3.0;
+
+            let line_dir = line_vec.normalize();
+
+            let up = PdfVector::new(line_dir.y, -line_dir.x) * width;
+            let down = PdfVector::new(-line_dir.y, line_dir.x) * width;
+
+            match sap {
+                // Start is rotated, so order is bottom, apex, top
+                Some([bottom, apex, top]) => {
+                    ops.extend([
+                        op_gen::move_to(bottom),
+                        op_gen::line_to(apex),
+                        op_gen::line_to(top),
+                    ]);
+                }
+                None => {
+                    let start_plus_pad = start - line_dir * no_arrow_clip_pad;
+
+                    ops.extend([
+                        op_gen::move_to(start_plus_pad + down * no_arrow_clip_pad),
+                        op_gen::line_to(start_plus_pad + up * no_arrow_clip_pad),
+                    ]);
+                }
+            };
+
+            match eap {
+                Some([top, apex, bottom]) => {
+                    ops.extend([
+                        op_gen::line_to(top),
+                        op_gen::line_to(apex),
+                        op_gen::line_to(bottom),
+                    ]);
+                }
+                None => {
+                    let end_plus_pad = end + line_dir * no_arrow_clip_pad;
+
+                    ops.extend([
+                        op_gen::line_to(end_plus_pad + up * no_arrow_clip_pad),
+                        op_gen::line_to(end_plus_pad + down * no_arrow_clip_pad),
+                    ]);
+                }
+            };
+
+            // Clip the current graphics state with the path just specified.
+            ops.extend(op_gen::clip(op_gen::WindingRule::NonZero));
+        }
+    };
+
+    let draw_res = 'draw_block: {
+        // Draw the line itself.
+        match draw_path_with_shape_style(
+            Some(StrokeStyle {
+                bgra: lc.solid_colour_bgra(),
+                width: ls.width,
+                join: ls.join_type,
+                cap: ls.cap_type,
+            }),
+            // No fill
+            None,
+            graphics_states,
+            ops,
+            |ops| {
+                ops.extend([op_gen::move_to(start), op_gen::line_to(end)]);
+                Ok(())
+            },
+        ) {
+            Ok(it) => it,
+            Err(err) => break 'draw_block Err(err),
+        };
+
+        for arrow_points in [start_arrow_points, end_arrow_points].into_iter().flatten() {
+            match draw_path_with_shape_style(
+                None,
+                // The arrowheads are part of the line, but they are filled, so the line stroke
+                // becomes the arrowhead fill.
+                Some(lc.solid_colour_bgra()),
+                graphics_states,
+                ops,
+                |ops| {
+                    ops.extend([
+                        op_gen::move_to(arrow_points[0]),
+                        op_gen::line_to(arrow_points[1]),
+                        op_gen::line_to(arrow_points[2]),
+                    ]);
+
+                    Ok(())
+                },
+            ) {
+                Ok(it) => it,
+                Err(err) => break 'draw_block Err(err),
+            };
+        }
+
+        Ok(())
+    };
+
+    if let Err(err) = draw_res {
+        // Remove any operations added.
+        ops.truncate(op_count_pre);
+        return Err(err);
+    }
+
+    ops.push(op_gen::restore_graphics_state());
+
+    Ok(())
+}
+
+fn fe_to_solid_bgra(fe: &FillEffect) -> Option<[u8; 4]> {
+    match fe {
+        FillEffect::Colour(fce) => {
+            if !fce.colour_type.is_solid() {
+                eprintln!(
+                    "Warning: Only solid fill colours are supported; found colour type '{}'",
+                    fce.colour_type
+                );
+            }
+
+            Some(fce.solid_colour_bgra())
+        }
+
+        other => {
+            eprintln!(
+                "Warning: Only solid fill colours are supported; effect '{}' will be ignored",
+                other
+            );
+
+            None
+        }
+    }
+}
+
+pub fn draw_path_segments(
+    segments: &[PathSegment],
+    lc: Option<&LineColourEffect>,
+    ls: Option<&LineStyleEffect>,
+    fill_effect: Option<&FillEffect>,
+    graphics_states: &mut lopdf::Dictionary,
+    ops: &mut Vec<Operation>,
+) -> Result<(), PathDrawingError> {
+    let stroke_style = match (lc, ls) {
+        (None, None) => None,
+        (lc, ls) => {
+            let lc = match lc {
+                Some(lc) => lc,
+                None => &LineColourEffect::default(),
+            };
+
+            let ls = match ls {
+                Some(ls) => {
+                    check_line_style(ls);
+                    ls
+                }
+                None => &LineStyleEffect::default(),
+            };
+
+            Some(StrokeStyle {
+                bgra: lc.solid_colour_bgra(),
+                width: ls.width,
+                join: ls.join_type,
+                cap: ls.cap_type,
+            })
+        }
+    };
+
+    draw_path_with_shape_style(
+        stroke_style,
+        fill_effect.and_then(fe_to_solid_bgra),
+        graphics_states,
+        ops,
+        |ops| specify_path_by_segments(segments, ops),
+    )
 }

@@ -91,7 +91,7 @@ impl Default for LineColourEffect {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum CapType {
     /// `CAP_TYPE_BUTT`
     Butt = 0,
@@ -103,7 +103,7 @@ pub enum CapType {
 
 impl_try_from_for_optional_from!(CapType, u8, from_u8, pub InvalidCapTypeError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum CompoundType {
     /// `COMPOUND_TYPE_SIMPLE`
     Simple = 0,
@@ -119,7 +119,7 @@ pub enum CompoundType {
 
 impl_try_from_for_optional_from!(CompoundType, u8, from_u8, pub InvalidCompoundTypeError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum DashType {
     /// `DASH_TYPE_SOLID`
     Solid = 0,
@@ -141,7 +141,7 @@ pub enum DashType {
 
 impl_try_from_for_optional_from!(DashType, u8, from_u8, pub InvalidDashTypeError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum ArrowSize {
     /// `ARROW_SIZE_NORMAL`
     Normal = 0,
@@ -153,7 +153,19 @@ pub enum ArrowSize {
 
 impl_try_from_for_optional_from!(ArrowSize, u8, from_u8, pub InvalidArrowSizeError);
 
-#[derive(Debug, FromPrimitive)]
+impl ArrowSize {
+    /// Returns the graphical size unit used for drawing arrowheads on lines with the given
+    /// `stroke_width`.
+    pub fn unit(self, stroke_width: f64) -> f64 {
+        match self {
+            ArrowSize::Normal => (stroke_width * 3.0) + 10.0,
+            ArrowSize::Small => (stroke_width * 2.5) + 5.0,
+            ArrowSize::Big => (stroke_width * 4.0) + 15.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum ArrowShape {
     /// `ARROW_TYPE_NONE`
     None = 0,
@@ -171,7 +183,7 @@ pub enum ArrowShape {
 
 impl_try_from_for_optional_from!(ArrowShape, u8, from_u8, pub InvalidArrowShapeError);
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum JoinType {
     /// `JOIN_TYPE_MITER`
     Miter = 0,

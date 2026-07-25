@@ -702,15 +702,11 @@ fn draw_page_layer(
                         eprintln!("Warning: Ignoring line control points");
                     }
 
-                    shape::draw_path_segments(
-                        // Line objects tend to include a path, but the field is technically
-                        // optional. The start and end points are guaranteed to be present, so we
-                        // make our own path from those.
-                        &shape::straight_line_segments(line.start(), line.end()),
+                    shape::draw_line(
+                        line.start(),
+                        line.end(),
                         line.colour_effect(),
                         line.style(),
-                        // No fill
-                        None,
                         graphics_states,
                         ops,
                     )

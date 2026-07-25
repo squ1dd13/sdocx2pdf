@@ -117,7 +117,7 @@ impl ColourType {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
+#[derive(Clone, Copy, Debug, FromPrimitive)]
 pub enum GradientType {
     /// `GRADIENT_LINEAR`
     Linear = 0,
@@ -131,7 +131,7 @@ pub enum GradientType {
 
 impl_try_from_for_optional_from!(GradientType, u8, from_u8, pub InvalidGradientTypeError);
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct GradientColour {
     pub colour: [u8; 4],
     pub position: f32,
