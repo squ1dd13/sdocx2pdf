@@ -376,6 +376,8 @@ pub struct NoteDoc {
     modified_time: DateTime<Utc>,
     pub width: u32,
     pub height: u32,
+    default_width: Option<u32>,
+    default_height: Option<u32>,
     page_horizontal_padding: u32,
     page_vertical_padding: u32,
     min_format_version: u32,
@@ -470,12 +472,17 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             )?
         };
 
-        // fixme: Sometimes there's an eight-byte underread here.
-        // Parsing the gap as (u32, u32) yields something that looks suspiciously like a
-        // size (e.g. (1600, 2262)). Sometimes it's not there, though.
+        let (default_width, default_height) = {
+            let mut here = reader.stream_position()?;
 
-        {
-            let here = reader.stream_position()?;
+            // Default width/height are optional. Only read them if there is data left before the
+            // flex area begins.
+            let default_wh = if here < flex_offset {
+                here += 8;
+                Some((reader.read_u32_le()?, reader.read_u32_le()?))
+            } else {
+                None
+            };
 
             if here != flex_offset {
                 eprintln!(
@@ -486,7 +493,9 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
 
                 reader.seek(SeekFrom::Start(flex_offset))?;
             }
-        }
+
+            default_wh.unzip()
+        };
 
         unpack_field_flags!(field_flags, {
             0 => app_name: reader.read_short_u16_string()?;
@@ -578,6 +587,8 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             modified_time,
             width,
             height,
+            default_width,
+            default_height,
             page_horizontal_padding,
             page_vertical_padding,
             min_format_version,
