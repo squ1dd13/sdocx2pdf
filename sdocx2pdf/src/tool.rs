@@ -48,9 +48,6 @@ enum ToolPropertyError {
 
     #[error("missing size")]
     NoSize,
-
-    #[error("missing colour")]
-    NoColour,
 }
 
 impl Tool {
@@ -59,7 +56,7 @@ impl Tool {
 
         let basics = Basics {
             size: stroke.pen_size().ok_or(ToolPropertyError::NoSize)?.into(),
-            colour_bgra: stroke.colour().ok_or(ToolPropertyError::NoColour)?,
+            colour_bgra: stroke.colour(),
         };
 
         Ok(match name.as_ref() {

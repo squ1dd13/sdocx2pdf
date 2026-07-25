@@ -346,8 +346,12 @@ pub struct Stroke {
     tool_type: ToolType,
 
     advanced_pen_settings: Option<Rc<str>>,
-    colour: Option<[u8; 4]>,
+    colour: [u8; 4],
     pen_size: Option<f32>,
+    particle_size: Option<f32>,
+    pattern_index: Option<u32>,
+    pattern_scale: f32,
+    particle_level: Option<u32>,
     unk: Option<u32>,
     pen_name: Option<Rc<str>>,
     fixed_width: Option<f32>,
@@ -388,7 +392,7 @@ impl Stroke {
         self.pen_name.as_ref()
     }
 
-    pub const fn colour(&self) -> Option<[u8; 4]> {
+    pub const fn colour(&self) -> [u8; 4] {
         self.colour
     }
 }
@@ -447,7 +451,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
         unpack_field_flags!(field_check_flags, {
             // missing 0
             1 => advanced_pen_settings: string_registry.try_get(stream.read_u32_le()?)?;
-            2 => colour: stream.read_4_bytes()?;
+            2 => colour: stream.read_4_bytes()?, else [0, 0, 0, 255];
             3 => pen_size: stream.read_f32_le()?;
             4 => unk: stream.read_u32_le()?;
             // missing 5 and 6
@@ -462,6 +466,10 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             15 => dash_offset: stream.read_f32_le()?;
             16 => stroke_type: stream.read_u16_le()?.try_into()?;
             17 => pen_repeat_distance: stream.read_f32_le()?, else 0.5;
+            18 => particle_size: stream.read_f32_le()?;
+            19 => pattern_index: stream.read_u32_le()?;
+            20 => pattern_scale: stream.read_f32_le()?, else 1.0;
+            21 => particle_level: stream.read_u32_le()?;
         });
 
         if let Some(unk) = unk {
@@ -501,6 +509,10 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             dash_offset,
             stroke_type,
             pen_repeat_distance,
+            particle_size,
+            pattern_index,
+            pattern_scale,
+            particle_level,
         })
     }
 }
