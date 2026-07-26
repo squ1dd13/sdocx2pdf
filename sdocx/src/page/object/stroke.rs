@@ -7,6 +7,7 @@ use std::{
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;
+use log::warn;
 
 use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
@@ -473,7 +474,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
         });
 
         if let Some(unk) = unk {
-            eprintln!("Warning: Read unknown stroke field (value {unk})");
+            warn!("Read unknown stroke field (value {unk})");
         };
 
         flag_block.ensure_flags_used()?;

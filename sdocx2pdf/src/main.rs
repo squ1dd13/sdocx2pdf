@@ -9,9 +9,15 @@ use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
+use jiff::{
+    Timestamp,
+    fmt::{StdIoWrite, strtime::BrokenDownTime},
+};
+use log::{error, info, warn};
 use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
 use num::ToPrimitive;
 use sdocx::{Document, DocumentError, MediaStorage, page::object::stroke::Event};
+use std::io::Write;
 use thiserror::Error;
 
 use crate::tool::Tool;
@@ -220,32 +226,144 @@ impl EmbeddedPdf {
     }
 }
 
-fn main_convert(
-    document: Document,
-    mut media_storage: MediaStorage,
-    mut args: Args,
-) -> anyhow::Result<()> {
-    let mut lpdf = Pdf::with_version("1.5");
+fn draw_stroke_chunk_events<'e>(
+    stroke_events: impl IntoIterator<Item = &'e [Event]>,
+    tool: Tool,
+    page_size: (f32, f32),
+    ops: &mut Vec<lopdf::content::Operation>,
+    graphics_states: &mut PdfDict,
+    tool_graphics_state_names: &mut HashMap<Tool, String>,
+) {
+    // Get the graphics state for the tool, creating it if it does not yet exist.
+    let gs_name = tool_graphics_state_names
+        .entry(tool.clone())
+        .or_insert_with(|| {
+            let name = format!("egs{}", graphics_states.len());
+            graphics_states.set(name.clone(), tool.create_egs());
+            name
+        });
 
-    let document_name = document.title_text().raw_string().unwrap_or("Invalid name");
+    // Draw all the strokes with the tool.
+    let draw_result = tool.draw_events(gs_name, page_size, stroke_events, ops);
 
-    let pageless = match document.page_model() {
-        sdocx::PageModel::Paged => false,
-        sdocx::PageModel::Pageless => true,
-    };
-
-    eprintln!(
-        "Opened {} document '{document_name}'.",
-        if pageless { "pageless" } else { "paged" }
-    );
-
-    if !pageless {
-        args.auto_split = false;
-        args.basic_split = None;
+    if let Err(()) = draw_result {
+        error!("Failed to draw strokes");
     }
+}
 
-    let multi_progress = MultiProgress::new();
+// Hastily factored out of the main conversion code.
+// todo: Create a conversion context to hold operations, graphics states, etc.
+fn draw_page_layer(
+    layer: &sdocx::page::Layer,
+    page_size: (f32, f32),
+    ops: &mut Vec<lopdf::content::Operation>,
+    graphics_states: &mut PdfDict,
+    tool_graphics_state_names: &mut HashMap<Tool, String>,
+    multi_progress: &MultiProgress,
+) {
+    let objects = layer.objects();
 
+    let objects_bar = multi_progress
+        .add(ProgressBar::new(objects.len() as _))
+        .with_style(
+            ProgressStyle::with_template("Processing objects [{bar:40}] {percent}% [{pos}/{len}]")
+                .unwrap()
+                .progress_chars("# "),
+        );
+
+    // Consecutive stokes very often use the same tool. To reduce the size of the output PDF, we
+    // can process chains of such strokes in one go, loading the necessary graphics state only
+    // once and then using it for all the strokes rather than loading the same graphics state for
+    // every stroke.
+    let chunked_objects =
+        objects
+            .iter()
+            .inspect(|_| objects_bar.inc(1))
+            .chunk_by(|&obj| match obj {
+                sdocx::DocObject::Stroke(stroke) => Some(Tool::for_stroke(stroke)),
+                _non_stroke => None,
+            });
+
+    for (opt_stroke_tool, objects) in &chunked_objects {
+        if let Some(tool) = opt_stroke_tool {
+            // This is a chunk of strokes that all use `tool`.
+
+            // Get the event slice for each stroke.
+            let stroke_events = objects.map(|o| {
+                let sdocx::DocObject::Stroke(s) = o else {
+                    unreachable!()
+                };
+
+                s.events()
+            });
+
+            draw_stroke_chunk_events(
+                stroke_events,
+                tool,
+                page_size,
+                ops,
+                graphics_states,
+                tool_graphics_state_names,
+            );
+
+            continue;
+        }
+
+        // This is a chunk of non-strokes.
+        for object in objects {
+            let path_err = match object {
+                sdocx::DocObject::Line(line) => {
+                    if line.has_control_points() {
+                        warn!("Ignoring line control points");
+                    }
+
+                    shape::draw_line(
+                        line.start(),
+                        line.end(),
+                        line.colour_effect(),
+                        line.style(),
+                        graphics_states,
+                        ops,
+                    )
+                }
+
+                sdocx::DocObject::Shape(shape) => {
+                    if let Some(path) = shape.path() {
+                        shape::draw_path_segments(
+                            path.segments(),
+                            shape.line_colour_effect(),
+                            shape.line_style(),
+                            shape.fill_effect(),
+                            graphics_states,
+                            ops,
+                        )
+                    } else {
+                        warn!("Ignoring shape that has no path");
+                        continue;
+                    }
+                }
+
+                other => {
+                    warn!("Ignoring {other} object");
+                    continue;
+                }
+            };
+
+            if let Err(err) = path_err {
+                error!("Failed to draw path: {err:?}");
+            }
+        }
+    }
+}
+
+fn create_document_pdf(
+    document: &Document,
+    media_storage: &mut MediaStorage,
+    document_name: &str,
+    pageless: bool,
+    multi_progress: &MultiProgress,
+    args: &Args,
+) -> Result<lopdf::Document, anyhow::Error> {
     // Only show a progress bar for the pages if there is more than one.
     let pages_bar = if let page_count @ 2.. = document.pages().len() as u64 {
         Some(
@@ -258,6 +376,8 @@ fn main_convert(
     } else {
         None
     };
+
+    let mut lpdf = Pdf::with_version("1.5");
 
     // (Used `printpdf::serialize::to_lopdf_doc` as a reference for the basic setup)
     let pages_id = lpdf.new_object_id();
@@ -382,7 +502,7 @@ fn main_convert(
             let embedded_pdf = &*match embedded_pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => vac.insert(
-                    EmbeddedPdf::embed(emb_pdf_name, &mut media_storage, &mut lpdf)
+                    EmbeddedPdf::embed(emb_pdf_name, media_storage, &mut lpdf)
                         .with_context(|| format!("Failed to embed PDF '{emb_pdf_name}'"))?,
                 ),
             };
@@ -470,7 +590,7 @@ fn main_convert(
                 &mut operations,
                 &mut graphics_states,
                 &mut tool_graphics_state_names,
-                &multi_progress,
+                multi_progress,
             );
         }
 
@@ -597,7 +717,40 @@ fn main_convert(
     lpdf.trailer.set("Root", catalog_ref);
     lpdf.trailer.set("Info", doc_info_ref);
 
-    let _ = multi_progress.clear();
+    Ok(lpdf)
+}
+
+fn main_convert(
+    document: Document,
+    mut media_storage: MediaStorage,
+    multi_progress: &MultiProgress,
+    mut args: Args,
+) -> anyhow::Result<()> {
+    let document_name = document.title_text().raw_string().unwrap_or("Invalid name");
+
+    let pageless = match document.page_model() {
+        sdocx::PageModel::Paged => false,
+        sdocx::PageModel::Pageless => true,
+    };
+
+    info!(
+        "Successfully parsed {} document '{document_name}'",
+        if pageless { "pageless" } else { "paged" },
+    );
+
+    if !pageless {
+        args.auto_split = false;
+        args.basic_split = None;
+    }
+
+    let mut lpdf = create_document_pdf(
+        &document,
+        &mut media_storage,
+        document_name,
+        pageless,
+        multi_progress,
+        &args,
+    )?;
 
     let out_path_str = args.out.to_string_lossy();
 
@@ -627,143 +780,13 @@ fn main_convert(
     write_spinner.finish_and_clear();
 
     if let Ok(metadata) = metadata_r {
-        eprintln!(
+        info!(
             "Wrote {} to '{out_path_str}'.",
             indicatif::HumanBytes(metadata.len())
         );
     }
 
     Ok(())
-}
-
-// Hastily factored out of the main conversion code.
-// todo: Create a conversion context to hold operations, graphics states, etc.
-fn draw_page_layer(
-    layer: &sdocx::page::Layer,
-    page_size: (f32, f32),
-    ops: &mut Vec<lopdf::content::Operation>,
-    graphics_states: &mut PdfDict,
-    tool_graphics_state_names: &mut HashMap<Tool, String>,
-    mul_prog: &MultiProgress,
-) {
-    let objects = layer.objects();
-
-    let objects_bar = mul_prog
-        .add(ProgressBar::new(objects.len() as _))
-        .with_style(
-            ProgressStyle::with_template("Processing objects [{bar:40}] {percent}% [{pos}/{len}]")
-                .unwrap()
-                .progress_chars("# "),
-        );
-
-    // Consecutive stokes very often use the same tool. To reduce the size of the output PDF, we
-    // can process chains of such strokes in one go, loading the necessary graphics state only
-    // once and then using it for all the strokes rather than loading the same graphics state for
-    // every stroke.
-    let chunked_objects =
-        objects
-            .iter()
-            .inspect(|_| objects_bar.inc(1))
-            .chunk_by(|&obj| match obj {
-                sdocx::DocObject::Stroke(stroke) => Some(Tool::for_stroke(stroke)),
-                _non_stroke => None,
-            });
-
-    for (opt_stroke_tool, objects) in &chunked_objects {
-        if let Some(tool) = opt_stroke_tool {
-            // This is a chunk of strokes that all use `tool`.
-
-            // Get the event slice for each stroke.
-            let stroke_events = objects.map(|o| {
-                let sdocx::DocObject::Stroke(s) = o else {
-                    unreachable!()
-                };
-
-                s.events()
-            });
-
-            draw_stroke_chunk_events(
-                stroke_events,
-                tool,
-                page_size,
-                ops,
-                graphics_states,
-                tool_graphics_state_names,
-            );
-
-            continue;
-        }
-
-        // This is a chunk of non-strokes.
-        for object in objects {
-            let path_err = match object {
-                sdocx::DocObject::Line(line) => {
-                    if line.has_control_points() {
-                        eprintln!("Warning: Ignoring line control points");
-                    }
-
-                    shape::draw_line(
-                        line.start(),
-                        line.end(),
-                        line.colour_effect(),
-                        line.style(),
-                        graphics_states,
-                        ops,
-                    )
-                }
-
-                sdocx::DocObject::Shape(shape) => {
-                    if let Some(path) = shape.path() {
-                        shape::draw_path_segments(
-                            path.segments(),
-                            shape.line_colour_effect(),
-                            shape.line_style(),
-                            shape.fill_effect(),
-                            graphics_states,
-                            ops,
-                        )
-                    } else {
-                        eprintln!("Warning: Ignoring shape that has no path");
-                        continue;
-                    }
-                }
-
-                _other => {
-                    // eprintln!("Warning: Ignoring object '{}'", <&'static str>::from(other));
-                    continue;
-                }
-            };
-
-            if let Err(err) = path_err {
-                eprintln!("Warning: Failed to draw path: {err:?}");
-            }
-        }
-    }
-}
-
-fn draw_stroke_chunk_events<'e>(
-    stroke_events: impl IntoIterator<Item = &'e [Event]>,
-    tool: Tool,
-    page_size: (f32, f32),
-    ops: &mut Vec<lopdf::content::Operation>,
-    graphics_states: &mut PdfDict,
-    tool_graphics_state_names: &mut HashMap<Tool, String>,
-) {
-    // Get the graphics state for the tool, creating it if it does not yet exist.
-    let gs_name = tool_graphics_state_names
-        .entry(tool.clone())
-        .or_insert_with(|| {
-            let name = format!("egs{}", graphics_states.len());
-            graphics_states.set(name.clone(), tool.create_egs());
-            name
-        });
-
-    // Draw all the strokes with the tool.
-    let draw_result = tool.draw_events(gs_name, page_size, stroke_events, ops);
-
-    if let Err(()) = draw_result {
-        eprintln!("Failed to draw strokes");
-    }
 }
 
 fn print_report_request(detailed: bool) {
@@ -845,6 +868,31 @@ fn print_intro() {
 }
 
 fn main() -> ExitCode {
+    let logger = env_logger::builder()
+        .format(|mut buf, record| {
+            BrokenDownTime::from(Timestamp::now())
+                .format("%H:%M:%S%.3f", StdIoWrite(&mut buf))
+                .unwrap();
+
+            let style = buf.default_level_style(record.level());
+
+            writeln!(
+                buf,
+                " {style}{}{style:#} [{}] {}",
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .filter_level(log::LevelFilter::Trace)
+        .build();
+
+    let multi = MultiProgress::new();
+
+    indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
+        .try_init()
+        .unwrap();
+
     let args = Args::parse();
     let detailed_errors = args.detailed_errors;
 
@@ -861,7 +909,7 @@ fn main() -> ExitCode {
         },
     };
 
-    if let Err(err) = main_convert(document, media_storage, args) {
+    if let Err(err) = main_convert(document, media_storage, &multi, args) {
         eprintln!("Encountered an error when converting the document:");
 
         print_indented_string(if detailed_errors {

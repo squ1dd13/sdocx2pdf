@@ -12,6 +12,7 @@ use crate::{
     read_size_and_map,
 };
 use thiserror::Error;
+use log::warn;
 
 pub struct PdfDataItemParseCtx<'fr> {
     pub file_registry: &'fr FileRegistry,
@@ -175,7 +176,7 @@ impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
         let mut reader = reader.take_exclusive_length_prefixed()?;
 
         if let not_zero @ 1.. = reader.read_u32_le()? {
-            eprintln!("Warning: Unexpected non-zero value {not_zero} at start of custom object");
+            warn!("Unexpected non-zero value {not_zero} at start of custom object");
             // ... whatever. Keep going.
         }
 

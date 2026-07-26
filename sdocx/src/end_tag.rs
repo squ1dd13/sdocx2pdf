@@ -9,9 +9,11 @@ use crate::{
     if_any_left, impl_try_from_for_optional_from, unpack_bool_flag,
 };
 use chrono::{DateTime, Utc};
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::io::{Read, Seek, SeekFrom};
+use strum::Display;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +99,7 @@ pub enum PageModel {
 
 impl_try_from_for_optional_from!(PageModel, u16, from_u16, pub InvalidPageModelError);
 
-#[derive(Debug, FromPrimitive, Default)]
+#[derive(Debug, FromPrimitive, Default, Display)]
 pub enum DocumentType {
     /// `UNLOCKED_DOC`
     #[default]
@@ -281,13 +283,14 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
             if_any_left!(payload_reader, payload_reader.read_u16_le()?.try_into()?)
                 .unwrap_or_default();
 
+        if !matches!(document_type, DocumentType::UnlockedDoc) {
+            warn!("Document has unusual type {document_type}, and may not load correctly.");
+        }
+
         let owner_id = if_any_left!(payload_reader, payload_reader.read_short_u16_string()?);
 
         if let Some(n_to_skip @ 1..) = if_any_left!(payload_reader, payload_reader.read_u32_le()?) {
-            eprintln!(
-                "Warning: Skipping {n_to_skip} bytes in end tag. There must be something there!"
-            );
-
+            warn!("Skipping {n_to_skip} bytes in end tag. There must be something there!");
             payload_reader.seek_relative(n_to_skip.into())?;
         }
 
@@ -298,9 +301,7 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
             // could mean that the note is actually encrypted, in which case we won't be able to do
             // much with it. You could probably get this to happen if you tried to read an end tag
             // from the app's storage (i.e., not exported).
-            eprintln!(
-                "Warning: Encryption data present, but it shouldn't be if this is an exported file"
-            );
+            warn!("Encryption data present in end tag.");
 
             Some(EncryptionInfo::try_parse(&mut payload_reader)?)
         } else {

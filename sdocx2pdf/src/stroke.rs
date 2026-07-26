@@ -876,10 +876,8 @@ impl LinearCurvatureSegment {
         let s_start = self.s_start;
 
         if self.adjusted_model_is_valid() {
-            // eprintln!("Adjusted");
             Either::Left(self.spsi_adjusted(tgt_subseg_angle_delta))
         } else {
-            // eprintln!("Fallback");
             Either::Right(self.spsi_fallback(tgt_subseg_angle_delta))
         }
         .into_iter()

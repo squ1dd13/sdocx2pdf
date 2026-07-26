@@ -8,6 +8,7 @@ use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use log::warn;
 
 use crate::{
     OpaqueBytes, OpaqueBytesParseError,
@@ -252,8 +253,8 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
         });
 
         if unknown_somethings.is_some() || unknown_20.is_some() {
-            eprintln!(
-                "Warning: Read one or more unknown fields: {:?}/{:?}",
+            warn!(
+                "Read one or more unknown fields: {:?}/{:?}",
                 unknown_somethings, unknown_20
             );
         }

@@ -15,6 +15,7 @@ use crate::{
     read_size_and_map, read_size_and_vec, unpack_bool_flag, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use sha2::Digest;
@@ -485,8 +486,8 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
             };
 
             if here != flex_offset {
-                eprintln!(
-                    "Warning: Did not reach note flex offset naturally. \
+                warn!(
+                    "Did not reach flex offset naturally. \
                 Will seek from {here} to {flex_offset} (delta {}).",
                     flex_offset.wrapping_sub(here).cast_signed()
                 );

@@ -25,6 +25,7 @@ use std::{
     rc::Rc,
 };
 use thiserror::Error;
+use log::warn;
 
 mod header;
 pub mod object;
@@ -199,8 +200,8 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
             let here = header_reader.stream_position()?;
 
             if here != flex_offset {
-                eprintln!(
-                    "Warning: Did not reach layer flex offset naturally. \
+                warn!(
+                    "Did not reach layer flex offset naturally. \
                 Will seek from {here} to {flex_offset} (delta {}).",
                     flex_offset.wrapping_sub(here).cast_signed()
                 );
@@ -506,8 +507,8 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
             let here = reader.stream_position()?;
 
             if here != flex_offset {
-                eprintln!(
-                    "Warning: Did not reach page flex offset naturally. \
+                warn!(
+                    "Did not reach page flex offset naturally. \
                 Will seek from {here} to {flex_offset} (delta {}).",
                     flex_offset.wrapping_sub(here).cast_signed()
                 );
@@ -564,7 +565,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
                         canvas_cache_map.push((key, entry));
                     }
                 } else {
-                    eprintln!("Warning: Skipping CCM: entry size is {entry_size}, not 49.");
+                    warn!("Skipping CCM because entry size is {entry_size}, not 49.");
                     reader.seek_relative(i64::from(entry_count) * i64::from(entry_size))?;
                 }
 
@@ -576,7 +577,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
                 // This gets skipped by the libs.
                 reader
                     .read_u32_le()
-                    .inspect(|v| eprintln!("Warning: Read theme value {v} of unknown meaning"))?
+                    .inspect(|v| warn!("Read theme value {v} of unknown meaning"))?
             };
 
             // missing 13, 14
@@ -607,8 +608,8 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
             let here = reader.stream_position()?;
 
             if here != page_end_offset {
-                eprintln!(
-                    "Warning: Did not reach page end offset naturally. \
+                warn!(
+                    "Did not reach page end offset naturally. \
                 Will seek from {here} to {page_end_offset} (delta {}).",
                     page_end_offset.wrapping_sub(here).cast_signed()
                 );

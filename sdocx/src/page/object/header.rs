@@ -4,6 +4,7 @@ use std::{
 };
 
 use thiserror::Error;
+use log::warn;
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},
@@ -91,8 +92,8 @@ impl FlagBlock {
             match flex_offset.cmp(&here) {
                 // todo: Error
                 // This is a pretty big issue.
-                Ordering::Less => eprintln!(
-                    "Warning: Flex offset ({}) is **behind** here ({}) by {} byte(s)!",
+                Ordering::Less => warn!(
+                    "Flex offset ({}) is **behind** here ({}) by {} byte(s)!",
                     flex_offset,
                     here,
                     here - flex_offset
@@ -100,8 +101,8 @@ impl FlagBlock {
 
                 Ordering::Equal => (),
 
-                Ordering::Greater => eprintln!(
-                    "Warning: Flex offset ({}) is ahead of here ({}) by {} byte(s)",
+                Ordering::Greater => warn!(
+                    "Flex offset ({}) is ahead of here ({}) by {} byte(s)",
                     flex_offset,
                     here,
                     flex_offset - here
@@ -111,8 +112,8 @@ impl FlagBlock {
             reader.seek(std::io::SeekFrom::Start(flex_offset))?;
         } else {
             if self.field_flags.any_set() {
-                eprintln!(
-                    "Warning: Ignoring field flags {:?} because flex offset is zero",
+                warn!(
+                    "Ignoring field flags {:?} because flex offset is zero",
                     self.field_flags
                 );
             }

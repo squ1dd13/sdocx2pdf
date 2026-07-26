@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use std::io::{Read, Seek};
-use strum::IntoStaticStr;
+use strum::Display;
 use thiserror::Error;
 
 mod audio;
@@ -34,6 +34,7 @@ pub mod text;
 mod text_core;
 mod web;
 
+use log::warn;
 pub use shape::{FillColourEffect, FillEffect, FillImageEffect, ShapeType};
 pub use shape_base::{
     ArrowShape, ArrowSize, CapType, CompoundType, DashType, JoinType, LineColourEffect,
@@ -98,7 +99,7 @@ pub(crate) struct DocObjectParseContext<'a, 'b> {
     pub doc_ctx: DocumentContext<'a, 'b>,
 }
 
-#[derive(Debug, IntoStaticStr)]
+#[derive(Debug, Display)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
     Stroke(Box<Stroke>),
@@ -197,31 +198,31 @@ impl<'a> TryParseWithContext<dyn SeekableByteStreamLe + 'a, DocObjectParseContex
 
                 match object_type {
                     4 => DocObject::Container({
-                        eprintln!("Warning: Containers are not yet supported");
+                        warn!("Containers are not yet supported");
                         object
                     }),
                     11 => DocObject::Formula({
-                        eprintln!("Warning: Formulas are not yet supported");
+                        warn!("Formulas are not yet supported");
                         object
                     }),
                     17 => DocObject::Link({
-                        eprintln!("Warning: Links are not yet supported");
+                        warn!("Links are not yet supported");
                         object
                     }),
                     19 => DocObject::Generic({
-                        eprintln!("Warning: Generic objects are not yet supported");
+                        warn!("Generic objects are not yet supported");
                         object
                     }),
                     20 => DocObject::Plot({
-                        eprintln!("Warning: Plots are not yet supported");
+                        warn!("Plots are not yet supported");
                         object
                     }),
                     21 => DocObject::Maths({
-                        eprintln!("Warning: Maths objects are not yet supported");
+                        warn!("Maths objects are not yet supported");
                         object
                     }),
                     23 => DocObject::CodeBlock({
-                        eprintln!("Warning: Code blocks are not yet supported");
+                        warn!("Code blocks are not yet supported");
                         object
                     }),
 
