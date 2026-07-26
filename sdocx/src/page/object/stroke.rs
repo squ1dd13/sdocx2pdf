@@ -4,10 +4,10 @@ use std::{
     rc::Rc,
 };
 
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use thiserror::Error;
-use log::warn;
 
 use crate::{
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
@@ -349,10 +349,6 @@ pub struct Stroke {
     advanced_pen_settings: Option<Rc<str>>,
     colour: [u8; 4],
     pen_size: Option<f32>,
-    particle_size: Option<f32>,
-    pattern_index: Option<u32>,
-    pattern_scale: f32,
-    particle_level: Option<u32>,
     unk: Option<u32>,
     pen_name: Option<Rc<str>>,
     fixed_width: Option<f32>,
@@ -366,6 +362,10 @@ pub struct Stroke {
     dash_offset: Option<f32>,
     stroke_type: Option<StrokeType>,
     pen_repeat_distance: f32,
+    particle_size: Option<f32>,
+    pattern_index: Option<u32>,
+    pattern_scale: f32,
+    particle_level: Option<u32>,
 }
 
 impl Stroke {
