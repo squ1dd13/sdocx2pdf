@@ -14,9 +14,12 @@ use jiff::{
     fmt::{StdIoWrite, strtime::BrokenDownTime},
 };
 use log::{error, info, warn};
-use lopdf::{Dictionary as PdfDict, Document as Pdf, dictionary};
+use lopdf::{Dictionary as PdfDict, Document as Pdf, content::Operation, dictionary};
 use num::ToPrimitive;
-use sdocx::{Document, DocumentError, MediaStorage, page::object::stroke::Event};
+use sdocx::{
+    Document, DocumentError, MediaStorage, PageModel,
+    page::object::{InlineObject, stroke::Event},
+};
 use std::io::Write;
 use thiserror::Error;
 
@@ -230,7 +233,7 @@ fn draw_stroke_chunk_events<'e>(
     stroke_events: impl IntoIterator<Item = &'e [Event]>,
     tool: Tool,
     page_size: (f32, f32),
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<Operation>,
     graphics_states: &mut PdfDict,
     tool_graphics_state_names: &mut HashMap<Tool, String>,
 ) {
@@ -251,14 +254,78 @@ fn draw_stroke_chunk_events<'e>(
     }
 }
 
+fn draw_single_object(
+    object: &sdocx::DocObject,
+    page_size: (f32, f32),
+    ops: &mut Vec<Operation>,
+    graphics_states: &mut PdfDict,
+    tool_graphics_state_names: &mut HashMap<Tool, String>,
+) {
+    let path_err = match object {
+        sdocx::DocObject::Stroke(stroke) => {
+            draw_stroke_chunk_events(
+                [stroke.events()],
+                Tool::for_stroke(stroke),
+                page_size,
+                ops,
+                graphics_states,
+                tool_graphics_state_names,
+            );
+
+            return;
+        }
+
+        sdocx::DocObject::Line(line) => {
+            if line.has_control_points() {
+                warn!("Ignoring line control points");
+            }
+
+            shape::draw_line(
+                line.start(),
+                line.end(),
+                line.colour_effect(),
+                line.style(),
+                graphics_states,
+                ops,
+            )
+        }
+
+        sdocx::DocObject::Shape(shape) => {
+            if let Some(path) = shape.path() {
+                shape::draw_path_segments(
+                    path.segments(),
+                    shape.line_colour_effect(),
+                    shape.line_style(),
+                    shape.fill_effect(),
+                    graphics_states,
+                    ops,
+                )
+            } else {
+                warn!("Ignoring shape that has no path");
+                return;
+            }
+        }
+
+        other => {
+            warn!("Ignoring {other} object");
+            return;
+        }
+    };
+
+    if let Err(err) = path_err {
+        error!("Failed to draw path: {err:?}");
+    }
+}
+
 // Hastily factored out of the main conversion code.
 // todo: Create a conversion context to hold operations, graphics states, etc.
 fn draw_page_layer(
     layer: &sdocx::page::Layer,
     page_size: (f32, f32),
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<Operation>,
     graphics_states: &mut PdfDict,
     tool_graphics_state_names: &mut HashMap<Tool, String>,
+    _media_storage: &mut MediaStorage,
     multi_progress: &MultiProgress,
 ) {
     let objects = layer.objects();
@@ -311,49 +378,41 @@ fn draw_page_layer(
 
         // This is a chunk of non-strokes.
         for object in objects {
-            let path_err = match object {
-                sdocx::DocObject::Line(line) => {
-                    if line.has_control_points() {
-                        warn!("Ignoring line control points");
-                    }
+            draw_single_object(
+                object,
+                page_size,
+                ops,
+                graphics_states,
+                tool_graphics_state_names,
+            );
+        }
+    }
+}
 
-                    shape::draw_line(
-                        line.start(),
-                        line.end(),
-                        line.colour_effect(),
-                        line.style(),
-                        graphics_states,
-                        ops,
-                    )
-                }
+fn group_inline_objects_by_page(document: &Document) -> Vec<Vec<&InlineObject>> {
+    let mut by_page = vec![Vec::new(); document.pages().len()];
 
-                sdocx::DocObject::Shape(shape) => {
-                    if let Some(path) = shape.path() {
-                        shape::draw_path_segments(
-                            path.segments(),
-                            shape.line_colour_effect(),
-                            shape.line_style(),
-                            shape.fill_effect(),
-                            graphics_states,
-                            ops,
-                        )
-                    } else {
-                        warn!("Ignoring shape that has no path");
-                        continue;
-                    }
-                }
+    let pageless = matches!(document.page_model(), PageModel::Pageless);
 
-                other => {
-                    warn!("Ignoring {other} object");
-                    continue;
-                }
-            };
+    for inline_obj in document.body_text().inline_objects() {
+        match inline_obj.object.page_index() {
+            Some(i) => by_page[i as usize].push(inline_obj),
 
-            if let Err(err) = path_err {
-                error!("Failed to draw path: {err:?}");
+            // If no page is specified and this is a pageless document, put the inline object on
+            // the first (only) page.
+            None if pageless => by_page[0].push(inline_obj),
+
+            None => {
+                warn!(
+                    "Ignoring inline {} because it does not specify a page, \
+                    and this is not a pageless document",
+                    inline_obj.object,
+                );
             }
         }
     }
+
+    by_page
 }
 
 fn create_document_pdf(
@@ -400,7 +459,19 @@ fn create_document_pdf(
 
     let mut auto_split_points = Vec::new();
 
-    for (pos, page) in document.pages().iter().with_position() {
+    // Since we work in pages, we need the inline objects grouped by page.
+    let inline_objects_by_page = group_inline_objects_by_page(document);
+
+    // An inline object with `index_in_text == k` is represented in the raw string by an object
+    // replacement character (U+FFFC) at character index `k`. Thus, if the entire raw string
+    // consists of whitespace and object replacement characters, there is no meaningful text.
+    if let Some(s) = document.body_text().raw_string()
+        && s.chars().any(|c| !c.is_whitespace() && c != '\u{FFFC}')
+    {
+        warn!("Ignoring typed text in document body");
+    }
+
+    for (pos, (page_index, page)) in document.pages().iter().enumerate().with_position() {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
 
         // For paged documents, there is a ghost page in the sdocx that is not represented in the
@@ -499,7 +570,7 @@ fn create_document_pdf(
 
             // Get an existing `EmbeddedPdf` for the PDF in question or, if one does not exist,
             // create it by embedding the PDF into the one we're building.
-            let embedded_pdf = &*match embedded_pdfs.entry(emb_pdf_name) {
+            let embedded_pdf = match embedded_pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => vac.insert(
                     EmbeddedPdf::embed(emb_pdf_name, media_storage, &mut lpdf)
@@ -553,7 +624,7 @@ fn create_document_pdf(
             operations.extend([
                 op_gen::save_graphics_state(),
                 op_gen::set_transformation_matrix([horiz_scale, 0.0, 0.0, vert_scale, x_pt, y_pt]),
-                lopdf::content::Operation::new("Do", vec![xobj_name.into()]),
+                Operation::new("Do", vec![xobj_name.into()]),
                 op_gen::restore_graphics_state(),
             ]);
 
@@ -583,6 +654,16 @@ fn create_document_pdf(
         // we wanted to check if there is already a graphics state for a tool.
         let mut tool_graphics_state_names = HashMap::new();
 
+        for inline_obj in &inline_objects_by_page[page_index] {
+            draw_single_object(
+                &inline_obj.object,
+                (page_w_internal, page_h_internal),
+                &mut operations,
+                &mut graphics_states,
+                &mut tool_graphics_state_names,
+            );
+        }
+
         for layer in page.layers() {
             draw_page_layer(
                 layer,
@@ -590,6 +671,7 @@ fn create_document_pdf(
                 &mut operations,
                 &mut graphics_states,
                 &mut tool_graphics_state_names,
+                media_storage,
                 multi_progress,
             );
         }
@@ -726,7 +808,7 @@ fn main_convert(
     multi_progress: &MultiProgress,
     mut args: Args,
 ) -> anyhow::Result<()> {
-    let document_name = document.title_text().raw_string().unwrap_or("Invalid name");
+    let document_name = document.title_text().raw_string().unwrap_or("Missing name");
 
     let pageless = match document.page_model() {
         sdocx::PageModel::Paged => false,

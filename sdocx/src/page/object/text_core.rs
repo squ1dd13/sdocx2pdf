@@ -233,11 +233,11 @@ impl_try_from_for_optional_from!(
 
 #[derive(Debug)]
 #[expect(dead_code)]
-struct InlineObject {
+pub struct InlineObject {
     index_in_text: u32,
     layout_option: Option<InTextLayoutOption>,
     layout_constraint: Option<InTextLayoutConstraint>,
-    object: DocObject,
+    pub object: DocObject,
 }
 
 #[derive(Error, Debug)]
@@ -298,7 +298,7 @@ pub struct Common {
     section_data: Vec<(u32, u32)>,
 
     // a.k.a. "object spans", but they're not really spans.
-    inline_objects: Vec<InlineObject>,
+    pub(crate) inline_objects: Vec<InlineObject>,
 }
 
 impl Common {

@@ -9,6 +9,7 @@ use crate::{
         base::{HasObjectBase, ObjectBase},
         header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
+        text_core::InlineObject,
     },
     unpack_field_flags,
 };
@@ -32,6 +33,13 @@ pub struct Text {
 impl Text {
     pub fn raw_string(&self) -> Option<&str> {
         self.shape.raw_text_string()
+    }
+
+    pub fn inline_objects(&self) -> &[InlineObject] {
+        match self.shape.text_data.text_common.as_ref() {
+            Some(tc) => &tc.inline_objects[..],
+            None => &[],
+        }
     }
 }
 

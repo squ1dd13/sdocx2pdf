@@ -15,6 +15,7 @@ use crate::{
         web::{Web, WebParseError},
     },
 };
+use log::warn;
 use std::io::{Read, Seek};
 use strum::Display;
 use thiserror::Error;
@@ -34,13 +35,13 @@ pub mod text;
 mod text_core;
 mod web;
 
-use log::warn;
 pub use shape::{FillColourEffect, FillEffect, FillImageEffect, ShapeType};
 pub use shape_base::{
     ArrowShape, ArrowSize, CapType, CompoundType, DashType, JoinType, LineColourEffect,
     LineStyleEffect,
 };
 pub use shared::{ColourType, GradientColour, GradientType, Path, PathSegment};
+pub use text_core::InlineObject;
 
 #[derive(Error, Debug)]
 #[error(transparent)]
@@ -254,5 +255,10 @@ impl DocObject {
             | DocObject::Plot(object)
             | DocObject::Generic(object) => &object.object_base,
         }
+    }
+
+    /// Returns the page index attached to this object, if there is one.
+    pub fn page_index(&self) -> Option<u32> {
+        self.object_base().page_index
     }
 }
