@@ -4,11 +4,11 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use log::warn;
 
 use crate::{
     OpaqueBytes, OpaqueBytesParseError,

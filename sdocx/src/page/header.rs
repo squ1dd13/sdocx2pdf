@@ -11,8 +11,8 @@ use crate::{
     page::Rect,
     read_size_and_map,
 };
-use thiserror::Error;
 use log::warn;
+use thiserror::Error;
 
 pub struct PdfDataItemParseCtx<'fr> {
     pub file_registry: &'fr FileRegistry,

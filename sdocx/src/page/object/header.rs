@@ -3,8 +3,8 @@ use std::{
     io::{Read, Seek},
 };
 
-use thiserror::Error;
 use log::warn;
+use thiserror::Error;
 
 use crate::{
     bits::{CheckedBitfield, UnhandledBitsError},

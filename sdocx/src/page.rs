@@ -18,6 +18,7 @@ use crate::{
     read_size_and_vec, unpack_bool_flag, unpack_bool_flags, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use std::{
@@ -25,7 +26,6 @@ use std::{
     rc::Rc,
 };
 use thiserror::Error;
-use log::warn;
 
 mod header;
 pub mod object;
