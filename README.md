@@ -73,22 +73,25 @@ handwriting is still terrible).
 
 1. Go to the [latest release](https://github.com/squ1dd13/sdocx2pdf/releases/latest) and download
    the correct version of sdocx2pdf for your computer.
-2. On your device with Samsung Notes, open a note you wish to convert.
-3. Use either 'Save note as Samsung Notes file' or 'Share note as Samsung Notes file' to get an
+2. If you are using Linux or macOS, use the command `chmod +x /path/to/sdocx2pdf` to allow running
+   the program.
+3. On your device with Samsung Notes, open a note you wish to convert.
+4. Use either 'Save note as Samsung Notes file' or 'Share note as Samsung Notes file' to get an
    SDOCX file for the note onto your computer.
-4. Run `/path/to/sdocx2pdf your.sdocx output.pdf` at your computer's command line, replacing the
-   paths respectively with the location of the sdocx2pdf binary you downloaded, the location of the
-   SDOCX file you just created, and the path you'd like the new PDF to be written to.
+5. Run `/path/to/sdocx2pdf your.sdocx output.pdf`, replacing the paths respectively with the
+   location of the sdocx2pdf binary you downloaded, the location of the SDOCX file you just
+   created, and the path you'd like the output PDF to be written to.
 
 For example, I'd do the following:
 
 1. Download the Linux x86-64 version of sdocx2pdf on my laptop.
-2. Open the note in SNotes on my Galaxy Tab S11.
-3. Use 'Share note as Samsung Notes file' (via the three-dot menu at the top-right of the English
+2. Use `chmod` to make the binary executable.
+3. Open the note in SNotes on my Galaxy Tab S11.
+4. Use 'Share note as Samsung Notes file' (via the three-dot menu at the top-right of the English
    interface, which has a 'Share' button in the row of five icons at the bottom) and select Quick
    Share to send the SDOCX file to my laptop (which is running
    [rquickshare](https://github.com/Martichou/rquickshare)).
-4. Run `sdocx2pdf /my/download/folder/note.sdocx /tmp/out.pdf`, and enjoy the nice crisp
+5. Run `sdocx2pdf /my/download/folder/note.sdocx /tmp/out.pdf`, and enjoy the nice crisp
    handwriting in `/tmp/out.pdf`.
 
 The process is even easier if you're using the Samsung Notes app on a Windows computer; then, you
