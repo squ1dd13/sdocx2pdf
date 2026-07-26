@@ -149,13 +149,13 @@ produce the note, but I don't know yet.
 ## Technical details
 
 This repository contains two crates: `sdocx`, a library crate, and `sdocx2pdf`, the binary crate
-implementing the tool. Both were written by a human (me :wave:). sdocx2pdf is built on the library,
-which parses the SDOCX format almost completely.[^2] The limitations described above are due to
-sdocx2pdf not implementing the output logic for all the features of SNotes documents. Note that
-`sdocx2pdf` was written over a long time while I was experimenting with different ways to draw the
-handwriting, so the code is very messy (right now). `sdocx`, on the other hand, was easier to
-write, and the code is fairly clean. The library features extensive error reporting to make it
-easier to update when Samsung updates the file format.
+implementing the tool. sdocx2pdf is built on the library, which parses the SDOCX format almost
+completely.[^2] The limitations described above are due to sdocx2pdf not implementing the output
+logic for all the features of SNotes documents. Note that `sdocx2pdf` was written over a long time
+while I was experimenting with different ways to draw the handwriting, so the code is very messy
+(right now). `sdocx`, on the other hand, was easier to write, and the code is fairly clean. The
+library features extensive error reporting to make it easier to update when Samsung updates the
+file format.
 
 I have mostly focused on handwriting. (Accordingly, the way it is converted is stupidly
 complicated.) SDOCX represents handwriting as a list of events. A single event gives a position, a
