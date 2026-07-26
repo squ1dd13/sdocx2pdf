@@ -662,7 +662,7 @@ impl StrokeOrDot {
             .into_iter()
             .map(|ev| {
                 (
-                    f64::from(ev.timestamp),
+                    ev.timestamp as f64,
                     ev.point.x,
                     ev.point.y,
                     f64::from(ev.pressure),
