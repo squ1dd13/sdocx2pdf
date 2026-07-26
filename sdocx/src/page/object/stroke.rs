@@ -52,7 +52,9 @@ pub struct Event {
     pub pressure: f32,
 
     /// Time at which the event occurred, on some scale.
-    pub timestamp: u32,
+    ///
+    /// Guaranteed to be monotonically non-decreasing across events in the same stroke.
+    pub timestamp: u64,
 
     /// Optional information about the angle of the tool.
     pub tilt_data: Option<TiltData>,
@@ -117,7 +119,7 @@ impl Event {
         let origin_pressure = stream.read_f32_le()?;
         let pressure_deltas = stream.read_u16s(delta_count)?;
 
-        let origin_timestamp = stream.read_u32_le()?;
+        let origin_timestamp = u64::from(stream.read_u32_le()?);
         let timestamp_deltas = stream.read_u16s(delta_count)?;
 
         let (origin_tilt_data, tilt_deltas, orientation_deltas) = if has_tilt_data {
@@ -156,7 +158,7 @@ impl Event {
             let d_x = Event::point_component_delta_to_float(point_deltas_xy[1 + 2 * delta_i]);
 
             let d_pressure = Event::small_delta_to_float(pressure_deltas[delta_i]);
-            let d_timestamp = u32::from(timestamp_deltas[delta_i]);
+            let d_timestamp = u64::from(timestamp_deltas[delta_i]);
 
             events.push(Event {
                 point: Point {
@@ -165,7 +167,10 @@ impl Event {
                 },
 
                 pressure: previous_event.pressure + d_pressure,
-                timestamp: previous_event.timestamp + d_timestamp,
+                timestamp: previous_event
+                    .timestamp
+                    .checked_add(d_timestamp)
+                    .expect("timestamp overflow"),
 
                 tilt_data: previous_event.tilt_data.map(|last| TiltData {
                     tilt: last.tilt + Event::small_delta_to_float(tilt_deltas[delta_i]),
@@ -208,7 +213,7 @@ impl Event {
                 },
 
                 pressure: pressures[i],
-                timestamp: timestamps[i],
+                timestamp: u64::from(timestamps[i]),
 
                 tilt_data: tilts
                     .get(i)
