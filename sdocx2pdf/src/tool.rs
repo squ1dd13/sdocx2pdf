@@ -169,12 +169,23 @@ impl Tool {
         egs_name: &str,
         page_size: (f32, f32),
         strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
+        pen_width_mul: f32,
+        marker_width_mul: f32,
         ops: &mut Vec<lopdf::content::Operation>,
     ) -> Result<(), ()> {
         let &Basics {
             size: OrderedFloat(size),
             colour_bgra: [b, g, r, a],
         } = self.basics();
+
+        // Apply the relevant multiplier once here so that everything below works with the
+        // adjusted width.
+        let size = size
+            * if self.is_like_highlighter() {
+                marker_width_mul
+            } else {
+                pen_width_mul
+            };
 
         ops.extend([
             op_gen::save_graphics_state(),

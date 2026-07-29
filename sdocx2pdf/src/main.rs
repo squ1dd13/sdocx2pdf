@@ -100,6 +100,32 @@ struct Args {
     )]
     basic_split: Option<BasicSplitMode>,
 
+    /// Specifies a multiplier for the width of handwriting pens.
+    ///
+    /// The default of 1.0 leaves pen widths as computed from the document. Use a value greater
+    /// than 1.0 to make the handwriting bolder (e.g. 2.0 for roughly double thickness) or less
+    /// than 1.0 to make it finer.
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Multiply the width of handwriting pens by this factor",
+        long_help
+    )]
+    pen_width_multiplier: f32,
+
+    /// Specifies a multiplier for the width of highlighters and marker pens.
+    ///
+    /// The default of 1.0 leaves marker widths as computed from the document. This is kept
+    /// separate from the pen multiplier so that changing the width of handwriting does not
+    /// stop highlighting from covering it properly.
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Multiply the width of highlighters and marker pens by this factor",
+        long_help
+    )]
+    marker_width_multiplier: f32,
+
     // ! - Do not rename this without changing `DETAILED_ERRORS_ARG_NAME` to match.
     #[arg(
         long,
@@ -233,6 +259,8 @@ fn draw_stroke_chunk_events<'e>(
     stroke_events: impl IntoIterator<Item = &'e [Event]>,
     tool: Tool,
     page_size: (f32, f32),
+    pen_width_mul: f32,
+    marker_width_mul: f32,
     ops: &mut Vec<Operation>,
     graphics_states: &mut PdfDict,
     tool_graphics_state_names: &mut HashMap<Tool, String>,
@@ -247,7 +275,14 @@ fn draw_stroke_chunk_events<'e>(
         });
 
     // Draw all the strokes with the tool.
-    let draw_result = tool.draw_events(gs_name, page_size, stroke_events, ops);
+    let draw_result = tool.draw_events(
+        gs_name,
+        page_size,
+        stroke_events,
+        pen_width_mul,
+        marker_width_mul,
+        ops,
+    );
 
     if let Err(()) = draw_result {
         error!("Failed to draw strokes");
@@ -257,6 +292,8 @@ fn draw_stroke_chunk_events<'e>(
 fn draw_single_object(
     object: &sdocx::DocObject,
     page_size: (f32, f32),
+    pen_width_mul: f32,
+    marker_width_mul: f32,
     ops: &mut Vec<Operation>,
     graphics_states: &mut PdfDict,
     tool_graphics_state_names: &mut HashMap<Tool, String>,
@@ -267,6 +304,8 @@ fn draw_single_object(
                 [stroke.events()],
                 Tool::for_stroke(stroke),
                 page_size,
+                pen_width_mul,
+                marker_width_mul,
                 ops,
                 graphics_states,
                 tool_graphics_state_names,
@@ -322,6 +361,8 @@ fn draw_single_object(
 fn draw_page_layer(
     layer: &sdocx::page::Layer,
     page_size: (f32, f32),
+    pen_width_mul: f32,
+    marker_width_mul: f32,
     ops: &mut Vec<Operation>,
     graphics_states: &mut PdfDict,
     tool_graphics_state_names: &mut HashMap<Tool, String>,
@@ -368,6 +409,8 @@ fn draw_page_layer(
                 stroke_events,
                 tool,
                 page_size,
+                pen_width_mul,
+                marker_width_mul,
                 ops,
                 graphics_states,
                 tool_graphics_state_names,
@@ -381,6 +424,8 @@ fn draw_page_layer(
             draw_single_object(
                 object,
                 page_size,
+                pen_width_mul,
+                marker_width_mul,
                 ops,
                 graphics_states,
                 tool_graphics_state_names,
@@ -658,6 +703,8 @@ fn create_document_pdf(
             draw_single_object(
                 &inline_obj.object,
                 (page_w_internal, page_h_internal),
+                args.pen_width_multiplier,
+                args.marker_width_multiplier,
                 &mut operations,
                 &mut graphics_states,
                 &mut tool_graphics_state_names,
@@ -668,6 +715,8 @@ fn create_document_pdf(
             draw_page_layer(
                 layer,
                 (page_w_internal, page_h_internal),
+                args.pen_width_multiplier,
+                args.marker_width_multiplier,
                 &mut operations,
                 &mut graphics_states,
                 &mut tool_graphics_state_names,
@@ -976,6 +1025,22 @@ fn main() -> ExitCode {
         .unwrap();
 
     let args = Args::parse();
+
+    // Very small multipliers cause numerical problems in the stroke processing, and very
+    // large ones confuse PDF readers.
+    const MIN_WIDTH_MUL: f32 = 0.01;
+    const MAX_WIDTH_MUL: f32 = 10.0;
+
+    for (name, value) in [
+        ("--pen-width-multiplier", args.pen_width_multiplier),
+        ("--marker-width-multiplier", args.marker_width_multiplier),
+    ] {
+        if !(MIN_WIDTH_MUL..=MAX_WIDTH_MUL).contains(&value) {
+            eprintln!("{name} must be in the interval [{MIN_WIDTH_MUL}, {MAX_WIDTH_MUL}].");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let detailed_errors = args.detailed_errors;
 
     print_intro();
