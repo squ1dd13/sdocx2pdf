@@ -1,6 +1,5 @@
 use std::rc::Rc;
 
-use crate::pdf::dictionary;
 use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
 use lerp::Lerp;
@@ -8,10 +7,8 @@ use ordered_float::OrderedFloat;
 use sdocx::page::object::stroke::{Event, Stroke};
 use thiserror::Error;
 
-use crate::{
-    pdf::{self, GraphicsDictName, Point, PolygonDrawMode, Vector, WindingRule},
-    stroke::{ContinuousStroke, StrokeOrDot},
-};
+use crate::pdf::{self, Point, Vector, dictionary};
+use crate::stroke::{ContinuousStroke, StrokeOrDot};
 
 /// Basic information used by all tools.
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
@@ -204,7 +201,7 @@ impl Tool {
     /// filling a `page_size` rectangle and clipping it to the shape of the stroke.
     pub fn draw_events<'e>(
         &self,
-        graphics_dict_name: GraphicsDictName,
+        graphics_dict_name: pdf::GraphicsDictName,
         page_size: (f32, f32),
         strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
         ops: &mut Vec<pdf::Operation>,
@@ -249,7 +246,7 @@ impl Tool {
                         ops,
                     );
 
-                    ops.extend(pdf::clip(WindingRule::NonZero));
+                    ops.extend(pdf::clip(pdf::WindingRule::NonZero));
 
                     ops.extend([
                         pdf::specify_rectangle([0.0, 0.0, page_size.0, page_size.1]),
@@ -282,6 +279,7 @@ fn bezier_arc_control_points<T: num::Float, U>(
     b: Point2D<T, U>,
     centre: Point2D<T, U>,
 ) -> Option<[Point2D<T, U>; 2]> {
+    // fixme: This
     let x1 = a.x;
     let y1 = a.y;
     let x4 = b.x;
@@ -496,7 +494,7 @@ fn draw_bezier_pulley(
     } else {
         ops.extend(pdf::draw_polygon(
             points,
-            PolygonDrawMode::Fill(WindingRule::NonZero),
+            pdf::PolygonDrawMode::Fill(pdf::WindingRule::NonZero),
         ));
     }
 
@@ -604,7 +602,7 @@ fn draw_simple_pulley(
     } else {
         ops.extend(pdf::draw_polygon(
             points,
-            PolygonDrawMode::Fill(WindingRule::NonZero),
+            pdf::PolygonDrawMode::Fill(pdf::WindingRule::NonZero),
         ));
     }
 

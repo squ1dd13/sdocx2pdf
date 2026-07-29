@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
@@ -16,11 +17,9 @@ use jiff::{
 use log::{info, warn};
 use num::ToPrimitive;
 use sdocx::{Document, DocumentError, MediaStorage, PageModel, page::object::InlineObject};
-use std::io::Write;
 use thiserror::Error;
 
-use crate::page::PageConversionCtx;
-use crate::pdf::dictionary;
+use crate::{page::PageConversionCtx, pdf::dictionary};
 
 mod page;
 mod pdf;

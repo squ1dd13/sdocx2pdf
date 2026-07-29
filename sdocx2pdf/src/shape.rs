@@ -8,8 +8,7 @@ use sdocx::page::{
 use thiserror::Error;
 
 use crate::page::PageConversionCtx;
-use crate::pdf;
-use crate::pdf::dictionary;
+use crate::pdf::{self, dictionary};
 
 // --▶
 // Vertices are named for an arrowhead pointing to the right.
