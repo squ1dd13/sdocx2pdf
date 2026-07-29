@@ -13,19 +13,17 @@ use jiff::{
     Timestamp,
     fmt::{StdIoWrite, strtime::BrokenDownTime},
 };
-use log::{error, info, warn};
-use lopdf::{Dictionary as PdfDict, Document as Pdf, content::Operation, dictionary};
+use log::{info, warn};
 use num::ToPrimitive;
-use sdocx::{
-    Document, DocumentError, MediaStorage, PageModel,
-    page::object::{InlineObject, stroke::Event},
-};
+use sdocx::{Document, DocumentError, MediaStorage, PageModel, page::object::InlineObject};
 use std::io::Write;
 use thiserror::Error;
 
-use crate::tool::Tool;
+use crate::page::PageConversionCtx;
+use crate::pdf::dictionary;
 
-mod op_gen;
+mod page;
+mod pdf;
 mod shape;
 mod stroke;
 mod tool;
@@ -137,17 +135,17 @@ struct Args {
 /// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
 /// the top or finds a (grand)*parent that contains the key.
 fn get_inherited_attr<'dc>(
-    mut current_dict: &'dc PdfDict,
+    mut current_dict: &'dc pdf::Dictionary,
     key: &[u8],
-    doc: &'dc Pdf,
-) -> Option<&'dc lopdf::Object> {
+    doc: &'dc pdf::Pdf,
+) -> Option<&'dc pdf::Object> {
     loop {
         if let Ok(v) = current_dict.get(key) {
             return Some(v);
         }
 
         match current_dict.get(b"Parent") {
-            Ok(&lopdf::Object::Reference(parent_id)) => {
+            Ok(&pdf::Object::Reference(parent_id)) => {
                 current_dict = doc.get_dictionary(parent_id).ok()?;
             }
 
@@ -160,7 +158,7 @@ fn get_inherited_attr<'dc>(
 #[error(transparent)]
 enum EmbeddedPdfError {
     Io(#[from] std::io::Error),
-    Pdf(#[from] lopdf::Error),
+    Pdf(#[from] pdf::Error),
 
     #[error("page has no MediaBox entry")]
     MissingMediaBox,
@@ -171,17 +169,17 @@ enum EmbeddedPdfError {
 
 struct EmbeddedPdf {
     /// The IDs in the destination PDF of the pages copied over from the source PDF, in order.
-    src_page_ids: Vec<lopdf::ObjectId>,
+    src_page_ids: Vec<pdf::ObjectId>,
 }
 
 impl EmbeddedPdf {
     fn embed(
         src_name: impl AsRef<Path>,
         media_storage: &mut sdocx::MediaStorage,
-        dest_pdf: &mut Pdf,
+        dest_pdf: &mut pdf::Pdf,
     ) -> Result<EmbeddedPdf, EmbeddedPdfError> {
         // Open and parse the PDF we're embedding.
-        let mut src_pdf = Pdf::load_from(media_storage.open_file(src_name)?)?;
+        let mut src_pdf = pdf::Pdf::load_from(media_storage.open_file(src_name)?)?;
 
         // Renumber the objects in the source so their IDs don't collide with those in the
         // destination. This lets us move objects from the source to the destination directly,
@@ -206,8 +204,8 @@ impl EmbeddedPdf {
     fn create_page_xobject(
         &self,
         index: u32,
-        dest_pdf: &mut Pdf,
-    ) -> Result<(lopdf::ObjectId, f32, f32), EmbeddedPdfError> {
+        dest_pdf: &mut pdf::Pdf,
+    ) -> Result<(pdf::ObjectId, f32, f32), EmbeddedPdfError> {
         let page_id = self.src_page_ids[index as usize];
 
         let (media_box, resources) = {
@@ -238,7 +236,7 @@ impl EmbeddedPdf {
         // object is still in there, so we can ask the destination PDF for the content.
         let content = dest_pdf.get_page_content(page_id)?;
 
-        let xobj_dict = lopdf::dictionary! {
+        let xobj_dict = pdf::dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
             "FormType" => 1,
@@ -247,190 +245,10 @@ impl EmbeddedPdf {
         };
 
         // Add a `Stream` object containing the XObject stream.
-        let xobj_id = dest_pdf.add_object(lopdf::Object::Stream(lopdf::Stream::new(
-            xobj_dict, content,
-        )));
+        let xobj_id =
+            dest_pdf.add_object(pdf::Object::Stream(pdf::Stream::new(xobj_dict, content)));
 
         Ok((xobj_id, src_width, src_height))
-    }
-}
-
-fn draw_stroke_chunk_events<'e>(
-    stroke_events: impl IntoIterator<Item = &'e [Event]>,
-    tool: Tool,
-    page_size: (f32, f32),
-    pen_width_mul: f32,
-    marker_width_mul: f32,
-    ops: &mut Vec<Operation>,
-    graphics_states: &mut PdfDict,
-    tool_graphics_state_names: &mut HashMap<Tool, String>,
-) {
-    // Get the graphics state for the tool, creating it if it does not yet exist.
-    let gs_name = tool_graphics_state_names
-        .entry(tool.clone())
-        .or_insert_with(|| {
-            let name = format!("egs{}", graphics_states.len());
-            graphics_states.set(name.clone(), tool.create_egs());
-            name
-        });
-
-    // Draw all the strokes with the tool.
-    let draw_result = tool.draw_events(
-        gs_name,
-        page_size,
-        stroke_events,
-        pen_width_mul,
-        marker_width_mul,
-        ops,
-    );
-
-    if let Err(()) = draw_result {
-        error!("Failed to draw strokes");
-    }
-}
-
-fn draw_single_object(
-    object: &sdocx::DocObject,
-    page_size: (f32, f32),
-    pen_width_mul: f32,
-    marker_width_mul: f32,
-    ops: &mut Vec<Operation>,
-    graphics_states: &mut PdfDict,
-    tool_graphics_state_names: &mut HashMap<Tool, String>,
-) {
-    let path_err = match object {
-        sdocx::DocObject::Stroke(stroke) => {
-            draw_stroke_chunk_events(
-                [stroke.events()],
-                Tool::for_stroke(stroke),
-                page_size,
-                pen_width_mul,
-                marker_width_mul,
-                ops,
-                graphics_states,
-                tool_graphics_state_names,
-            );
-
-            return;
-        }
-
-        sdocx::DocObject::Line(line) => {
-            if line.has_control_points() {
-                warn!("Ignoring line control points");
-            }
-
-            shape::draw_line(
-                line.start(),
-                line.end(),
-                line.colour_effect(),
-                line.style(),
-                graphics_states,
-                ops,
-            )
-        }
-
-        sdocx::DocObject::Shape(shape) => {
-            if let Some(path) = shape.path() {
-                shape::draw_path_segments(
-                    path.segments(),
-                    shape.line_colour_effect(),
-                    shape.line_style(),
-                    shape.fill_effect(),
-                    graphics_states,
-                    ops,
-                )
-            } else {
-                warn!("Ignoring shape that has no path");
-                return;
-            }
-        }
-
-        other => {
-            warn!("Ignoring {other} object");
-            return;
-        }
-    };
-
-    if let Err(err) = path_err {
-        error!("Failed to draw path: {err:?}");
-    }
-}
-
-// Hastily factored out of the main conversion code.
-// todo: Create a conversion context to hold operations, graphics states, etc.
-fn draw_page_layer(
-    layer: &sdocx::page::Layer,
-    page_size: (f32, f32),
-    pen_width_mul: f32,
-    marker_width_mul: f32,
-    ops: &mut Vec<Operation>,
-    graphics_states: &mut PdfDict,
-    tool_graphics_state_names: &mut HashMap<Tool, String>,
-    _media_storage: &mut MediaStorage,
-    multi_progress: &MultiProgress,
-) {
-    let objects = layer.objects();
-
-    let objects_bar = multi_progress
-        .add(ProgressBar::new(objects.len() as _))
-        .with_style(
-            ProgressStyle::with_template("Processing objects [{bar:40}] {percent}% [{pos}/{len}]")
-                .unwrap()
-                .progress_chars("# "),
-        );
-
-    // Consecutive stokes very often use the same tool. To reduce the size of the output PDF, we
-    // can process chains of such strokes in one go, loading the necessary graphics state only
-    // once and then using it for all the strokes rather than loading the same graphics state for
-    // every stroke.
-    let chunked_objects =
-        objects
-            .iter()
-            .inspect(|_| objects_bar.inc(1))
-            .chunk_by(|&obj| match obj {
-                sdocx::DocObject::Stroke(stroke) => Some(Tool::for_stroke(stroke)),
-                _non_stroke => None,
-            });
-
-    for (opt_stroke_tool, objects) in &chunked_objects {
-        if let Some(tool) = opt_stroke_tool {
-            // This is a chunk of strokes that all use `tool`.
-
-            // Get the event slice for each stroke.
-            let stroke_events = objects.map(|o| {
-                let sdocx::DocObject::Stroke(s) = o else {
-                    unreachable!()
-                };
-
-                s.events()
-            });
-
-            draw_stroke_chunk_events(
-                stroke_events,
-                tool,
-                page_size,
-                pen_width_mul,
-                marker_width_mul,
-                ops,
-                graphics_states,
-                tool_graphics_state_names,
-            );
-
-            continue;
-        }
-
-        // This is a chunk of non-strokes.
-        for object in objects {
-            draw_single_object(
-                object,
-                page_size,
-                pen_width_mul,
-                marker_width_mul,
-                ops,
-                graphics_states,
-                tool_graphics_state_names,
-            );
-        }
     }
 }
 
@@ -451,7 +269,7 @@ fn group_inline_objects_by_page(document: &Document) -> Vec<Vec<&InlineObject>> 
                 warn!(
                     "Ignoring inline {} because it does not specify a page, \
                     and this is not a pageless document",
-                    inline_obj.object,
+                    <&str>::from(&inline_obj.object),
                 );
             }
         }
@@ -467,7 +285,7 @@ fn create_document_pdf(
     pageless: bool,
     multi_progress: &MultiProgress,
     args: &Args,
-) -> Result<lopdf::Document, anyhow::Error> {
+) -> Result<pdf::Pdf, anyhow::Error> {
     // Only show a progress bar for the pages if there is more than one.
     let pages_bar = if let page_count @ 2.. = document.pages().len() as u64 {
         Some(
@@ -481,12 +299,12 @@ fn create_document_pdf(
         None
     };
 
-    let mut lpdf = Pdf::with_version("1.5");
+    let mut pdf = pdf::Pdf::with_version("1.5");
 
-    // (Used `printpdf::serialize::to_lopdf_doc` as a reference for the basic setup)
-    let pages_id = lpdf.new_object_id();
+    // (Used `printpdf::serialize::to_pdf_doc` as a reference for the basic setup)
+    let pages_id = pdf.new_object_id();
 
-    let catalog = lopdf::dictionary! {
+    let catalog = pdf::dictionary! {
         "Type" => "Catalog",
         "PageLayout" => "OneColumn",
         "PageMode" => "UseNone",
@@ -582,35 +400,27 @@ fn create_document_pdf(
             }
         };
 
-        let mut operations = Vec::new();
-
-        // Maps names to graphics states. This will go directly into the PDF.
-        let mut graphics_states = lopdf::dictionary! {};
+        let mut page_ctx = PageConversionCtx::new((page_w_internal, page_h_internal));
 
         if let Some([b, g, r, a]) = page.background_colour() {
-            graphics_states.set(
-                "fillbg",
-                lopdf::dictionary! {
-                    "Type" => "ExtGState",
-                    // Fill alpha
-                    "ca" => a as f32 / 255.0,
-                },
-            );
+            let name = page_ctx.add_graphics_dict(pdf::dictionary! {
+                "Type" => "ExtGState",
+                // Fill alpha
+                "ca" => a as f32 / 255.0,
+            });
 
-            operations.extend([
-                op_gen::save_graphics_state(),
-                op_gen::load_graphics_state("fillbg"),
-                op_gen::set_fill_colour(r, g, b),
-                op_gen::specify_rectangle([0.0, 0.0, page_w_pt, page_h_pt]),
-                op_gen::fill(),
-                op_gen::restore_graphics_state(),
+            page_ctx.ops.extend([
+                pdf::save_graphics_state(),
+                pdf::load_graphics_dict(name),
+                pdf::set_fill_colour(r, g, b),
+                pdf::specify_rectangle([0.0, 0.0, page_w_pt, page_h_pt]),
+                pdf::fill(),
+                pdf::restore_graphics_state(),
             ]);
         }
 
-        let mut xobjects = PdfDict::new();
-
         // Add any embedded PDF pages before drawing the page objects.
-        for (emb_i, emb_page) in page.embedded_pdf_pages().iter().enumerate() {
+        for emb_page in page.embedded_pdf_pages().iter() {
             let emb_pdf_name = emb_page.file().name();
 
             // Get an existing `EmbeddedPdf` for the PDF in question or, if one does not exist,
@@ -618,7 +428,7 @@ fn create_document_pdf(
             let embedded_pdf = match embedded_pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => vac.insert(
-                    EmbeddedPdf::embed(emb_pdf_name, media_storage, &mut lpdf)
+                    EmbeddedPdf::embed(emb_pdf_name, media_storage, &mut pdf)
                         .with_context(|| format!("Failed to embed PDF '{emb_pdf_name}'"))?,
                 ),
             };
@@ -626,7 +436,7 @@ fn create_document_pdf(
             let emb_page_index = emb_page.page_index();
 
             let (xobj_id, src_width_pt, src_height_pt) = embedded_pdf
-                .create_page_xobject(emb_page_index, &mut lpdf)
+                .create_page_xobject(emb_page_index, &mut pdf)
                 .with_context(|| {
                     format!(
                         "Failed to embed page {} of PDF '{emb_pdf_name}'",
@@ -661,16 +471,13 @@ fn create_document_pdf(
                 (x_pt, y_pt, horiz_scale, vert_scale)
             };
 
-            // Name the XObject and add it to the XObject dictionary. The name doesn't matter, as
-            // long as it's unique.
-            let xobj_name = format!("embpage{emb_i}");
-            xobjects.set(xobj_name.clone(), xobj_id);
+            let xobj_name = page_ctx.add_xobject(xobj_id);
 
-            operations.extend([
-                op_gen::save_graphics_state(),
-                op_gen::set_transformation_matrix([horiz_scale, 0.0, 0.0, vert_scale, x_pt, y_pt]),
-                Operation::new("Do", vec![xobj_name.into()]),
-                op_gen::restore_graphics_state(),
+            page_ctx.ops.extend([
+                pdf::save_graphics_state(),
+                pdf::set_transformation_matrix([horiz_scale, 0.0, 0.0, vert_scale, x_pt, y_pt]),
+                pdf::paint_xobject(xobj_name),
+                pdf::restore_graphics_state(),
             ]);
 
             if args.auto_split {
@@ -685,59 +492,48 @@ fn create_document_pdf(
             }
         }
 
-        operations.push({
+        page_ctx.ops.push({
             // Document space has y = 0 at the top; PDF space has it at the bottom. Rather than
             // converting coordinates everywhere, we just flip everything on the horizontal axis
             // using a negative y scale followed by a translation. While doing that, we also scale
             // the document contents to fit our chosen page dimensions.
-            op_gen::set_transformation_matrix([pt_per_unit, 0.0, 0.0, -pt_per_unit, 0.0, page_h_pt])
+            pdf::set_transformation_matrix([pt_per_unit, 0.0, 0.0, -pt_per_unit, 0.0, page_h_pt])
         });
 
-        // Maps tools to graphics state names. We use this to build the other map while avoiding
-        // duplicates. We could go without this second map and derive unique graphics state names
-        // from the tools in the other map, but then we'd have to construct a new string every time
-        // we wanted to check if there is already a graphics state for a tool.
-        let mut tool_graphics_state_names = HashMap::new();
-
         for inline_obj in &inline_objects_by_page[page_index] {
-            draw_single_object(
+            if let Err(err) = page_ctx.draw_single_object(
                 &inline_obj.object,
-                (page_w_internal, page_h_internal),
                 args.pen_width_multiplier,
                 args.marker_width_multiplier,
-                &mut operations,
-                &mut graphics_states,
-                &mut tool_graphics_state_names,
-            );
+            ) {
+                err.log();
+            }
         }
 
         for layer in page.layers() {
-            draw_page_layer(
+            page_ctx.draw_layer(
                 layer,
-                (page_w_internal, page_h_internal),
                 args.pen_width_multiplier,
                 args.marker_width_multiplier,
-                &mut operations,
-                &mut graphics_states,
-                &mut tool_graphics_state_names,
-                media_storage,
                 multi_progress,
             );
         }
 
-        let content = lopdf::content::Content { operations };
+        let (ops, graphics_dicts, xobject_ids) = page_ctx.into_parts();
 
-        let contents_id = lpdf.add_object(lopdf::Stream::new(
-            lopdf::dictionary! {},
+        let content = pdf::Content { operations: ops };
+
+        let contents_id = pdf.add_object(pdf::Stream::new(
+            pdf::Dictionary::new(),
             content.encode().context("Failed to encode page content")?,
         ));
 
-        let resources_id = lopdf::dictionary! {
-            "ExtGState" => lpdf.add_object(graphics_states),
-            "XObject" => xobjects,
+        let resources_id = pdf::dictionary! {
+            "ExtGState" => pdf.add_object(graphics_dicts),
+            "XObject" => xobject_ids,
         };
 
-        let page_base = lopdf::dictionary! {
+        let page_base = pdf::dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
             "Resources" => resources_id,
@@ -809,9 +605,9 @@ fn create_document_pdf(
                     vec![0.0.into(), bottom.into(), page_w_pt.into(), top.into()],
                 );
 
-                let page_id = lpdf.new_object_id();
-                lpdf.set_object(page_id, page);
-                page_id_refs.push(lopdf::Object::Reference(page_id));
+                let page_id = pdf.new_object_id();
+                pdf.set_object(page_id, page);
+                page_id_refs.push(pdf::Object::Reference(page_id));
             }
         } else {
             let mut page = page_base;
@@ -821,34 +617,34 @@ fn create_document_pdf(
                 vec![0.into(), 0.into(), page_w_pt.into(), page_h_pt.into()],
             );
 
-            let page_id = lpdf.new_object_id();
-            lpdf.set_object(page_id, page);
-            page_id_refs.push(lopdf::Object::Reference(page_id));
+            let page_id = pdf.new_object_id();
+            pdf.set_object(page_id, page);
+            page_id_refs.push(pdf::Object::Reference(page_id));
         }
     }
 
-    lpdf.set_object(
+    pdf.set_object(
         pages_id,
-        lopdf::dictionary! {
+        pdf::dictionary! {
             "Type" => "Pages",
             "Count" => page_id_refs.len() as i64,
             "Kids" => page_id_refs,
         },
     );
 
-    let catalog_ref: lopdf::Object = lpdf.add_object(catalog).into();
+    let catalog_ref: pdf::Object = pdf.add_object(catalog).into();
 
-    let doc_info_ref: lopdf::Object = lpdf
-        .add_object(lopdf::dictionary! {
-            "Title" => lopdf::Object::string_literal(document_name),
-            "Creator" => lopdf::Object::string_literal("sdocx2pdf"),
+    let doc_info_ref: pdf::Object = pdf
+        .add_object(pdf::dictionary! {
+            "Title" => pdf::Object::string_literal(document_name),
+            "Creator" => pdf::Object::string_literal("sdocx2pdf"),
         })
         .into();
 
-    lpdf.trailer.set("Root", catalog_ref);
-    lpdf.trailer.set("Info", doc_info_ref);
+    pdf.trailer.set("Root", catalog_ref);
+    pdf.trailer.set("Info", doc_info_ref);
 
-    Ok(lpdf)
+    Ok(pdf)
 }
 
 fn main_convert(
@@ -874,7 +670,7 @@ fn main_convert(
         args.basic_split = None;
     }
 
-    let mut lpdf = create_document_pdf(
+    let mut pdf = create_document_pdf(
         &document,
         &mut media_storage,
         document_name,
@@ -898,10 +694,10 @@ fn main_convert(
     // Pruning unused objects is most important when embedding PDFs because there may be some large
     // unused objects if only some of the PDF is embedded (or if the PDF being embedded is poorly
     // optimised).
-    lpdf.prune_objects();
-    lpdf.compress();
+    pdf.prune_objects();
+    pdf.compress();
 
-    lpdf.save_modern(
+    pdf.save_modern(
         &mut std::fs::File::create(&args.out)
             .with_context(|| format!("Failed to create output file '{out_path_str}'"))?,
     )

@@ -1,28 +1,39 @@
 use std::rc::Rc;
 
+use crate::pdf::dictionary;
 use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
 use lerp::Lerp;
-use lopdf::dictionary;
 use ordered_float::OrderedFloat;
 use sdocx::page::object::stroke::{Event, Stroke};
 use thiserror::Error;
 
 use crate::{
-    op_gen::{self, PdfPoint, PdfVector, PolygonDrawMode, WindingRule},
+    pdf::{self, GraphicsDictName, Point, PolygonDrawMode, Vector, WindingRule},
     stroke::{ContinuousStroke, StrokeOrDot},
 };
 
 /// Basic information used by all tools.
-///
-/// Though the `size` field is a float, this type implements `Hash` because the floats used are
-/// expected to have been read directly from a document file. The size is calculated in the same
-/// way for all tools, and thus two tools with logically equal sizes will have *exactly* equal
-/// `size` fields.
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Basics {
+    // The app is consistent in how it computes this, in that selecting a particular pen size from
+    // the discrete scale in the app will produce the same floating-point size value. Thus, it
+    // makes sense for this to be an `OrderedFloat` and therefore hashable.
+    //
+    // It still makes sense to hash this after multiplication by a constant as long as the hash is
+    // used for comparisons involving other tools whose widths were multiplied by the same
+    // constant.
     size: OrderedFloat<f32>,
     colour_bgra: [u8; 4],
+}
+
+impl Basics {
+    fn with_scaled_width(self, mul: f32) -> Basics {
+        Basics {
+            size: self.size * mul,
+            colour_bgra: self.colour_bgra,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -87,7 +98,34 @@ impl Tool {
         Self::try_for_stroke(stroke).unwrap()
     }
 
+    pub fn with_scaled_width(mut self, handwriting_mul: f32, marker_mul: f32) -> Tool {
+        let like_hl = self.is_like_highlighter();
+        let basics = self.basics_mut();
+
+        *basics = if like_hl {
+            basics.with_scaled_width(marker_mul)
+        } else {
+            basics.with_scaled_width(handwriting_mul)
+        };
+
+        self
+    }
+
     fn basics(&self) -> &Basics {
+        match self {
+            Tool::FountainPen(basics)
+            | Tool::CalligraphyPen(basics)
+            | Tool::InkPen { basics, .. }
+            | Tool::Pencil { basics, .. }
+            | Tool::CalligraphyBrush(basics)
+            | Tool::Highlighter(basics)
+            | Tool::StraightHighlighter(basics)
+            | Tool::Marker(basics)
+            | Tool::StraightMarker(basics) => basics,
+        }
+    }
+
+    fn basics_mut(&mut self) -> &mut Basics {
         match self {
             Tool::FountainPen(basics)
             | Tool::CalligraphyPen(basics)
@@ -133,8 +171,8 @@ impl Tool {
         matches!(self, Tool::StraightHighlighter(_) | Tool::StraightMarker(_))
     }
 
-    pub fn create_egs(&self) -> lopdf::Dictionary {
-        let mut dict = lopdf::dictionary! {
+    pub fn create_egs(&self) -> pdf::Dictionary {
+        let mut dict = pdf::dictionary! {
             "Type" => "ExtGState",
             // Round line cap style
             "LC" => 1,
@@ -152,7 +190,7 @@ impl Tool {
 
             if self.is_like_highlighter() {
                 // Multiply blend mode
-                dict.set("BM", lopdf::Object::Name(b"Multiply".to_vec()));
+                dict.set("BM", pdf::Object::Name(b"Multiply".to_vec()));
             }
         }
 
@@ -166,32 +204,21 @@ impl Tool {
     /// filling a `page_size` rectangle and clipping it to the shape of the stroke.
     pub fn draw_events<'e>(
         &self,
-        egs_name: &str,
+        graphics_dict_name: GraphicsDictName,
         page_size: (f32, f32),
         strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
-        pen_width_mul: f32,
-        marker_width_mul: f32,
-        ops: &mut Vec<lopdf::content::Operation>,
+        ops: &mut Vec<pdf::Operation>,
     ) -> Result<(), ()> {
         let &Basics {
             size: OrderedFloat(size),
             colour_bgra: [b, g, r, a],
         } = self.basics();
 
-        // Apply the relevant multiplier once here so that everything below works with the
-        // adjusted width.
-        let size = size
-            * if self.is_like_highlighter() {
-                marker_width_mul
-            } else {
-                pen_width_mul
-            };
-
         ops.extend([
-            op_gen::save_graphics_state(),
-            op_gen::load_graphics_state(egs_name),
-            op_gen::set_fill_colour(r, g, b),
-            op_gen::set_stroke_colour(r, g, b),
+            pdf::save_graphics_state(),
+            pdf::load_graphics_dict(graphics_dict_name),
+            pdf::set_fill_colour(r, g, b),
+            pdf::set_stroke_colour(r, g, b),
         ]);
 
         if self.is_straight_only() {
@@ -211,7 +238,7 @@ impl Tool {
 
             if specify_only {
                 for events in strokes {
-                    ops.push(op_gen::save_graphics_state());
+                    ops.push(pdf::save_graphics_state());
 
                     draw_events_basic(
                         events,
@@ -222,12 +249,12 @@ impl Tool {
                         ops,
                     );
 
-                    ops.extend(op_gen::clip(WindingRule::NonZero));
+                    ops.extend(pdf::clip(WindingRule::NonZero));
 
                     ops.extend([
-                        op_gen::specify_rectangle([0.0, 0.0, page_size.0, page_size.1]),
-                        op_gen::fill(),
-                        op_gen::restore_graphics_state(),
+                        pdf::specify_rectangle([0.0, 0.0, page_size.0, page_size.1]),
+                        pdf::fill(),
+                        pdf::restore_graphics_state(),
                     ]);
                 }
             } else {
@@ -244,7 +271,7 @@ impl Tool {
             }
         }
 
-        ops.push(op_gen::restore_graphics_state());
+        ops.push(pdf::restore_graphics_state());
 
         Ok(())
     }
@@ -304,11 +331,11 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
 }
 
 fn draw_bezier_pulley(
-    points_tangents_radii: [(PdfPoint, PdfVector, f64); 4],
+    points_tangents_radii: [(Point, Vector, f64); 4],
     draw_arcs: bool,
-    last_segment_tan: &mut Option<PdfVector>,
+    last_segment_tan: &mut Option<Vector>,
     specify_only: bool,
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<pdf::Operation>,
 ) -> Result<(), ()> {
     let [
         (start_pos, start_tangent, start_spread),
@@ -388,7 +415,7 @@ fn draw_bezier_pulley(
         lower_mid_right,
     );
 
-    use op_gen::PolygonPoint::{Control, Normal};
+    use pdf::PolygonPoint::{Control, Normal};
 
     let top_to_bottom_left_points = [
         Normal(top_left),
@@ -465,9 +492,9 @@ fn draw_bezier_pulley(
     };
 
     if specify_only {
-        ops.extend(op_gen::specify_polygon(points));
+        ops.extend(pdf::specify_polygon(points));
     } else {
-        ops.extend(op_gen::draw_polygon(
+        ops.extend(pdf::draw_polygon(
             points,
             PolygonDrawMode::Fill(WindingRule::NonZero),
         ));
@@ -477,11 +504,11 @@ fn draw_bezier_pulley(
 }
 
 fn calc_pulley_line_points_acw_from_lower_right(
-    c1: PdfPoint,
+    c1: Point,
     r1: f64,
-    c2: PdfPoint,
+    c2: Point,
     r2: f64,
-) -> Option<[PdfPoint; 4]> {
+) -> Option<[Point; 4]> {
     let d = c1.distance_to(c2);
 
     if d == 0.0 {
@@ -499,8 +526,8 @@ fn calc_pulley_line_points_acw_from_lower_right(
     let (apb_s, apb_c) = (alpha + beta).sin_cos();
     let (amb_s, amb_c) = (alpha - beta).sin_cos();
 
-    let apb = PdfVector::new(apb_c, apb_s);
-    let amb = PdfVector::new(amb_c, amb_s);
+    let apb = Vector::new(apb_c, apb_s);
+    let amb = Vector::new(amb_c, amb_s);
 
     let right_start = c1 + amb * r1;
     let right_end = c2 + amb * r2;
@@ -512,10 +539,10 @@ fn calc_pulley_line_points_acw_from_lower_right(
 }
 
 fn draw_simple_pulley(
-    [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
+    [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
     use_arcs: bool,
     specify_only: bool,
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<pdf::Operation>,
 ) -> Result<(), ()> {
     let [a_right, b_right, b_left, a_left] =
         calc_pulley_line_points_acw_from_lower_right(a, radius_a, b, radius_b).ok_or(())?;
@@ -526,7 +553,7 @@ fn draw_simple_pulley(
         return Err(());
     }
 
-    use op_gen::PolygonPoint::{Control, Normal};
+    use pdf::PolygonPoint::{Control, Normal};
 
     let points = if use_arcs {
         let a_arc_midpoint = a - direction * radius_a;
@@ -573,9 +600,9 @@ fn draw_simple_pulley(
     };
 
     if specify_only {
-        ops.extend(op_gen::specify_polygon(points));
+        ops.extend(pdf::specify_polygon(points));
     } else {
-        ops.extend(op_gen::draw_polygon(
+        ops.extend(pdf::draw_polygon(
             points,
             PolygonDrawMode::Fill(WindingRule::NonZero),
         ));
@@ -585,17 +612,17 @@ fn draw_simple_pulley(
 }
 
 fn draw_simple_line(
-    [(a, radius_a), (b, radius_b)]: [(PdfPoint, f64); 2],
+    [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
     round_ends: bool,
     specify_only: bool,
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<pdf::Operation>,
 ) {
     if specify_only {
-        use op_gen::PolygonPoint::{Control, Normal};
+        use pdf::PolygonPoint::{Control, Normal};
 
         let forwards = (b - a).normalize();
 
-        let left: PdfVector = (-forwards.y, forwards.x).into();
+        let left: Vector = (-forwards.y, forwards.x).into();
         let right = -left;
 
         if !forwards.is_finite() {
@@ -608,10 +635,10 @@ fn draw_simple_line(
             // path, we can only approximate it using Bézier curves.
             let radius = (radius_a + radius_b) / 2.0;
 
-            let left = a + PdfVector::new(-radius, 0.0);
-            let right = a + PdfVector::new(radius, 0.0);
-            let top = a + PdfVector::new(0.0, radius);
-            let bottom = a + PdfVector::new(0.0, -radius);
+            let left = a + Vector::new(-radius, 0.0);
+            let right = a + Vector::new(radius, 0.0);
+            let top = a + Vector::new(0.0, radius);
+            let bottom = a + Vector::new(0.0, -radius);
 
             // Calculate the control points for the arc in each quadrant.
             // todo: Precompute these for the unit circle and translate as needed instead of
@@ -621,7 +648,7 @@ fn draw_simple_line(
             let [q3_c1, q3_c2] = bezier_arc_control_points(left, bottom, a).unwrap();
             let [q4_c1, q4_c2] = bezier_arc_control_points(bottom, right, a).unwrap();
 
-            ops.extend(op_gen::specify_polygon([
+            ops.extend(pdf::specify_polygon([
                 Normal(right),
                 Control(q1_c1),
                 Control(q1_c2),
@@ -651,7 +678,7 @@ fn draw_simple_line(
                 return;
             }
 
-            ops.extend(op_gen::specify_polygon([
+            ops.extend(pdf::specify_polygon([
                 Normal(bottom_right),
                 Normal(top_right),
                 Normal(top_left),
@@ -679,7 +706,7 @@ fn draw_simple_line(
             bezier_arc_control_points(bottom_arc_lowest, bottom_right, a).unwrap(),
         );
 
-        ops.extend(op_gen::specify_polygon([
+        ops.extend(pdf::specify_polygon([
             Normal(top_right),
             Control(top_right_to_arc_highest_cp1),
             Control(top_right_to_arc_highest_cp2),
@@ -700,19 +727,19 @@ fn draw_simple_line(
     }
 
     ops.extend([
-        op_gen::save_graphics_state(),
+        pdf::save_graphics_state(),
         if round_ends {
-            op_gen::set_line_cap_round()
+            pdf::set_line_cap_round()
         } else {
-            op_gen::set_line_cap_butt()
+            pdf::set_line_cap_butt()
         },
         // The effective radius is the mean of the radii at `a` and `b`, so the _width_ of the line
         // is the sum.
-        op_gen::set_stroke_width((radius_a + radius_b) as f32),
+        pdf::set_stroke_width((radius_a + radius_b) as f32),
     ]);
 
-    ops.extend(op_gen::draw_line(a, b));
-    ops.push(op_gen::restore_graphics_state());
+    ops.extend(pdf::draw_line(a, b));
+    ops.push(pdf::restore_graphics_state());
 
     // todo: Draw line with width equal to the smaller radius and add a dot for the bigger radius?
 }
@@ -749,7 +776,7 @@ fn draw_events_basic<'e>(
     pressure_override: Option<f64>,
     arc_mode: ArcMode,
     specify_only: bool,
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<pdf::Operation>,
 ) {
     let pen_size: f64 = pen_size.into();
 
@@ -760,12 +787,12 @@ fn draw_events_basic<'e>(
         StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke),
 
         StrokeOrDot::Dot { x, y, pressure } => {
-            let pos: PdfPoint = (x, y).into();
+            let pos: Point = (x, y).into();
             let spread = pressure_to_circle_radius(pressure, pen_size);
 
             // Draw a filled circle.
-            ops.push(op_gen::set_stroke_width(spread as f32 * 2.0));
-            ops.extend(op_gen::draw_line(pos, pos));
+            ops.push(pdf::set_stroke_width(spread as f32 * 2.0));
+            ops.extend(pdf::draw_line(pos, pos));
 
             return;
         }
@@ -774,11 +801,11 @@ fn draw_events_basic<'e>(
     let target_angle = f64::to_radians(40.0);
     let sample_arc_lengths = smooth.sample_points(target_angle);
 
-    let mut last_segment_tan: Option<PdfVector> = None;
+    let mut last_segment_tan: Option<Vector> = None;
 
     for (iter_pos, (start_s, end_s)) in sample_arc_lengths.tuple_windows().with_position() {
-        let start_pos: PdfPoint = smooth.position(start_s).into();
-        let end_pos: PdfPoint = smooth.position(end_s).into();
+        let start_pos: Point = smooth.position(start_s).into();
+        let end_pos: Point = smooth.position(end_s).into();
 
         let start_spread = pressure_to_circle_radius(smooth.pressure(start_s), pen_size);
         let end_spread = pressure_to_circle_radius(smooth.pressure(end_s), pen_size);
@@ -804,20 +831,20 @@ fn draw_events_basic<'e>(
                     let first_third_s = start_s.lerp(end_s, 1.0 / 3.0);
                     let second_third_s = start_s.lerp(end_s, 2.0 / 3.0);
 
-                    let first_third_pos: PdfPoint = smooth.position(first_third_s).into();
-                    let second_third_pos: PdfPoint = smooth.position(second_third_s).into();
+                    let first_third_pos: Point = smooth.position(first_third_s).into();
+                    let second_third_pos: Point = smooth.position(second_third_s).into();
 
                     [
                         (
                             start_pos,
-                            Some(PdfVector::from(smooth.unit_tangent(start_s)).normalize())
+                            Some(Vector::from(smooth.unit_tangent(start_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| (first_third_pos - start_pos).normalize()),
                             start_spread,
                         ),
                         (
                             first_third_pos,
-                            Some(PdfVector::from(smooth.unit_tangent(first_third_s)).normalize())
+                            Some(Vector::from(smooth.unit_tangent(first_third_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 // Note that we use the same fallback tangent for both middle
                                 // thirds.
@@ -828,7 +855,7 @@ fn draw_events_basic<'e>(
                         ),
                         (
                             second_third_pos,
-                            Some(PdfVector::from(smooth.unit_tangent(second_third_s)).normalize())
+                            Some(Vector::from(smooth.unit_tangent(second_third_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| {
                                     (second_third_pos - first_third_pos).normalize()
@@ -837,7 +864,7 @@ fn draw_events_basic<'e>(
                         ),
                         (
                             end_pos,
-                            Some(PdfVector::from(smooth.unit_tangent(end_s)).normalize())
+                            Some(Vector::from(smooth.unit_tangent(end_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| (end_pos - second_third_pos).normalize()),
                             end_spread,
@@ -867,15 +894,15 @@ fn draw_events_basic<'e>(
 fn draw_events_straight<'e>(
     events: impl IntoIterator<Item = &'e Event>,
     pen_size: f32,
-    ops: &mut Vec<lopdf::content::Operation>,
+    ops: &mut Vec<pdf::Operation>,
 ) {
     let mut events = events.into_iter();
 
     let first = events.next().unwrap();
     let last = events.last().unwrap();
 
-    ops.push(op_gen::set_stroke_width(pen_size));
-    ops.extend(op_gen::draw_line(
+    ops.push(pdf::set_stroke_width(pen_size));
+    ops.extend(pdf::draw_line(
         <(f64, f64)>::from(first.point).into(),
         <(f64, f64)>::from(last.point).into(),
     ));

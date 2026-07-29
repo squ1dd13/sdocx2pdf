@@ -1,15 +1,37 @@
 use euclid::{Point2D, Vector2D};
 use itertools::Either;
-use lopdf::{Object, content::Operation};
 
-pub struct PdfSpace;
-pub type PdfPoint = Point2D<f64, PdfSpace>;
-pub type PdfVector = Vector2D<f64, PdfSpace>;
+pub struct Space;
+pub type Point = Point2D<f64, Space>;
+pub type Vector = Vector2D<f64, Space>;
 
-fn point_vec<const N: usize>(points: [PdfPoint; N]) -> Vec<Object> {
+pub use lopdf::{
+    Dictionary, Document as Pdf, Error, Object, ObjectId, Stream, content::Content,
+    content::Operation, dictionary,
+};
+
+#[derive(Debug, Clone)]
+pub struct GraphicsDictName(String);
+
+impl From<String> for GraphicsDictName {
+    fn from(x: String) -> Self {
+        Self(x)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct XObjectName(String);
+
+impl From<String> for XObjectName {
+    fn from(x: String) -> Self {
+        Self(x)
+    }
+}
+
+fn point_vec<const N: usize>(points: [Point; N]) -> Vec<Object> {
     let mut v = Vec::with_capacity(N * 2);
 
-    for PdfPoint { x, y, .. } in points {
+    for Point { x, y, .. } in points {
         v.push(x.into());
         v.push(y.into());
     }
@@ -25,8 +47,8 @@ pub fn save_graphics_state() -> Operation {
     Operation::new("q", vec![])
 }
 
-pub fn load_graphics_state(egs_name: &str) -> Operation {
-    Operation::new("gs", vec![Object::Name(egs_name.into())])
+pub fn load_graphics_dict(name: GraphicsDictName) -> Operation {
+    Operation::new("gs", vec![Object::Name(name.0.into())])
 }
 
 pub fn set_fill_colour(r: u8, g: u8, b: u8) -> Operation {
@@ -63,7 +85,7 @@ pub fn set_line_cap_butt() -> Operation {
     Operation::new("J", vec![Object::Integer(0)])
 }
 
-pub fn draw_line(a: PdfPoint, b: PdfPoint) -> [Operation; 3] {
+pub fn draw_line(a: Point, b: Point) -> [Operation; 3] {
     [
         // Move to `a`
         Operation::new("m", point_vec([a])),
@@ -76,8 +98,8 @@ pub fn draw_line(a: PdfPoint, b: PdfPoint) -> [Operation; 3] {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PolygonPoint {
-    Normal(PdfPoint),
-    Control(PdfPoint),
+    Normal(Point),
+    Control(Point),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,15 +133,15 @@ impl PolygonDrawMode {
     }
 }
 
-pub fn move_to(p: PdfPoint) -> Operation {
+pub fn move_to(p: Point) -> Operation {
     Operation::new("m", point_vec([p]))
 }
 
-pub fn line_to(p: PdfPoint) -> Operation {
+pub fn line_to(p: Point) -> Operation {
     Operation::new("l", point_vec([p]))
 }
 
-pub fn cubic_to(cp1: PdfPoint, cp2: PdfPoint, p3: PdfPoint) -> Operation {
+pub fn cubic_to(cp1: Point, cp2: Point, p3: Point) -> Operation {
     Operation::new("c", point_vec([cp1, cp2, p3]))
 }
 
@@ -196,7 +218,7 @@ pub fn clip(rule: WindingRule) -> [Operation; 2] {
 }
 
 pub fn specify_rectangle([x, y, w, h]: [f32; 4]) -> Operation {
-    lopdf::content::Operation::new("re", vec![x.into(), y.into(), w.into(), h.into()])
+    Operation::new("re", vec![x.into(), y.into(), w.into(), h.into()])
 }
 
 pub fn fill() -> Operation {
@@ -213,4 +235,8 @@ pub fn fill_and_stroke() -> Operation {
 
 pub fn restore_graphics_state() -> Operation {
     Operation::new("Q", vec![])
+}
+
+pub fn paint_xobject(name: XObjectName) -> Operation {
+    Operation::new("Do", vec![name.0.into()])
 }

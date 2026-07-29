@@ -17,7 +17,7 @@ use crate::{
 };
 use log::warn;
 use std::io::{Read, Seek};
-use strum::Display;
+use strum::IntoStaticStr;
 use thiserror::Error;
 
 mod audio;
@@ -100,7 +100,7 @@ pub(crate) struct DocObjectParseContext<'a, 'b> {
     pub doc_ctx: DocumentContext<'a, 'b>,
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, IntoStaticStr)]
 pub enum DocObject {
     /// `WCon_ObjectStroke`; extends `WCon_ObjectBase`
     Stroke(Box<Stroke>),
