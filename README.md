@@ -104,7 +104,7 @@ The process is even easier if you're using the Samsung Notes app on a Windows co
 can just 'Save note as Samsung Notes file' and immediately feed the SDOCX file into sdocx2pdf
 without sending it between devices.[^1]
 
-<details>
+<details open>
 
 <summary>Output of <code>sdocx2pdf --help</code></summary>
 
