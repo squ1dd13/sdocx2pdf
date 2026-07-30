@@ -105,9 +105,10 @@ can just 'Save note as Samsung Notes file' and immediately feed the SDOCX file i
 without sending it between devices.[^1]
 
 <details>
-<a name="help-text-block"></a>
+
 <summary>Output of <code>sdocx2pdf --help</code></summary>
-<!-- stty cols 90 rows 100 -->
+
+<a name="help-text-block"></a><!-- stty cols 90 rows 100 -->
 
 ```
 A tool for converting Samsung Notes documents to vector PDFs. "Vector" means that
