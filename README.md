@@ -45,6 +45,12 @@ pen because I have not yet invested any time in trying to make it look like it d
 Similarly, the pencil, calligraphy brush and ink pen are not yet distinguished from the fountain
 pen. These too will hopefully improve with time.
 
+<!-- prettier-ignore -->
+> [!TIP]
+> You can fine-tune the pen thickness in the output document using `--pen-width-multiplier`
+> and `--marker-width-multiplier`. Run `sdocx2pdf --help` (or see the help message
+> [below](#help-text-block)) for more info.
+
 Finally, handwriting that has been modified by the 'Handwriting Help' features is less
 information-dense than usual, and at the moment gets smoothed out a bit too much.
 
@@ -99,44 +105,92 @@ can just 'Save note as Samsung Notes file' and immediately feed the SDOCX file i
 without sending it between devices.[^1]
 
 <details>
-
-<summary>sdocx2pdf help message</summary>
+<a name="help-text-block"></a>
+<summary>Output of <code>sdocx2pdf --help</code></summary>
+<!-- stty cols 90 rows 100 -->
 
 ```
-A tool for converting Samsung Notes documents to vector PDFs. "Vector" means that handwriting data is stored mathematically (as equations for curves) rather than as pixel data (an image). This makes writing clearer and easier to read.
+A tool for converting Samsung Notes documents to vector PDFs. "Vector" means that
+handwriting data is stored mathematically (as equations for curves) rather than as pixel
+data (an image). This makes writing clearer and easier to read.
 
 Usage: sdocx2pdf [OPTIONS] <IN> <OUT>
 
 Arguments:
   <IN>
-          The path to the Samsung Notes document to be converted. This is typically an SDOCX file (.sdocx).
+          The path to the Samsung Notes document to be converted. This is typically an
+          SDOCX file (.sdocx).
 
-          The Windows app stores unexported documents as directories that have the same internal structure as SDOCX files. You can also pass the path to one of these directories, or to a directory containing the contents of an unzipped SDOCX file.
+          The Windows app stores unexported documents as directories that have the same
+          internal structure as SDOCX files. You can also pass the path to one of these
+          directories, or to a directory containing the contents of an unzipped SDOCX
+          file.
 
   <OUT>
-          The path to which the produced PDF will be written. If it already exists, the file will be overwritten.
+          The path to which the produced PDF will be written. If it already exists, the
+          file will be overwritten.
 
 Options:
       --auto-split
-          Inserts page breaks into pageless documents between pages of any embedded PDFs. Disabled by default.
+          Inserts page breaks into pageless documents between pages of any embedded PDFs.
+          Disabled by default.
 
-          By default, a pageless document will be converted to a PDF containing a long single page. With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are inserted to match the page breaks in the embedded PDFs. For example, if you import a five-page PDF
-          into a blank pageless document and annotate it, auto-splitting will give you a five-page PDF rather than a single-page PDF.
+          By default, a pageless document will be converted to a PDF containing a long
+          single page. With auto-splitting enabled, if a pageless document embeds any
+          PDFs, page breaks are inserted to match the page breaks in the embedded PDFs.
+          For example, if you import a five-page PDF into a blank pageless document and
+          annotate it, auto-splitting will give you a five-page PDF rather than a
+          single-page PDF.
 
-          This option does nothing when converting a paged document. It also does nothing for pageless documents that do not embed any PDFs; see the basic splitting option.
+          This option does nothing when converting a paged document. It also does nothing
+          for pageless documents that do not embed any PDFs; see the basic splitting
+          option.
 
       --basic-split <BASIC_SPLIT>
-          Specifies the page-splitting behaviour used for pageless documents when auto-splitting is not in effect, either because it is disabled or because the document being converted does not embed any PDFs.
+          Specifies the page-splitting behaviour used for pageless documents when
+          auto-splitting is not in effect, either because it is disabled or because the
+          document being converted does not embed any PDFs.
 
-          Basic splitting is disabled by default, resulting in long single-page PDFs when auto-splitting is not used. To use basic splitting only, specify a mode and do not enable auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting is used as a
-          fallback when there are no PDFs embedded in the document. If auto-splitting is enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those that don't will not be split at all.
+          Basic splitting is disabled by default, resulting in long single-page PDFs when
+          auto-splitting is not used. To use basic splitting only, specify a mode and do
+          not enable auto-splitting. When basic splitting and auto-splitting are both
+          enabled, basic splitting is used as a fallback when there are no PDFs embedded
+          in the document. If auto-splitting is enabled but basic splitting is not,
+          documents that embed PDFs will be auto-split, but those that don't will not be
+          split at all.
 
           Possible values:
           - a4-portrait:  Split the document into portrait A4 pages
           - a4-landscape: Split the document into landscape A4 pages
 
+      --pen-width-multiplier <PEN_WIDTH_MULTIPLIER>
+          Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink
+          pen, calligraphy brush and pencil.
+
+          Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual
+          width). For example, choosing a value of 2 (or 2.0) doubles the width of
+          anything drawn with one of those tools.
+
+          [default: 1]
+
+      --marker-width-multiplier <MARKER_WIDTH_MULTIPLIER>
+          Specifies a multiplier for the widths of the highlighter, marker pen, straight
+          highlighter and straight marker pen.
+
+          Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual
+          width). For example, choosing a value of 2 (or 2.0) doubles the width of
+          anything drawn with one of those tools.
+
+          [default: 1]
+
       --detailed-errors
           Show (very) detailed error messages if opening/parsing/converting fails
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
 
 </details>

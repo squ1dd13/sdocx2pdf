@@ -37,6 +37,17 @@ enum BasicSplitMode {
     A4Landscape,
 }
 
+fn parse_stroke_width_mul(s: &str) -> Result<f32, String> {
+    // Extremely small width multipliers cause numerical problems in the stroke processing, and
+    // extremely large values confuse PDF readers.
+    // !!! - Do not change these bounds without updating the help text for the CLI options.
+    let v @ 0.01..=10.0 = s.parse::<f32>().map_err(|e| e.to_string())? else {
+        return Err("multiplier must be between 0.01 and 10.0 (inclusive)".to_string());
+    };
+
+    Ok(v)
+}
+
 /// A tool for converting Samsung Notes documents to vector PDFs. "Vector" means that
 /// handwriting data is stored mathematically (as equations for curves) rather than as pixel data
 /// (an image). This makes writing clearer and easier to read.
@@ -97,28 +108,33 @@ struct Args {
     )]
     basic_split: Option<BasicSplitMode>,
 
-    /// Specifies a multiplier for the width of handwriting pens.
+    /// Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink pen,
+    /// calligraphy brush and pencil.
     ///
-    /// The default of 1.0 leaves pen widths as computed from the document. Use a value greater
-    /// than 1.0 to make the handwriting bolder (e.g. 2.0 for roughly double thickness) or less
-    /// than 1.0 to make it finer.
+    /// Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual width). For
+    /// example, choosing a value of 2 (or 2.0) doubles the width of anything drawn with one of
+    /// those tools.
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Multiply the width of handwriting pens by this factor",
+        value_parser = parse_stroke_width_mul,
+        help = "Scale the widths of all handwriting pens by some factor between 0.01 and 10",
         long_help
     )]
     pen_width_multiplier: f32,
 
-    /// Specifies a multiplier for the width of highlighters and marker pens.
+    /// Specifies a multiplier for the widths of the highlighter, marker pen, straight highlighter
+    /// and straight marker pen.
     ///
-    /// The default of 1.0 leaves marker widths as computed from the document. This is kept
-    /// separate from the pen multiplier so that changing the width of handwriting does not
-    /// stop highlighting from covering it properly.
+    /// Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual width). For
+    /// example, choosing a value of 2 (or 2.0) doubles the width of anything drawn with one of
+    /// those tools.
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Multiply the width of highlighters and marker pens by this factor",
+        value_parser = parse_stroke_width_mul,
+        help = "Scale the widths of all highlighters and marker pens by some factor \
+        between 0.01 and 10",
         long_help
     )]
     marker_width_multiplier: f32,
@@ -820,22 +836,6 @@ fn main() -> ExitCode {
         .unwrap();
 
     let args = Args::parse();
-
-    // Very small multipliers cause numerical problems in the stroke processing, and very
-    // large ones confuse PDF readers.
-    const MIN_WIDTH_MUL: f32 = 0.01;
-    const MAX_WIDTH_MUL: f32 = 10.0;
-
-    for (name, value) in [
-        ("--pen-width-multiplier", args.pen_width_multiplier),
-        ("--marker-width-multiplier", args.marker_width_multiplier),
-    ] {
-        if !(MIN_WIDTH_MUL..=MAX_WIDTH_MUL).contains(&value) {
-            eprintln!("{name} must be in the interval [{MIN_WIDTH_MUL}, {MAX_WIDTH_MUL}].");
-            return ExitCode::FAILURE;
-        }
-    }
-
     let detailed_errors = args.detailed_errors;
 
     print_intro();

@@ -139,6 +139,8 @@ impl Tool {
     /// Returns whether this tool is a highlighter or related tool which is typically used for
     /// drawing over existing text.
     fn is_like_highlighter(&self) -> bool {
+        // !!! - Do not change the tool classification without updating the help text for the width
+        // multipliers.
         matches!(
             self,
             Tool::Highlighter(_)
