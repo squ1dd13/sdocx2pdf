@@ -6,22 +6,22 @@ license.workspace = true
 
 [dependencies]
 euclid = "0.22"
-itertools = "0.14.0"
-lerp = "0.5.0"
-num = "0.4.3"
+itertools = "0.14"
+lerp = "0.5"
+num = "0.4"
 scirs2-interpolate = "0.5.0"
 ndarray = "0.17"
 sdocx = { path = "../sdocx" }
 kahan = "0.1.4"
 gaussfilt = "0.1.3"
 once_cell = "1.21.4"
-thiserror = "2.0.18"
+thiserror = "2"
 ordered-float = "5.3.0"
 indicatif = "0.18.4"
 lopdf = "0.42.0"
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
 anyhow = "1.0"
-log = { version = "0.4", features = ["std"] }
+log = "0.4"
 env_logger = "0.11"
 indicatif-log-bridge = "0.2.3"
-jiff = { version = "0.2", features = ["std"] }
+jiff = "0.2"
