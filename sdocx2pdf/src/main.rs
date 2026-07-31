@@ -234,7 +234,7 @@ impl EmbeddedPdf {
             )
         };
 
-        let (src_width, src_height) = {
+        let (src_width, src_height, src_left, src_bottom) = {
             // [left, bottom, right, top]. Can be `Integer`s or `Real`s, but `as_float` doesn't
             // care which.
             let a = media_box.as_array()?;
@@ -244,6 +244,8 @@ impl EmbeddedPdf {
                     - dest_pdf.dereference(&a[0])?.1.as_float()?,
                 dest_pdf.dereference(&a[3])?.1.as_float()?
                     - dest_pdf.dereference(&a[1])?.1.as_float()?,
+                dest_pdf.dereference(&a[0])?.1.as_float()?,
+                dest_pdf.dereference(&a[1])?.1.as_float()?,
             )
         };
 
@@ -256,6 +258,9 @@ impl EmbeddedPdf {
             "Subtype" => "Form",
             "FormType" => 1,
             "BBox" => media_box.clone(),
+            // Translate the content back to the origin so it can be positioned using the graphics
+            // state transformation matrix without awareness of its original position.
+            "Matrix" => pdf::matrix_vec([1.0, 0.0, 0.0, 1.0, -src_left, -src_bottom]),
             "Resources" => resources.clone(),
         };
 
