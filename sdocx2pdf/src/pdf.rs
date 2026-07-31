@@ -39,8 +39,12 @@ fn point_vec<const N: usize>(points: [Point; N]) -> Vec<Object> {
     v
 }
 
+pub fn matrix_vec(mx: [f32; 6]) -> Vec<Object> {
+    mx.map(Object::Real).to_vec()
+}
+
 pub fn set_transformation_matrix(mx: [f32; 6]) -> Operation {
-    Operation::new("cm", mx.map(Object::Real).to_vec())
+    Operation::new("cm", matrix_vec(mx))
 }
 
 pub fn save_graphics_state() -> Operation {
