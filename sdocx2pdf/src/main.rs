@@ -123,8 +123,7 @@ struct Args {
     )]
     pen_width_multiplier: f32,
 
-    /// Specifies a multiplier for the widths of the highlighter, marker pen, straight highlighter
-    /// and straight marker pen.
+    /// Specifies a multiplier for the widths of the marker pen and highlighter.
     ///
     /// Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual width). For
     /// example, choosing a value of 2 (or 2.0) doubles the width of anything drawn with one of

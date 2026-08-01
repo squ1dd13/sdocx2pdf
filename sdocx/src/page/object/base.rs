@@ -35,15 +35,30 @@ pub enum BundleParseError {
 }
 
 #[derive(Debug, Default)]
-#[expect(dead_code)]
-struct Bundle {
+pub struct Bundle {
     strings: HashMap<String, String>,
     integers: HashMap<String, u32>,
     string_vecs: HashMap<String, Vec<String>>,
-    byte_vecs: HashMap<String, OpaqueBytes>,
+    byte_vecs: HashMap<String, Vec<u8>>,
 }
 
 impl Bundle {
+    pub fn get_string(&self, key: impl AsRef<str>) -> Option<&String> {
+        self.strings.get(key.as_ref())
+    }
+
+    pub fn get_integer(&self, key: impl AsRef<str>) -> Option<u32> {
+        self.integers.get(key.as_ref()).copied()
+    }
+
+    pub fn get_strings(&self, key: impl AsRef<str>) -> Option<&[String]> {
+        self.string_vecs.get(key.as_ref()).map(|v| &v[..])
+    }
+
+    pub fn get_bytes(&self, key: impl AsRef<str>) -> Option<&[u8]> {
+        self.byte_vecs.get(key.as_ref()).map(|v| &v[..])
+    }
+
     /// Like `read_short_u8_string`, but removes a single trailing `\0` from the string if
     /// it finds one.
     ///
@@ -85,7 +100,7 @@ impl<R: Read> TryParse<R> for Bundle {
 
             3 => byte_vecs: read_size_and_map!(stream, u16, (
                 Bundle::read_short_u8_string_without_nul(stream)?,
-                OpaqueBytes::try_parse_exclusive(stream)?,
+                OpaqueBytes::try_parse_exclusive(stream)?.into(),
             ));
         });
 
@@ -153,7 +168,7 @@ pub struct ObjectBase {
     ao_info: Option<String>,
     sor_bundle: Option<Bundle>,
     plugin_link: Option<String>,
-    extra_bundle: Option<Bundle>,
+    pub extra_bundle: Option<Bundle>,
     attached_file_id: Option<u32>,
     min_width_height: Option<(f32, f32)>,
     max_width_height: Option<(f32, f32)>,
@@ -165,6 +180,7 @@ pub struct ObjectBase {
     pivot: Option<Point>,
     group_id: Option<String>,
     pub(crate) page_index: Option<u32>,
+    render_layer_id: Option<u32>,
 }
 
 pub trait HasObjectBase {
@@ -250,6 +266,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             18 => pivot: Point::try_parse_f64(&mut stream)?;
             19 => group_id: stream.read_short_u16_string()?;
             20 => page_index: stream.read_u32_le()?;
+            21 => render_layer_id: stream.read_u32_le()?;
         });
 
         if unknown_somethings.is_some() || unknown_20.is_some() {
@@ -297,6 +314,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             pivot,
             group_id,
             page_index,
+            render_layer_id,
         })
     }
 }

@@ -3,15 +3,47 @@ use std::rc::Rc;
 use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
 use lerp::Lerp;
+use log::warn;
 use ordered_float::OrderedFloat;
-use sdocx::page::object::stroke::{Event, Stroke};
+use sdocx::page::object::stroke::{Event, LineType, Stroke};
 use thiserror::Error;
 
-use crate::pdf::{self, Point, Vector, dictionary};
 use crate::stroke::{ContinuousStroke, StrokeOrDot};
+use crate::{
+    pdf::{self, Point, Vector, dictionary},
+    stroke::FilteringMode,
+};
+
+/// A group of stroke events.
+pub enum EventGroup<'e> {
+    /// A group of events from a normal stroke (e.g. handwriting).
+    Normal(&'e [Event]),
+
+    /// A group of events from a shapeified stroke (e.g. a straight line created by pausing at the
+    /// end of a freehand line).
+    Shapeified(&'e [Event]),
+}
+
+impl<'e> EventGroup<'e> {
+    pub fn from_stroke(stroke: &'e Stroke) -> EventGroup<'e> {
+        let ev = stroke.events();
+
+        if stroke.is_shapeified() {
+            EventGroup::Shapeified(ev)
+        } else {
+            EventGroup::Normal(ev)
+        }
+    }
+
+    fn events(&self) -> &'e [Event] {
+        match self {
+            EventGroup::Normal(events) | EventGroup::Shapeified(events) => events,
+        }
+    }
+}
 
 /// Basic information used by all tools.
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub struct Basics {
     // The app is consistent in how it computes this, in that selecting a particular pen size from
     // the discrete scale in the app will produce the same floating-point size value. Thus, it
@@ -21,29 +53,30 @@ pub struct Basics {
     // used for comparisons involving other tools whose widths were multiplied by the same
     // constant.
     size: OrderedFloat<f32>,
+
     colour_bgra: [u8; 4],
+    line_type: LineType,
 }
 
 impl Basics {
     fn with_scaled_width(self, mul: f32) -> Basics {
         Basics {
             size: self.size * mul,
-            colour_bgra: self.colour_bgra,
+            ..self
         }
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum Tool {
     FountainPen(Basics),
     CalligraphyPen(Basics),
     InkPen { basics: Basics, fixed_width: bool },
     Pencil { basics: Basics, fixed_opacity: bool },
     CalligraphyBrush(Basics),
-    Highlighter(Basics),
-    StraightHighlighter(Basics),
-    Marker(Basics),
-    StraightMarker(Basics),
+    Highlighter { basics: Basics, straight: bool },
+    Marker { basics: Basics, straight: bool },
+    Tape(Basics),
 }
 
 #[derive(Error, Debug)]
@@ -65,6 +98,7 @@ impl Tool {
         let basics = Basics {
             size: stroke.pen_size().ok_or(ToolPropertyError::NoSize)?.into(),
             colour_bgra: stroke.colour(),
+            line_type: stroke.line_type(),
         };
 
         Ok(match name.as_ref() {
@@ -79,14 +113,23 @@ impl Tool {
                 fixed_opacity: stroke.is_fixed_opacity(),
             },
             "com.samsung.android.sdk.pen.pen.preload.BrushPen" => Tool::CalligraphyBrush(basics),
-            "com.samsung.android.sdk.pen.pen.preload.Marker4" => Tool::Highlighter(basics),
-            "com.samsung.android.sdk.pen.pen.preload.StraightHighlighter" => {
-                Tool::StraightHighlighter(basics)
-            }
-            "com.samsung.android.sdk.pen.pen.preload.Marker3" => Tool::Marker(basics),
-            "com.samsung.android.sdk.pen.pen.preload.StraightMarker" => {
-                Tool::StraightMarker(basics)
-            }
+            "com.samsung.android.sdk.pen.pen.preload.Marker4" => Tool::Highlighter {
+                basics,
+                straight: false,
+            },
+            "com.samsung.android.sdk.pen.pen.preload.StraightHighlighter" => Tool::Highlighter {
+                basics,
+                straight: true,
+            },
+            "com.samsung.android.sdk.pen.pen.preload.Marker3" => Tool::Marker {
+                basics,
+                straight: false,
+            },
+            "com.samsung.android.sdk.pen.pen.preload.StraightMarker" => Tool::Marker {
+                basics,
+                straight: true,
+            },
+            "com.samsung.android.sdk.pen.pen.preload.TapePen" => Tool::Tape(basics),
             _ => return Err(ToolPropertyError::UnknownName(Rc::clone(name))),
         })
     }
@@ -115,10 +158,9 @@ impl Tool {
             | Tool::InkPen { basics, .. }
             | Tool::Pencil { basics, .. }
             | Tool::CalligraphyBrush(basics)
-            | Tool::Highlighter(basics)
-            | Tool::StraightHighlighter(basics)
-            | Tool::Marker(basics)
-            | Tool::StraightMarker(basics) => basics,
+            | Tool::Highlighter { basics, .. }
+            | Tool::Marker { basics, .. }
+            | Tool::Tape(basics) => basics,
         }
     }
 
@@ -129,10 +171,9 @@ impl Tool {
             | Tool::InkPen { basics, .. }
             | Tool::Pencil { basics, .. }
             | Tool::CalligraphyBrush(basics)
-            | Tool::Highlighter(basics)
-            | Tool::StraightHighlighter(basics)
-            | Tool::Marker(basics)
-            | Tool::StraightMarker(basics) => basics,
+            | Tool::Highlighter { basics, .. }
+            | Tool::Marker { basics, .. }
+            | Tool::Tape(basics) => basics,
         }
     }
 
@@ -141,13 +182,7 @@ impl Tool {
     fn is_like_highlighter(&self) -> bool {
         // !!! - Do not change the tool classification without updating the help text for the width
         // multipliers.
-        matches!(
-            self,
-            Tool::Highlighter(_)
-                | Tool::StraightHighlighter(_)
-                | Tool::Marker(_)
-                | Tool::StraightMarker(_)
-        )
+        matches!(self, Tool::Highlighter { .. } | Tool::Marker { .. })
     }
 
     fn is_pressure_sensitive(&self) -> bool {
@@ -167,7 +202,10 @@ impl Tool {
 
     /// Returns whether strokes drawn using this tool are always straight.
     fn is_straight_only(&self) -> bool {
-        matches!(self, Tool::StraightHighlighter(_) | Tool::StraightMarker(_))
+        matches!(
+            self,
+            Tool::Highlighter { straight: true, .. } | Tool::Marker { straight: true, .. }
+        )
     }
 
     pub fn create_egs(&self) -> pdf::Dictionary {
@@ -205,13 +243,22 @@ impl Tool {
         &self,
         graphics_dict_name: pdf::GraphicsDictName,
         page_size: (f32, f32),
-        strokes: impl IntoIterator<Item = impl IntoIterator<Item = &'e Event>>,
+        strokes: impl IntoIterator<Item = EventGroup<'e>>,
         ops: &mut Vec<pdf::Operation>,
     ) -> Result<(), ()> {
+        if matches!(self, Tool::Tape(_)) {
+            warn!("Tape is not yet fully supported and will likely look incorrect");
+        }
+
         let &Basics {
             size: OrderedFloat(size),
             colour_bgra: [b, g, r, a],
+            line_type,
         } = self.basics();
+
+        if !line_type.is_continuous() {
+            warn!("Dashed and dotted lines are not yet supported; will be drawn solid");
+        }
 
         ops.extend([
             pdf::save_graphics_state(),
@@ -225,9 +272,8 @@ impl Tool {
                 draw_events_straight(events, size, ops);
             }
         } else {
-            let specify_only = a != 255;
-
-            let effective_size = if self.is_like_highlighter() {
+            // Increase the width for non-straight highlighters/markers.
+            let size = if self.is_like_highlighter() {
                 size * 2.5
             } else {
                 size
@@ -235,13 +281,17 @@ impl Tool {
 
             let pressure_override = (!self.is_pressure_sensitive()).then_some(0.45);
 
+            // If the alpha isn't full, we specify the shape of the stroke without immediately
+            // trying to draw it so we can use the clipping-based drawing method instead.
+            let specify_only = a != 255;
+
             if specify_only {
                 for events in strokes {
                     ops.push(pdf::save_graphics_state());
 
                     draw_events_basic(
                         events,
-                        effective_size,
+                        size,
                         pressure_override,
                         ArcMode::All,
                         specify_only,
@@ -260,7 +310,7 @@ impl Tool {
                 for events in strokes {
                     draw_events_basic(
                         events,
-                        effective_size,
+                        size,
                         pressure_override,
                         ArcMode::All,
                         specify_only,
@@ -771,7 +821,7 @@ enum ArcMode {
 /// segment, making them inappropriate for strokes with transparency (because you can see the
 /// arcs).
 fn draw_events_basic<'e>(
-    events: impl IntoIterator<Item = &'e Event>,
+    events: EventGroup<'e>,
     pen_size: f32,
     pressure_override: Option<f64>,
     arc_mode: ArcMode,
@@ -783,8 +833,13 @@ fn draw_events_basic<'e>(
     let pressure_to_circle_radius =
         |p: f64, s: f64| -> f64 { pressure_to_circle_radius(pressure_override.unwrap_or(p), s) };
 
+    let (events, filtering) = match events {
+        EventGroup::Normal(events) => (events, FilteringMode::Raw),
+        EventGroup::Shapeified(events) => (events, FilteringMode::Preprocessed),
+    };
+
     let smooth = match StrokeOrDot::from_events(events) {
-        StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke),
+        StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke, filtering),
 
         StrokeOrDot::Dot { x, y, pressure } => {
             let pos: Point = (x, y).into();
@@ -891,14 +946,10 @@ fn draw_events_basic<'e>(
     }
 }
 
-fn draw_events_straight<'e>(
-    events: impl IntoIterator<Item = &'e Event>,
-    pen_size: f32,
-    ops: &mut Vec<pdf::Operation>,
-) {
-    let mut events = events.into_iter();
+fn draw_events_straight<'e>(events: EventGroup<'e>, pen_size: f32, ops: &mut Vec<pdf::Operation>) {
+    let events = events.events();
 
-    let first = events.next().unwrap();
+    let first = events.first().unwrap();
     let last = events.last().unwrap();
 
     ops.push(pdf::set_stroke_width(pen_size));
