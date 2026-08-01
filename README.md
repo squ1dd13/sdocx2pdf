@@ -23,7 +23,7 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
 - add handwriting and shapes to PDFs by hand in SNotes and get a vector PDF with your annotations
   on top of the original PDF (with searchable/selectable text) using sdocx2pdf.
 
-**As of sdocx2pdf v0.3.1, handwriting, shapes and embedded PDFs are represented in converted
+**As of sdocx2pdf v0.3.2, handwriting, shapes and embedded PDFs are represented in converted
 documents.**
 
 There are options for splitting pageless documents into pages based either on page length or on the
@@ -43,7 +43,8 @@ Another current limitation of sdocx2pdf is that it does not precisely replicate 
 the various writing tools. For example, the calligraphy pen looks exactly the same as the fountain
 pen because I have not yet invested any time in trying to make it look like it does in SNotes.
 Similarly, the pencil, calligraphy brush and ink pen are not yet distinguished from the fountain
-pen. These too will hopefully improve with time.
+pen. Also, dotted and dashed lines currently render as solid, and tape patterns do not work. All of
+this will hopefully improve with time.
 
 <!-- prettier-ignore -->
 > [!TIP]
@@ -175,8 +176,7 @@ Options:
           [default: 1]
 
       --marker-width-multiplier <MARKER_WIDTH_MULTIPLIER>
-          Specifies a multiplier for the widths of the highlighter, marker pen, straight
-          highlighter and straight marker pen.
+          Specifies a multiplier for the widths of the marker pen and highlighter.
 
           Minimum is 0.01 (1% of the usual width); maximum is 10 (10 times the usual
           width). For example, choosing a value of 2 (or 2.0) doubles the width of

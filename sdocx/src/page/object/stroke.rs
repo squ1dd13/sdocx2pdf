@@ -21,8 +21,21 @@ use crate::{
             header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         },
     },
-    unpack_bool_flags, unpack_field_flags,
+    read_u16_sized_vec, unpack_bool_flags, unpack_field_flags,
 };
+
+#[derive(Clone, Copy, Debug, FromPrimitive, Default)]
+pub enum ColourType {
+    /// `ColorType.COLOR`
+    #[default]
+    Colour = 0,
+    /// `ColorType.GRADIENT`
+    Gradient = 1,
+    /// `ColorType.PATTERN`
+    Pattern = 2,
+}
+
+impl_try_from_for_optional_from!(ColourType, u16, from_u16, pub InvalidColourTypeError);
 
 /// See [Android developer website][1].
 ///
@@ -269,41 +282,24 @@ pub enum ToolType {
 
 impl_try_from_for_optional_from!(ToolType, u16, from_u16, pub InvalidToolTypeError);
 
-#[derive(Debug, FromPrimitive)]
-enum DashType {
+#[derive(Debug, FromPrimitive, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LineType {
     /// `CONTINUOUS_LINE`
+    #[default]
     Continuous = 0,
     /// `DASHED_LINE`
     Dashed = 1,
-    /// `DASHED_SPACE_LINE`
-    DashedSpace = 2,
-    /// `LONG_DASHED_DOTTED_LINE`
-    LongDashedDotted = 3,
-    /// `LONG_DASHED_DOUBLE_DOTTED_LINE`
-    LongDashedDoubleDotted = 4,
-    /// `LONG_DASHED_TRIPLE_DOTTED_LINE`
-    LongDashedTripleDotted = 5,
     /// `DOTTED_LINE`
-    Dotted = 6,
-    /// `LONG_DASHED_SHORT_DASHED_LINE`
-    LongDashedShortDashed = 7,
-    /// `LONG_DASHED_DOULBE_SHORT_DASHED_LINE`
-    LongDashedDoulbeShortDashed = 8,
-    /// `DASHED_DOTTED_LINE`
-    DashedDotted = 9,
-    /// `DOUBLE_DASHED_DOTTED_LINE`
-    DoubleDashedDotted = 10,
-    /// `DASHED_DOUBLE_DOTTED_LINE`
-    DashedDoubleDotted = 11,
-    /// `DOUBLE_DASHED_DOUBLE_DOTTED_LINE`
-    DoubleDashedDoubleDotted = 12,
-    /// `DASHED_TRIPLE_DOTTED_LINE`
-    DashedTripleDotted = 13,
-    /// `DOUBLE_DASHED_TRIPLE_DOTTED_LINE`
-    DoubleDashedTripleDotted = 14,
+    Dotted = 2,
 }
 
-impl_try_from_for_optional_from!(DashType, u16, from_u16, pub InvalidDashTypeError);
+impl_try_from_for_optional_from!(LineType, u16, from_u16, pub InvalidDashTypeError);
+
+impl LineType {
+    pub fn is_continuous(self) -> bool {
+        matches!(self, LineType::Continuous)
+    }
+}
 
 // `SPen::ObjectStroke::SetStrokeType` errors if the stroke type set is >= 3. Variant names
 // are unknown as of right now.
@@ -327,6 +323,7 @@ pub enum StrokeParseError {
     NoSuchString(#[from] NoSuchRegisteredStringError),
     BadDashType(#[from] InvalidDashTypeError),
     BadStrokeType(#[from] InvalidStrokeTypeError),
+    BadColourType(#[from] InvalidColourTypeError),
     Unfinished(#[from] UnfinishedParsingError),
 }
 
@@ -346,6 +343,9 @@ pub struct Stroke {
     is_binary_added: bool,
     is_generated: bool,
     is_fixed_opacity: bool,
+    is_rainbow_effect_enabled: bool,
+    is_straight_mode_enabled: bool,
+    is_reveal_enabled: bool,
 
     events: Vec<Event>,
 
@@ -363,7 +363,7 @@ pub struct Stroke {
     original_width: Option<u32>,
     // Note: If grepping, this is misspelt as "toloerance" in libs
     initial_tolerance: Option<f32>,
-    dash_type: Option<DashType>,
+    line_type: LineType,
     dash_offset: Option<f32>,
     stroke_type: Option<StrokeType>,
     pen_repeat_distance: f32,
@@ -371,6 +371,10 @@ pub struct Stroke {
     pattern_index: Option<u32>,
     pattern_scale: f32,
     particle_level: Option<u32>,
+    rainbow_distance: Option<u32>,
+    rainbow_offset: Option<f32>,
+    gradient_colours: Vec<[u8; 4]>,
+    colour_type: ColourType,
 }
 
 impl Stroke {
@@ -401,6 +405,21 @@ impl Stroke {
     pub const fn colour(&self) -> [u8; 4] {
         self.colour
     }
+
+    pub fn is_shapeified(&self) -> bool {
+        let val = self
+            .object_base
+            .extra_bundle
+            .as_ref()
+            .and_then(|bundle| bundle.get_integer("extra_key_stroke_shape"));
+
+        // Count anything other than `0` as `true`.
+        matches!(val, Some(1..))
+    }
+
+    pub fn line_type(&self) -> LineType {
+        self.line_type
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
@@ -429,6 +448,9 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             // missing 9
             10 => !is_generated;
             11 => is_fixed_opacity;
+            12 => is_rainbow_effect_enabled;
+            13 => is_straight_mode_enabled;
+            14 => is_reveal_enabled;
         });
 
         let event_count: usize = stream.read_u16_le()?.into();
@@ -460,7 +482,8 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             2 => colour: stream.read_4_bytes()?, else [0, 0, 0, 255];
             3 => pen_size: stream.read_f32_le()?;
             4 => unk: stream.read_u32_le()?;
-            // missing 5 and 6
+            // fixme: Parse the list that's on bit 5
+            // missing 6
             7 => pen_name: string_registry.try_get(stream.read_u32_le()?)?;
             8 => fixed_width: stream.read_f32_le()?;
             9 => size_level: stream.read_u32_le()?;
@@ -468,7 +491,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             11 => rendering_level: stream.read_u32_le()?;
             12 => original_width: stream.read_u32_le()?;
             13 => initial_tolerance: stream.read_f32_le()?;
-            14 => dash_type: stream.read_u16_le()?.try_into()?;
+            14 => line_type: stream.read_u16_le()?.try_into()?, else Default::default();
             15 => dash_offset: stream.read_f32_le()?;
             16 => stroke_type: stream.read_u16_le()?.try_into()?;
             17 => pen_repeat_distance: stream.read_f32_le()?, else 0.5;
@@ -476,6 +499,13 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             19 => pattern_index: stream.read_u32_le()?;
             20 => pattern_scale: stream.read_f32_le()?, else 1.0;
             21 => particle_level: stream.read_u32_le()?;
+            22 => rainbow_distance: stream.read_u32_le()?;
+            23 => rainbow_offset: stream.read_f32_le()?;
+            24 => gradient_colours: read_u16_sized_vec!(
+                stream,
+                stream.read_4_bytes()?,
+            ), else Vec::new();
+            25 => colour_type: stream.read_u16_le()?.try_into()?, else Default::default();
         });
 
         if let Some(unk) = unk {
@@ -498,6 +528,9 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             is_binary_added,
             is_generated,
             is_fixed_opacity,
+            is_rainbow_effect_enabled,
+            is_straight_mode_enabled,
+            is_reveal_enabled,
             events,
             tool_type,
             advanced_pen_settings,
@@ -511,7 +544,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             rendering_level,
             original_width,
             initial_tolerance,
-            dash_type,
+            line_type,
             dash_offset,
             stroke_type,
             pen_repeat_distance,
@@ -519,6 +552,10 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
             pattern_index,
             pattern_scale,
             particle_level,
+            rainbow_distance,
+            rainbow_offset,
+            gradient_colours,
+            colour_type,
         })
     }
 }

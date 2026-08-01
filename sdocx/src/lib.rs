@@ -105,6 +105,12 @@ impl OpaqueBytes {
     }
 }
 
+impl From<OpaqueBytes> for Vec<u8> {
+    fn from(OpaqueBytes(v): OpaqueBytes) -> Self {
+        v
+    }
+}
+
 impl std::fmt::Debug for OpaqueBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "OpaqueBytes({} bytes)", self.0.len())

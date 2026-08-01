@@ -3,13 +3,12 @@ use std::collections::HashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::{error, warn};
-use sdocx::page::object::stroke::Event;
 use thiserror::Error;
 
 use crate::{
     pdf,
     shape::{NoStyleError, PathDrawingCtx, PathDrawingError},
-    tool::Tool,
+    tool::{EventGroup, Tool},
 };
 
 #[derive(Debug, Error)]
@@ -114,7 +113,7 @@ impl PageConversionCtx {
 
     fn draw_stroke_chunk_events<'e>(
         &mut self,
-        stroke_events: impl IntoIterator<Item = &'e [Event]>,
+        stroke_events: impl IntoIterator<Item = EventGroup<'e>>,
         tool: Tool,
     ) -> Result<(), ()> {
         tool.draw_events(
@@ -134,7 +133,7 @@ impl PageConversionCtx {
         match object {
             sdocx::DocObject::Stroke(stroke) => self
                 .draw_stroke_chunk_events(
-                    [stroke.events()],
+                    [EventGroup::from_stroke(stroke)],
                     Tool::for_stroke(stroke).with_scaled_width(pen_width_mul, marker_width_mul),
                 )
                 .map_err(|()| DrawObjectError::Stroke),
@@ -209,7 +208,7 @@ impl PageConversionCtx {
                         unreachable!()
                     };
 
-                    s.events()
+                    EventGroup::from_stroke(s)
                 });
 
                 if let Err(()) = self.draw_stroke_chunk_events(stroke_events, tool) {

@@ -266,6 +266,16 @@ fn gaussian_filter<'s>(
     gaussfilt::apply_gaussian_filter1d(signal, kernel, false)
 }
 
+/// Filtering modes for event and position data.
+#[derive(Clone, Copy)]
+pub enum FilteringMode {
+    /// Stronger filtering for raw data.
+    Raw,
+
+    /// Weaker filtering for preprocessed data.
+    Preprocessed,
+}
+
 const TIME_UPSAMPLING_RATIO: u8 = 3;
 
 fn filter_position<'v>(
@@ -273,34 +283,63 @@ fn filter_position<'v>(
     pad_right: f64,
     v: impl Iterator<Item = f64> + 'v,
     order: usize,
+    mode: FilteringMode,
 ) -> impl Iterator<Item = f64> {
-    static KERNELS: [Lazy<Vec<f64>>; 3] = {
-        const SIGMA: f64 = 5.0 * (TIME_UPSAMPLING_RATIO as f64);
-        const TRUNC: f64 = 10.0;
-
+    static RAW_KERNELS: [Lazy<Vec<f64>>; 3] = {
+        const RAW_SIGMA: f64 = 5.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const RAW_TRUNC: f64 = 10.0;
         [
-            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC)),
-            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 1, TRUNC)),
-            Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 2, TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(RAW_SIGMA, 0, RAW_TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(RAW_SIGMA, 1, RAW_TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(RAW_SIGMA, 2, RAW_TRUNC)),
         ]
     };
 
-    gaussian_filter(pad_left, pad_right, v, &KERNELS[order])
+    static PRE_KERNELS: [Lazy<Vec<f64>>; 3] = {
+        const PRE_SIGMA: f64 = 0.5 * (TIME_UPSAMPLING_RATIO as f64);
+        const PRE_TRUNC: f64 = 10.0;
+
+        [
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(PRE_SIGMA, 0, PRE_TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(PRE_SIGMA, 1, PRE_TRUNC)),
+            Lazy::new(|| gaussfilt::design_gaussian_filter1d(PRE_SIGMA, 2, PRE_TRUNC)),
+        ]
+    };
+
+    let kernel = match mode {
+        FilteringMode::Raw => &RAW_KERNELS[order],
+        FilteringMode::Preprocessed => &PRE_KERNELS[order],
+    };
+
+    gaussian_filter(pad_left, pad_right, v, kernel)
 }
 
 fn filter_pressure<'p>(
     pad_left: f64,
     pad_right: f64,
     p: impl Iterator<Item = f64> + 'p,
+    mode: FilteringMode,
 ) -> impl Iterator<Item = f64> + 'p {
-    static KERNEL: Lazy<Vec<f64>> = {
-        const SIGMA: f64 = 15.0 * (TIME_UPSAMPLING_RATIO as f64);
-        const TRUNC: f64 = 8.0;
+    static RAW_KERNEL: Lazy<Vec<f64>> = {
+        const RAW_SIGMA: f64 = 15.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const RAW_TRUNC: f64 = 8.0;
 
-        Lazy::new(|| gaussfilt::design_gaussian_filter1d(SIGMA, 0, TRUNC))
+        Lazy::new(|| gaussfilt::design_gaussian_filter1d(RAW_SIGMA, 0, RAW_TRUNC))
     };
 
-    gaussian_filter(pad_left, pad_right, p, &KERNEL)
+    static PRE_KERNEL: Lazy<Vec<f64>> = {
+        const PRE_SIGMA: f64 = 12.0 * (TIME_UPSAMPLING_RATIO as f64);
+        const PRE_TRUNC: f64 = 8.0;
+
+        Lazy::new(|| gaussfilt::design_gaussian_filter1d(PRE_SIGMA, 0, PRE_TRUNC))
+    };
+
+    let kernel = match mode {
+        FilteringMode::Raw => &RAW_KERNEL,
+        FilteringMode::Preprocessed => &PRE_KERNEL,
+    };
+
+    gaussian_filter(pad_left, pad_right, p, kernel)
 }
 
 pub struct ContinuousStroke {
@@ -355,7 +394,7 @@ impl ContinuousStroke {
         }
     }
 
-    pub fn new(split: &SplitStroke) -> ContinuousStroke {
+    pub fn new(split: &SplitStroke, filtering: FilteringMode) -> ContinuousStroke {
         // The start and end times are respectively the first and last, and they will be distinct.
         // Both of these facts follow from the guarantees made by `SplitStroke`.
         let t_start = split.time[0];
@@ -430,19 +469,25 @@ impl ContinuousStroke {
             use filter_pressure as fp;
 
             (
-                fp(pt_us[0], pt_us.last().copied().unwrap(), pt_us.into_iter()).collect_vec(),
-                fxy(xpl, xpr, xt_us.iter().copied(), 0).collect_vec(),
-                fxy(ypl, ypr, yt_us.iter().copied(), 0).collect_vec(),
-                fxy(xpl, xpr, xt_us.iter().copied(), 1)
+                fp(
+                    pt_us[0],
+                    pt_us.last().copied().unwrap(),
+                    pt_us.into_iter(),
+                    filtering,
+                )
+                .collect_vec(),
+                fxy(xpl, xpr, xt_us.iter().copied(), 0, filtering).collect_vec(),
+                fxy(ypl, ypr, yt_us.iter().copied(), 0, filtering).collect_vec(),
+                fxy(xpl, xpr, xt_us.iter().copied(), 1, filtering)
                     .map(|v| v / didt)
                     .collect_vec(),
-                fxy(ypl, ypr, yt_us.iter().copied(), 1)
+                fxy(ypl, ypr, yt_us.iter().copied(), 1, filtering)
                     .map(|v| v / didt)
                     .collect_vec(),
-                fxy(xpl, xpr, xt_us.into_iter(), 2)
+                fxy(xpl, xpr, xt_us.into_iter(), 2, filtering)
                     .map(|v| v / (didt * didt))
                     .collect_vec(),
-                fxy(ypl, ypr, yt_us.into_iter(), 2)
+                fxy(ypl, ypr, yt_us.into_iter(), 2, filtering)
                     .map(|v| v / (didt * didt))
                     .collect_vec(),
             )
