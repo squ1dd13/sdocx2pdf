@@ -144,6 +144,13 @@ enum ParagraphType {
     Bullet = 5,
     /// `TYPE_PARSING_STATE`
     ParsingState = 6,
+    // (Missing 7)
+    /// `TYPE_SPACING_BEFORE`
+    SpacingBefore = 8,
+    /// `TYPE_SPACING_AFTER`
+    SpacingAfter = 9,
+    /// `TYPE_PREDEFINED_STYLE`
+    PredefinedStyle,
 }
 
 impl_try_from_for_optional_from!(ParagraphType, u32, from_u32, pub InvalidParagraphTypeError);
