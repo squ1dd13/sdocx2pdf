@@ -10,16 +10,14 @@ use num_derive::FromPrimitive;
 use thiserror::Error;
 
 use crate::{
+    Point2d, Vector2d,
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     context::TryParseWithContext,
     impl_try_from_for_optional_from,
     note_doc::{NoSuchRegisteredStringError, StringRegistry},
-    page::{
-        Point,
-        object::{
-            base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-        },
+    page::object::{
+        base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     },
     read_u16_sized_vec, unpack_bool_flags, unpack_field_flags,
 };
@@ -59,7 +57,7 @@ pub struct TiltData {
 #[derive(Clone, Copy)]
 pub struct Event {
     /// Tool position.
-    pub point: Point,
+    pub point: Point2d<f64>,
 
     /// Pressure in \[0, 1.0\], as a fraction of the maximum pressure.
     pub pressure: f32,
@@ -121,9 +119,10 @@ impl Event {
             return Ok(vec![]);
         };
 
-        let origin = match origin_is_f64 {
-            true => Point::try_parse_f64(stream)?,
-            false => Point::try_parse_f32(stream)?,
+        let origin = if origin_is_f64 {
+            Point2d::try_parse(stream)?
+        } else {
+            Point2d::<f32>::try_parse(stream)?.cast()
         };
 
         // Alternates x, y, x, y, ...
@@ -167,17 +166,16 @@ impl Event {
             // `unwrap` because there is always guaranteed to be an event.
             let previous_event = events.last().unwrap();
 
-            let d_y = Event::point_component_delta_to_float(point_deltas_xy[2 * delta_i]);
-            let d_x = Event::point_component_delta_to_float(point_deltas_xy[1 + 2 * delta_i]);
+            let d_pos = Vector2d::<f64>::new(
+                Event::point_component_delta_to_float(point_deltas_xy[2 * delta_i]),
+                Event::point_component_delta_to_float(point_deltas_xy[1 + 2 * delta_i]),
+            );
 
             let d_pressure = Event::small_delta_to_float(pressure_deltas[delta_i]);
             let d_timestamp = u64::from(timestamp_deltas[delta_i]);
 
             events.push(Event {
-                point: Point {
-                    x: previous_event.point.x + d_y,
-                    y: previous_event.point.y + d_x,
-                },
+                point: previous_event.point + d_pos,
 
                 pressure: previous_event.pressure + d_pressure,
                 timestamp: previous_event
@@ -220,10 +218,7 @@ impl Event {
 
         for i in 0..event_count {
             events.push(Event {
-                point: Point {
-                    x: points_xy[2 * i],
-                    y: points_xy[1 + 2 * i],
-                },
+                point: Point2d::new(points_xy[2 * i], points_xy[1 + 2 * i]),
 
                 pressure: pressures[i],
                 timestamp: u64::from(timestamps[i]),

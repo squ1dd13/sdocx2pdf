@@ -3,19 +3,16 @@ use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 use crate::{
+    Box2d,
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     context::{DocumentContext, TryParseWithContext},
-    page::{
-        Rect,
-        object::{
-            base::{HasObjectBase, ObjectBase},
-            header::{FlagBlock, FlagBlockError, ObjectHeaderError, try_parse_object_header},
-            shape::{
-                InvalidTextAutoFitTypeError, Shape, ShapeParseContext, ShapeParseError,
-                TextAutoFitType,
-            },
-            text::{Text, TextParseError},
+    page::object::{
+        base::{HasObjectBase, ObjectBase},
+        header::{FlagBlock, FlagBlockError, ObjectHeaderError, try_parse_object_header},
+        shape::{
+            InvalidTextAutoFitTypeError, Shape, ShapeParseContext, ShapeParseError, TextAutoFitType,
         },
+        text::{Text, TextParseError},
     },
     read_u32_sized_vec, unpack_bool_flags, unpack_field_flags,
 };
@@ -113,7 +110,7 @@ pub struct Cell {
     row_span: u32,
     column_span: u32,
     background_colour: Option<u32>,
-    rect: Rect,
+    rect: Box2d<f64>,
     is_editable: bool,
     text: Text,
     border: Option<FullBorderStyle>,
@@ -134,7 +131,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Cell {
         let row_span = stream.read_u32_le()?;
         let column_span = stream.read_u32_le()?;
         let background_colour = stream.read_u32_le()?;
-        let rect = Rect::try_parse_f64(&mut stream)?;
+        let rect = Box2d::try_parse(&mut stream)?;
         let is_editable = stream.read_u8()? != 0;
 
         let text = {
@@ -273,7 +270,7 @@ pub struct Table {
     min_row_height: f32,
     column_widths: Vec<f32>,
     rows: Vec<Row>,
-    rect: Option<Rect>,
+    rect: Option<Box2d<f64>>,
     border: Option<FullBorderStyle>,
     auto_fit_type: Option<TextAutoFitType>,
     column_min_widths: Vec<f32>,
@@ -323,7 +320,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Table {
                 TableParseError::TooManyElements,
                 Row::try_parse_with_ctx(&mut stream, &doc_ctx)?,
             ), else Vec::new();
-            4 => rect: Rect::try_parse_f64(&mut stream)?;
+            4 => rect: Box2d::try_parse(&mut stream)?;
             5 => border: FullBorderStyle::try_parse(&mut stream)?;
             6 => auto_fit_type: stream.read_u8()?.try_into()?;
             7 => column_min_widths: read_u32_sized_vec!(

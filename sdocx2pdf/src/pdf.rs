@@ -1,14 +1,14 @@
-use euclid::{Point2D, Vector2D};
 use krilla::geom::PathBuilder;
+use sdocx::euclid::{Point2D, Vector2D};
 
-pub struct Space;
-pub type Point = Point2D<f64, Space>;
-pub type Vector = Vector2D<f64, Space>;
+pub struct PdfSpace;
+pub type Point2d = Point2D<f64, PdfSpace>;
+pub type Vector2d = Vector2D<f64, PdfSpace>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PolygonPoint {
-    Normal(Point),
-    Control(Point),
+    Normal(Point2d),
+    Control(Point2d),
 }
 
 /// Appends the path specified by the given polygon points to `pb`.
@@ -20,7 +20,7 @@ pub fn specify_polygon(points: impl IntoIterator<Item = PolygonPoint>, pb: &mut 
         None => return,
     };
 
-    let Point { x: fx, y: fy, .. } = match first {
+    let Point2d { x: fx, y: fy, .. } = match first {
         PolygonPoint::Normal(p) => p,
         PolygonPoint::Control(_) => panic!("first polygon point cannot be a control point"),
     };

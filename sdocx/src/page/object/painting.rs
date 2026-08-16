@@ -3,15 +3,13 @@ use std::io::{Read, Seek};
 use thiserror::Error;
 
 use crate::{
+    Box2d,
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
-    page::{
-        Rect,
-        object::{
-            base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-        },
+    page::object::{
+        base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     },
-    unpack_field_flags,
+    try_parse_i32_box, unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
@@ -32,8 +30,8 @@ pub struct Painting {
     attached_file_id: Option<u32>,
     attached_thumbnail_id: Option<u32>,
 
-    crop_rect: Option<Rect>,
-    original_rect: Option<Rect>,
+    crop_rect: Option<Box2d<f64>>,
+    original_rect: Option<Box2d<f64>>,
 
     ratio: f32,
 }
@@ -52,8 +50,8 @@ impl<R: Read + Seek> TryParse<R> for Painting {
             0 => attached_file_id: stream.read_u32_le()?;
             1 => attached_thumbnail_id: stream.read_u32_le()?;
             2 => ratio: stream.read_f32_le()?, else 1.0;
-            3 => crop_rect: Rect::try_parse_i32(&mut stream)?;
-            4 => original_rect: Rect::try_parse_f64(&mut stream)?;
+            3 => crop_rect: try_parse_i32_box(&mut stream)?;
+            4 => original_rect: Box2d::try_parse(&mut stream)?;
         });
 
         flag_block.ensure_flags_used()?;

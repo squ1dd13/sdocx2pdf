@@ -108,7 +108,7 @@ struct Args {
     )]
     marker_width_multiplier: f32,
 
-    // ! - Do not rename this without changing `DETAILED_ERRORS_ARG_NAME` to match.
+    // !!! - Do not rename this without changing `DETAILED_ERRORS_ARG_NAME` to match.
     #[arg(
         long,
         help = "Show (very) detailed error messages if opening/parsing/converting fails"
@@ -214,24 +214,24 @@ fn create_document_pdf(
                 // were a paged document.
 
                 // Distance from the top of the document to the lowest point drawn to.
-                let drawn_floor_pt = drawn_rect.bottom as f32 * pt_per_unit;
+                let drawn_floor_pt = drawn_rect.max.y as f32 * pt_per_unit;
 
                 // Find the rectangle of the embedded PDF page furthest down the document.
                 let lowest_pdf_rect = page
                     .embedded_pdf_pages()
                     .iter()
                     .map(|epp| epp.rect())
-                    .max_by(|l, r| l.bottom.total_cmp(&r.bottom));
+                    .max_by(|l, r| l.max.y.total_cmp(&r.max.y));
 
                 let (floor_pt, assumed_page_height) = if let Some(rect_unit) = lowest_pdf_rect {
                     // Distance from the top to the lowest point reached by a page of an embedded
                     // PDF.
-                    let pdf_floor_pt = rect_unit.bottom as f32 * pt_per_unit;
+                    let pdf_floor_pt = rect_unit.max.y as f32 * pt_per_unit;
 
                     (
                         pdf_floor_pt.max(drawn_floor_pt),
                         // Assume the added space will be the same size as the last PDF page.
-                        (rect_unit.bottom - rect_unit.top) as f32 * pt_per_unit,
+                        rect_unit.height() as f32 * pt_per_unit,
                     )
                 } else {
                     // Assume the added space will be the same height as an A4 page, as we've
@@ -293,8 +293,8 @@ fn create_document_pdf(
             let src_page_index = emb_page.page_index() as usize;
             let dest_rect = emb_page.rect();
 
-            let dest_width = dest_rect.right - dest_rect.left;
-            let dest_height = dest_rect.bottom - dest_rect.top;
+            let dest_width = dest_rect.width();
+            let dest_height = dest_rect.height();
 
             let dest_size =
                 Size::from_wh(dest_width as f32, dest_height as f32).ok_or_else(|| {
@@ -312,8 +312,8 @@ fn create_document_pdf(
                 0.0,
                 0.0,
                 1.0,
-                dest_rect.left as f32,
-                dest_rect.top as f32,
+                dest_rect.min.x as f32,
+                dest_rect.min.y as f32,
             ));
 
             page_ctx

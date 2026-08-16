@@ -1,13 +1,12 @@
-use euclid::{Angle, Transform2D};
 use krilla::{
     color::rgb,
     geom::PathBuilder,
     num::NormalizedF32,
     paint::{Fill, FillRule, LineCap, LineJoin, Stroke},
 };
-use sdocx::page::{
-    Point as DocPoint,
-    object::{
+use sdocx::{
+    euclid::{Angle, Transform2D},
+    page::object::{
         ArrowShape, CapType, FillEffect, JoinType, LineColourEffect, LineStyleEffect, PathSegment,
     },
 };
@@ -18,30 +17,30 @@ use crate::pdf;
 
 // --▶
 // Vertices are named for an arrowhead pointing to the right.
-const NORMAL_ARROW: [pdf::Point; 3] = [
+const NORMAL_ARROW: [pdf::Point2d; 3] = [
     // Top
-    pdf::Point::new(-1.0, -0.5),
+    pdf::Point2d::new(-1.0, -0.5),
     // Apex
-    pdf::Point::new(0.0, 0.0),
+    pdf::Point2d::new(0.0, 0.0),
     // Bottom
-    pdf::Point::new(-1.0, 0.5),
+    pdf::Point2d::new(-1.0, 0.5),
 ];
 
 /// Returns `[top, apex, bottom]` if the angle to the horizontal is zero, and the transformed
 /// equivalents otherwise.
 fn normal_arrow_vertices_ordered(
-    apex_at: pdf::Point,
+    apex_at: pdf::Point2d,
     angle_to_horizontal: Angle<f64>,
     size_unit: f64,
-) -> [pdf::Point; 3] {
-    let tx = Transform2D::<f64, pdf::Space, pdf::Space>::scale(size_unit, size_unit)
+) -> [pdf::Point2d; 3] {
+    let tx = Transform2D::<f64, pdf::PdfSpace, pdf::PdfSpace>::scale(size_unit, size_unit)
         .then_rotate(angle_to_horizontal)
         .then_translate(apex_at.to_vector());
 
     NORMAL_ARROW.map(|p| tx.transform_point(p))
 }
 
-fn doc_point_to_pdf(p: DocPoint) -> pdf::Point {
+fn doc_point_to_pdf(p: sdocx::Point2d<f64>) -> pdf::Point2d {
     <(f64, f64)>::from(p).into()
 }
 
@@ -121,8 +120,8 @@ trait InternalPathDrawingCtx {
 pub trait PathDrawingCtx {
     fn draw_line(
         &mut self,
-        start: DocPoint,
-        end: DocPoint,
+        start: sdocx::Point2d<f64>,
+        end: sdocx::Point2d<f64>,
         lc: Option<&LineColourEffect>,
         ls: Option<&LineStyleEffect>,
     ) -> Result<(), NoStyleError>;
@@ -207,7 +206,7 @@ fn specify_path_by_segments(
     segments: &[PathSegment],
     pb: &mut PathBuilder,
 ) -> Result<(), PathDrawingError> {
-    let mut last_point: Option<pdf::Point> = None;
+    let mut last_point: Option<pdf::Point2d> = None;
     let mut found_close = false;
 
     for s in segments {
@@ -288,8 +287,8 @@ fn specify_path_by_segments(
 impl PathDrawingCtx for PageConversionCtx<'_> {
     fn draw_line(
         &mut self,
-        start: DocPoint,
-        end: DocPoint,
+        start: sdocx::Point2d<f64>,
+        end: sdocx::Point2d<f64>,
         lc: Option<&LineColourEffect>,
         ls: Option<&LineStyleEffect>,
     ) -> Result<(), NoStyleError> {
@@ -297,8 +296,8 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
             return Err(NoStyleError);
         }
 
-        let start: pdf::Point = (start.x, start.y).into();
-        let end: pdf::Point = (end.x, end.y).into();
+        let start: pdf::Point2d = (start.x, start.y).into();
+        let end: pdf::Point2d = (end.x, end.y).into();
 
         let lc = match lc {
             Some(lc) => lc,
@@ -362,8 +361,8 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
                 let no_arrow_clip_pad = width * 3.0;
 
                 let line_dir = line_vec.normalize();
-                let up = pdf::Vector::new(line_dir.y, -line_dir.x) * width;
-                let down = pdf::Vector::new(-line_dir.y, line_dir.x) * width;
+                let up = pdf::Vector2d::new(line_dir.y, -line_dir.x) * width;
+                let down = pdf::Vector2d::new(-line_dir.y, line_dir.x) * width;
 
                 let mut clip = PathBuilder::new();
 

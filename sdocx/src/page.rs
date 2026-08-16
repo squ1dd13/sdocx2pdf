@@ -1,5 +1,5 @@
 use crate::{
-    OpaqueBytes, OpaqueBytesParseError,
+    Box2d, OpaqueBytes, OpaqueBytesParseError,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, ReadTimestampError,
@@ -11,13 +11,13 @@ use crate::{
     page::{
         header::{
             CanvasCacheEntry, CustomPageObject, CustomPageObjectParseError, PdfDataItemParseError,
-            PdfPage,
         },
         object::{DocObject, DocObjectParseContext, DocObjectParseError},
     },
     read_size_and_vec, unpack_bool_flag, unpack_bool_flags, unpack_field_flags,
 };
 use chrono::{DateTime, Utc};
+pub use header::PdfPage;
 use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -29,77 +29,6 @@ use thiserror::Error;
 
 mod header;
 pub mod object;
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct Point {
-    pub x: f64,
-    pub y: f64,
-}
-
-impl Point {
-    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> io::Result<Point> {
-        Ok(Point {
-            x: stream.read_f64_le()?,
-            y: stream.read_f64_le()?,
-        })
-    }
-
-    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Point> {
-        Ok(Point {
-            x: stream.read_f32_le()?.into(),
-            y: stream.read_f32_le()?.into(),
-        })
-    }
-}
-
-impl From<(f64, f64)> for Point {
-    fn from((x, y): (f64, f64)) -> Point {
-        Point { x, y }
-    }
-}
-
-impl From<Point> for (f64, f64) {
-    fn from(Point { x, y }: Point) -> (f64, f64) {
-        (x, y)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Rect {
-    pub left: f64,
-    pub top: f64,
-    pub right: f64,
-    pub bottom: f64,
-}
-
-impl Rect {
-    fn try_parse_f64<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
-        Ok(Rect {
-            left: stream.read_f64_le()?,
-            top: stream.read_f64_le()?,
-            right: stream.read_f64_le()?,
-            bottom: stream.read_f64_le()?,
-        })
-    }
-
-    fn try_parse_f32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
-        Ok(Rect {
-            left: stream.read_f32_le()?.into(),
-            top: stream.read_f32_le()?.into(),
-            right: stream.read_f32_le()?.into(),
-            bottom: stream.read_f32_le()?.into(),
-        })
-    }
-
-    fn try_parse_i32<T: ByteStreamLe>(stream: &mut T) -> io::Result<Rect> {
-        Ok(Rect {
-            left: stream.read_i32_le()?.into(),
-            top: stream.read_i32_le()?.into(),
-            right: stream.read_i32_le()?.into(),
-            bottom: stream.read_i32_le()?.into(),
-        })
-    }
-}
 
 #[derive(Error, Debug)]
 #[error(transparent)]
@@ -408,7 +337,7 @@ pub struct Page {
     format_version: u32,
     min_format_version: u32,
 
-    drawn_rect: Option<Rect>,
+    drawn_rect: Option<Box2d<f64>>,
     tags: Vec<String>,
     template_uri: Option<String>,
     background_image_id: Option<i32>,
@@ -459,7 +388,7 @@ impl Page {
             && self.layers.iter().all(|layer| layer.objects().is_empty())
     }
 
-    pub const fn drawn_rect(&self) -> Option<Rect> {
+    pub const fn drawn_rect(&self) -> Option<Box2d<f64>> {
         self.drawn_rect
     }
 
@@ -517,7 +446,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {
         }
 
         unpack_field_flags!(field_flags, {
-            0 => drawn_rect: Rect::try_parse_f64(reader)?;
+            0 => drawn_rect: Box2d::try_parse(reader)?;
             1 => tags: {
                 read_size_and_vec!(reader, u16, reader.read_short_u16_string()?)
             }, else vec![];

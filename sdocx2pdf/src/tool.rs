@@ -1,6 +1,5 @@
 use std::{borrow::Borrow, rc::Rc};
 
-use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
 use krilla::{
     color::rgb,
@@ -15,10 +14,9 @@ use ordered_float::OrderedFloat;
 use sdocx::page::object::stroke::{Event, LineType, Stroke};
 use thiserror::Error;
 
-use crate::stroke::{ContinuousStroke, StrokeOrDot};
 use crate::{
-    pdf::{self, Point, Vector},
-    stroke::FilteringMode,
+    pdf::{self, Point2d, Vector2d},
+    stroke::{ContinuousStroke, FilteringMode, StrokeOrDot},
 };
 
 /// A group of stroke events.
@@ -357,11 +355,7 @@ impl Tool {
     }
 }
 
-fn bezier_arc_control_points<T: num::Float, U>(
-    a: Point2D<T, U>,
-    b: Point2D<T, U>,
-    centre: Point2D<T, U>,
-) -> Option<[Point2D<T, U>; 2]> {
+fn bezier_arc_control_points(a: Point2d, b: Point2d, centre: Point2d) -> Option<[Point2d; 2]> {
     // fixme: This
     let x1 = a.x;
     let y1 = a.y;
@@ -375,8 +369,7 @@ fn bezier_arc_control_points<T: num::Float, U>(
     let by = y4 - yc;
     let q1 = ax * ax + ay * ay;
     let q2 = q1 + ax * bx + ay * by;
-    let k2 = (((q1 * q2 * T::from(2).unwrap()).sqrt() - q2) * T::from(4).unwrap())
-        / ((ax * by - ay * bx) * T::from(3).unwrap());
+    let k2 = (((q1 * q2 * 2.0).sqrt() - q2) * 4.0) / ((ax * by - ay * bx) * 3.0);
     let x2 = xc + ax - k2 * ay;
     let y2 = yc + ay + k2 * ax;
     let x3 = xc + bx + k2 * by;
@@ -391,12 +384,12 @@ fn bezier_arc_control_points<T: num::Float, U>(
 
 /// Returns the control points `(p1, p2)` for a cubic Bézier from `p0` to `p3` that passes through
 /// `a` at `t = 1/3` and `b` at `t = 2/3`.
-fn bezier_control_pts_for_intersections<U>(
-    p0: Point2D<f64, U>,
-    p3: Point2D<f64, U>,
-    a: Point2D<f64, U>,
-    b: Point2D<f64, U>,
-) -> (Point2D<f64, U>, Point2D<f64, U>) {
+fn bezier_control_pts_for_intersections(
+    p0: Point2d,
+    p3: Point2d,
+    a: Point2d,
+    b: Point2d,
+) -> (Point2d, Point2d) {
     let (p0, p3, a, b) = (p0.to_vector(), p3.to_vector(), a.to_vector(), b.to_vector());
 
     // Solution to the linear system formed by `f(1/3) = a` and `f(2/3) = b` where f is the
@@ -412,9 +405,9 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
 }
 
 fn append_bezier_pulley(
-    points_tangents_radii: [(Point, Vector, f64); 4],
+    points_tangents_radii: [(Point2d, Vector2d, f64); 4],
     draw_arcs: bool,
-    last_segment_tan: &mut Option<Vector>,
+    last_segment_tan: &mut Option<Vector2d>,
     path_builder: &mut PathBuilder,
 ) -> Result<(), ()> {
     let [
@@ -459,31 +452,31 @@ fn append_bezier_pulley(
         scaled_tangent_start
     };
 
-    let bottom_left = start_pos + Vector2D::new(-scaled_tangent_start.y, scaled_tangent_start.x);
+    let bottom_left = start_pos + Vector2d::new(-scaled_tangent_start.y, scaled_tangent_start.x);
 
-    let bottom_right = start_pos + Vector2D::new(scaled_tangent_start.y, -scaled_tangent_start.x);
+    let bottom_right = start_pos + Vector2d::new(scaled_tangent_start.y, -scaled_tangent_start.x);
 
     let lower_mid_left = pos_first_third
-        + Vector2D::new(-scaled_tangent_first_third.y, scaled_tangent_first_third.x);
+        + Vector2d::new(-scaled_tangent_first_third.y, scaled_tangent_first_third.x);
 
     let lower_mid_right = pos_first_third
-        + Vector2D::new(scaled_tangent_first_third.y, -scaled_tangent_first_third.x);
+        + Vector2d::new(scaled_tangent_first_third.y, -scaled_tangent_first_third.x);
 
     let upper_mid_left = pos_second_third
-        + Vector2D::new(
+        + Vector2d::new(
             -scaled_tangent_second_third.y,
             scaled_tangent_second_third.x,
         );
 
     let upper_mid_right = pos_second_third
-        + Vector2D::new(
+        + Vector2d::new(
             scaled_tangent_second_third.y,
             -scaled_tangent_second_third.x,
         );
 
-    let top_left = end_pos + Vector2D::new(-scaled_tangent_end.y, scaled_tangent_end.x);
+    let top_left = end_pos + Vector2d::new(-scaled_tangent_end.y, scaled_tangent_end.x);
 
-    let top_right = end_pos + Vector2D::new(scaled_tangent_end.y, -scaled_tangent_end.x);
+    let top_right = end_pos + Vector2d::new(scaled_tangent_end.y, -scaled_tangent_end.x);
 
     let (cp_lower_mid_left, cp_upper_mid_left) =
         bezier_control_pts_for_intersections(bottom_left, top_left, lower_mid_left, upper_mid_left);
@@ -576,11 +569,11 @@ fn append_bezier_pulley(
 }
 
 fn calc_pulley_line_points_acw_from_lower_right(
-    c1: Point,
+    c1: Point2d,
     r1: f64,
-    c2: Point,
+    c2: Point2d,
     r2: f64,
-) -> Option<[Point; 4]> {
+) -> Option<[Point2d; 4]> {
     let d = c1.distance_to(c2);
 
     if d == 0.0 {
@@ -598,8 +591,8 @@ fn calc_pulley_line_points_acw_from_lower_right(
     let (apb_s, apb_c) = (alpha + beta).sin_cos();
     let (amb_s, amb_c) = (alpha - beta).sin_cos();
 
-    let apb = Vector::new(apb_c, apb_s);
-    let amb = Vector::new(amb_c, amb_s);
+    let apb = Vector2d::new(apb_c, apb_s);
+    let amb = Vector2d::new(amb_c, amb_s);
 
     let right_start = c1 + amb * r1;
     let right_end = c2 + amb * r2;
@@ -611,7 +604,7 @@ fn calc_pulley_line_points_acw_from_lower_right(
 }
 
 fn append_simple_pulley(
-    [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
+    [(a, radius_a), (b, radius_b)]: [(Point2d, f64); 2],
     use_arcs: bool,
     path_builder: &mut PathBuilder,
 ) -> Result<(), ()> {
@@ -675,7 +668,7 @@ fn append_simple_pulley(
 }
 
 fn append_simple_line(
-    [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
+    [(a, radius_a), (b, radius_b)]: [(Point2d, f64); 2],
     round_ends: bool,
     path_builder: &mut PathBuilder,
 ) {
@@ -684,7 +677,7 @@ fn append_simple_line(
 
     let forwards = (b - a).normalize();
 
-    let left: Vector = (-forwards.y, forwards.x).into();
+    let left: Vector2d = (-forwards.y, forwards.x).into();
     let right = -left;
 
     if !forwards.is_finite() {
@@ -697,10 +690,10 @@ fn append_simple_line(
         // path, we can only approximate it using Bézier curves.
         let radius = (radius_a + radius_b) / 2.0;
 
-        let left = a + Vector::new(-radius, 0.0);
-        let right = a + Vector::new(radius, 0.0);
-        let top = a + Vector::new(0.0, radius);
-        let bottom = a + Vector::new(0.0, -radius);
+        let left = a + Vector2d::new(-radius, 0.0);
+        let right = a + Vector2d::new(radius, 0.0);
+        let top = a + Vector2d::new(0.0, radius);
+        let bottom = a + Vector2d::new(0.0, -radius);
 
         // Calculate the control points for the arc in each quadrant.
         // todo: Precompute these for the unit circle and translate as needed instead of
@@ -842,7 +835,7 @@ fn append_events_basic<'e>(
         StrokeOrDot::Stroke(stroke) => ContinuousStroke::new(&stroke, filtering),
 
         StrokeOrDot::Dot { x, y, pressure } => {
-            let pos: Point = (x, y).into();
+            let pos: Point2d = (x, y).into();
             let spread = pressure_to_circle_radius(pressure, pen_size);
 
             // Draw a filled circle.
@@ -855,11 +848,11 @@ fn append_events_basic<'e>(
     let target_angle = f64::to_radians(40.0);
     let sample_arc_lengths = smooth.sample_points(target_angle);
 
-    let mut last_segment_tan: Option<Vector> = None;
+    let mut last_segment_tan: Option<Vector2d> = None;
 
     for (iter_pos, (start_s, end_s)) in sample_arc_lengths.tuple_windows().with_position() {
-        let start_pos: Point = smooth.position(start_s).into();
-        let end_pos: Point = smooth.position(end_s).into();
+        let start_pos: Point2d = smooth.position(start_s).into();
+        let end_pos: Point2d = smooth.position(end_s).into();
 
         let start_spread = pressure_to_circle_radius(smooth.pressure(start_s), pen_size);
         let end_spread = pressure_to_circle_radius(smooth.pressure(end_s), pen_size);
@@ -885,20 +878,20 @@ fn append_events_basic<'e>(
                     let first_third_s = start_s.lerp(end_s, 1.0 / 3.0);
                     let second_third_s = start_s.lerp(end_s, 2.0 / 3.0);
 
-                    let first_third_pos: Point = smooth.position(first_third_s).into();
-                    let second_third_pos: Point = smooth.position(second_third_s).into();
+                    let first_third_pos: Point2d = smooth.position(first_third_s).into();
+                    let second_third_pos: Point2d = smooth.position(second_third_s).into();
 
                     [
                         (
                             start_pos,
-                            Some(Vector::from(smooth.unit_tangent(start_s)).normalize())
+                            Some(Vector2d::from(smooth.unit_tangent(start_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| (first_third_pos - start_pos).normalize()),
                             start_spread,
                         ),
                         (
                             first_third_pos,
-                            Some(Vector::from(smooth.unit_tangent(first_third_s)).normalize())
+                            Some(Vector2d::from(smooth.unit_tangent(first_third_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 // Note that we use the same fallback tangent for both middle
                                 // thirds.
@@ -909,7 +902,7 @@ fn append_events_basic<'e>(
                         ),
                         (
                             second_third_pos,
-                            Some(Vector::from(smooth.unit_tangent(second_third_s)).normalize())
+                            Some(Vector2d::from(smooth.unit_tangent(second_third_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| {
                                     (second_third_pos - first_third_pos).normalize()
@@ -918,7 +911,7 @@ fn append_events_basic<'e>(
                         ),
                         (
                             end_pos,
-                            Some(Vector::from(smooth.unit_tangent(end_s)).normalize())
+                            Some(Vector2d::from(smooth.unit_tangent(end_s)).normalize())
                                 .filter(|v| v.is_finite())
                                 .unwrap_or_else(|| (end_pos - second_third_pos).normalize()),
                             end_spread,

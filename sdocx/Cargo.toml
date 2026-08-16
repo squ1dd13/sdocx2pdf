@@ -22,3 +22,4 @@ zip = { version = "8", default-features = false, features = [
 either = "1.16.0"
 strum = { version = "0.28", features = ["derive"] }
 log = "0.4"
+euclid = "0.22"
