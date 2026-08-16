@@ -360,9 +360,6 @@ pub enum NoteDocParseError {
 
     #[error("{0} too large for `usize`")]
     UsizeTooSmall(u32),
-
-    #[error("computed hash does not match hash in stream")]
-    HashMismatch,
 }
 
 /// `libSpen_worddoc.dll`
@@ -576,7 +573,7 @@ impl<R: Read + Seek> TryParseWithContext<R, FileRegistry> for NoteDoc {
         };
 
         if calculated_hash[..] != hash_in_stream {
-            return Err(NoteDocParseError::HashMismatch);
+            warn!("Stated hash for note header does not match calculated hash");
         }
 
         Ok(NoteDoc {

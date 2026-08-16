@@ -129,9 +129,6 @@ pub enum LayerParseError {
     #[error("objects with children are not supported (child count = {0})")]
     ObjectHasChildren(u16),
 
-    #[error("hash mismatch for object {0}")]
-    ObjectHashMismatch(String),
-
     #[error("too many objects {0}")]
     TooManyObjects(u32),
 }
@@ -270,12 +267,9 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
                     object_hash != hash_read
                 })
             {
-                // Older notes (and some pen/object variants) fail this integrity check even when
-                // the object body itself parses. Treat as a soft warning so conversion can continue.
-                // Observed on format_version 2034 notes where every stroke object mismatched while
-                // the parsed content still produced a correct vector PDF.
                 warn!(
-                    "Object hash mismatch for {} (type {object_type}); continuing without aborting.",
+                    "Hash mismatch for '{}' object (uuid = {})",
+                    <&str>::from(&object),
                     object.object_base().uuid()
                 );
             }

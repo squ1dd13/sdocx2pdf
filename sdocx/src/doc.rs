@@ -6,6 +6,7 @@ use std::{
 };
 
 use either::Either;
+use log::warn;
 use thiserror::Error;
 use zip::{HasZipMetadata, ZipArchive};
 
@@ -33,12 +34,6 @@ pub enum DocumentError {
 
     #[error("'{0}' is not in the zip archive")]
     MissingArchiveEntry(Cow<'static, str>),
-
-    #[error("hash in page list does not match note file")]
-    PageListHashMismatch,
-
-    #[error("incorrect hash for page '{0}'")]
-    PageHashMismatch(String),
 
     #[error("uncompressed size {0} is too large")]
     FileTooBig(u64),
@@ -143,7 +138,7 @@ impl Document {
         };
 
         if &note_hash != note.hash() {
-            return Err(DocumentError::PageListHashMismatch);
+            warn!("Hash in page list does not match note hash");
         }
 
         // Parse the file corresponding to each page reference.
@@ -156,11 +151,9 @@ impl Document {
                 entry_cursor!(archive, file_name, |name, mut reader| {
                     Page::try_parse_with_ctx(&mut reader, &page_ctx)
                         .map_err(From::from)
-                        .and_then(|p| {
+                        .inspect(|p| {
                             if &hash != p.hash() {
-                                Err(DocumentError::PageHashMismatch(name))
-                            } else {
-                                Ok(p)
+                                warn!("Hash mismatch for page in file '{}'", name);
                             }
                         })
                 })
@@ -205,7 +198,7 @@ impl Document {
         };
 
         if &note_hash != note.hash() {
-            return Err(DocumentError::PageListHashMismatch);
+            warn!("Hash in page list does not match note hash");
         }
 
         // Parse the file corresponding to each page reference.
@@ -218,14 +211,9 @@ impl Document {
                 // Use a `BufReader` for pages because they can get very large (several MB), and
                 // are parsed using loads of tiny reads.
                 Page::try_parse_with_ctx(&mut BufReader::new(File::open(&file_name)?), &page_ctx)
-                    .map_err(From::from)
-                    .and_then(|p| {
+                    .inspect(|p| {
                         if &hash != p.hash() {
-                            Err(DocumentError::PageHashMismatch(
-                                file_name.display().to_string(),
-                            ))
-                        } else {
-                            Ok(p)
+                            warn!("Hash mismatch for page in file '{}'", file_name.display());
                         }
                     })
             })
