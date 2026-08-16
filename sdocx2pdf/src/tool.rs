@@ -1,7 +1,14 @@
-use std::rc::Rc;
+use std::{borrow::Borrow, rc::Rc};
 
 use euclid::{Point2D, Vector2D};
 use itertools::{Either, Itertools};
+use krilla::{
+    color::rgb,
+    geom::{Path, PathBuilder},
+    num::NormalizedF32,
+    paint,
+    surface::Surface,
+};
 use lerp::Lerp;
 use log::warn;
 use ordered_float::OrderedFloat;
@@ -10,7 +17,7 @@ use thiserror::Error;
 
 use crate::stroke::{ContinuousStroke, StrokeOrDot};
 use crate::{
-    pdf::{self, Point, Vector, dictionary},
+    pdf::{self, Point, Vector},
     stroke::FilteringMode,
 };
 
@@ -208,48 +215,12 @@ impl Tool {
         )
     }
 
-    pub fn create_egs(&self) -> pdf::Dictionary {
-        let mut dict = pdf::dictionary! {
-            "Type" => "ExtGState",
-            // Round line cap style
-            "LC" => 1,
-        };
-
-        let alpha = self.basics().colour_bgra[3];
-
-        if alpha != 255 {
-            let alpha = (alpha as f32) / 255.0;
-
-            // Stroke alpha
-            dict.set("CA", alpha);
-            // Fill alpha
-            dict.set("ca", alpha);
-
-            if self.is_like_highlighter() {
-                // Multiply blend mode
-                dict.set("BM", pdf::Object::Name(b"Multiply".to_vec()));
-            }
-        }
-
-        // todo: Soft masks for pencil and calligraphy brush
-
-        dict
-    }
-
-    /// Extends `ops` with the necessary operations to draw each slice of stroke events in
-    /// `strokes` using this tool. The strokes are drawn in order. Translucent strokes are drawn by
-    /// filling a `page_size` rectangle and clipping it to the shape of the stroke.
-    pub fn draw_events<'e>(
+    fn draw_paths<'p>(
         &self,
-        graphics_dict_name: pdf::GraphicsDictName,
-        page_size: (f32, f32),
-        strokes: impl IntoIterator<Item = EventGroup<'e>>,
-        ops: &mut Vec<pdf::Operation>,
-    ) -> Result<(), ()> {
-        if matches!(self, Tool::Tape(_)) {
-            warn!("Tape is not yet fully supported and will likely look incorrect");
-        }
-
+        paths: impl IntoIterator<Item = impl Borrow<Path> + 'p>,
+        fill_boundary: &Path,
+        surface: &mut Surface<'_>,
+    ) {
         let &Basics {
             size: OrderedFloat(size),
             colour_bgra: [b, g, r, a],
@@ -260,17 +231,109 @@ impl Tool {
             warn!("Dashed and dotted lines are not yet supported; will be drawn solid");
         }
 
-        ops.extend([
-            pdf::save_graphics_state(),
-            pdf::load_graphics_dict(graphics_dict_name),
-            pdf::set_fill_colour(r, g, b),
-            pdf::set_stroke_colour(r, g, b),
-        ]);
+        // todo: Soft masks for pencil and calligraphy brush
+        // todo: Allow dashed/dotted lines because krilla supports them
+
+        if self.is_like_highlighter() {
+            surface.push_blend_mode(krilla::blend::BlendMode::Multiply);
+        }
+
+        let paint: paint::Paint = rgb::Color::new(r, g, b).into();
+        let opacity = NormalizedF32::new(a as f32 / 255.0).unwrap();
+        let is_opaque = a == 255;
 
         if self.is_straight_only() {
-            for events in strokes {
-                draw_events_straight(events, size, ops);
+            // Will be drawn as a single path consisting of straight line segments, so we don't
+            // need to fill anything.
+            surface.set_fill(None);
+            surface.set_stroke(Some(paint::Stroke {
+                paint,
+                width: size,
+                line_cap: krilla::paint::LineCap::Round,
+                opacity,
+                ..paint::Stroke::default()
+            }));
+
+            for path in paths {
+                surface.draw_path(path.borrow());
             }
+
+            if self.is_like_highlighter() {
+                // Pop blend mode
+                surface.pop();
+            }
+
+            return;
+        }
+
+        surface.set_stroke(None);
+        surface.set_fill(Some(paint::Fill {
+            paint,
+            opacity,
+            rule: paint::FillRule::NonZero,
+        }));
+
+        for path in paths {
+            // Self-intersecting strokes from translucent tools should not blend on top of
+            // themselves. To achieve this effect, we can use the stroke path to clip a translucent
+            // rectangle (that is guaranteed to cover the area containing the stroke) rather than
+            // filling the path directly. Non-zero filling doesn't care about the
+            // self-intersections in the clipping path, and since there is only ever one path
+            // filled - the rectangle - we end up with the self-intersections being invisible in
+            // the result.
+            //
+            // This method works for opaque paths as well, so in theory we could use it as our only
+            // mode of drawing. However, some PDF viewers optimise the two modes differently. When
+            // not zoomed in closely, Firefox (pdf.js) appears to disable antialiasing for clipping
+            // paths for performance, and the result is that strokes drawn in that way do not look
+            // as good as ones filled directly. For translucent strokes we don't really have a
+            // choice, but for opaque strokes we do, and so we fill the latter directly.
+            if is_opaque {
+                surface.draw_path(path.borrow());
+            } else {
+                surface.push_clip_path(path.borrow(), &paint::FillRule::NonZero);
+                surface.draw_path(fill_boundary);
+                surface.pop();
+            }
+        }
+
+        if self.is_like_highlighter() {
+            // Pop blend mode
+            surface.pop();
+        }
+    }
+
+    /// Extends `ops` with the necessary operations to draw each slice of stroke events in
+    /// `strokes` using this tool. The strokes are drawn in order. Some strokes are turned into
+    /// clipping paths and the actual drawing is done by filling `fill_boundary` with the required
+    /// colour. Thus, `fill_boundary` should enclose area in which the strokes must be visible
+    /// (the boundary of the whole page is a good choice).
+    pub fn draw_events<'e>(
+        &self,
+        strokes: impl IntoIterator<Item = EventGroup<'e>>,
+        fill_boundary: &Path,
+        surface: &mut Surface<'_>,
+    ) -> Result<(), ()> {
+        if matches!(self, Tool::Tape(_)) {
+            warn!("Tape is not yet fully supported and will likely look incorrect");
+        }
+
+        let &Basics {
+            size: OrderedFloat(size),
+            line_type,
+            ..
+        } = self.basics();
+
+        if !line_type.is_continuous() {
+            warn!("Dashed and dotted lines are not yet supported; will be drawn solid");
+        }
+
+        let paths = if self.is_straight_only() {
+            Either::Left(strokes.into_iter().map(move |events| {
+                let mut pb = PathBuilder::new();
+                append_events_straight(events, &mut pb);
+                pb.finish().unwrap()
+            }))
         } else {
             // Increase the width for non-straight highlighters/markers.
             let size = if self.is_like_highlighter() {
@@ -281,46 +344,14 @@ impl Tool {
 
             let pressure_override = (!self.is_pressure_sensitive()).then_some(0.45);
 
-            // If the alpha isn't full, we specify the shape of the stroke without immediately
-            // trying to draw it so we can use the clipping-based drawing method instead.
-            let specify_only = a != 255;
+            Either::Right(strokes.into_iter().filter_map(move |events| {
+                let mut pb = PathBuilder::new();
+                append_events_basic(events, size, pressure_override, ArcMode::All, &mut pb);
+                pb.finish()
+            }))
+        };
 
-            if specify_only {
-                for events in strokes {
-                    ops.push(pdf::save_graphics_state());
-
-                    draw_events_basic(
-                        events,
-                        size,
-                        pressure_override,
-                        ArcMode::All,
-                        specify_only,
-                        ops,
-                    );
-
-                    ops.extend(pdf::clip(pdf::WindingRule::NonZero));
-
-                    ops.extend([
-                        pdf::specify_rectangle([0.0, 0.0, page_size.0, page_size.1]),
-                        pdf::fill(),
-                        pdf::restore_graphics_state(),
-                    ]);
-                }
-            } else {
-                for events in strokes {
-                    draw_events_basic(
-                        events,
-                        size,
-                        pressure_override,
-                        ArcMode::All,
-                        specify_only,
-                        ops,
-                    );
-                }
-            }
-        }
-
-        ops.push(pdf::restore_graphics_state());
+        self.draw_paths(paths, fill_boundary, surface);
 
         Ok(())
     }
@@ -380,12 +411,11 @@ fn pressure_to_circle_radius(pressure: f64, pen_size: f64) -> f64 {
     0.5 * pen_size * pressure.clamp(0.4, 0.7)
 }
 
-fn draw_bezier_pulley(
+fn append_bezier_pulley(
     points_tangents_radii: [(Point, Vector, f64); 4],
     draw_arcs: bool,
     last_segment_tan: &mut Option<Vector>,
-    specify_only: bool,
-    ops: &mut Vec<pdf::Operation>,
+    path_builder: &mut PathBuilder,
 ) -> Result<(), ()> {
     let [
         (start_pos, start_tangent, start_spread),
@@ -541,15 +571,7 @@ fn draw_bezier_pulley(
         )
     };
 
-    if specify_only {
-        ops.extend(pdf::specify_polygon(points));
-    } else {
-        ops.extend(pdf::draw_polygon(
-            points,
-            pdf::PolygonDrawMode::Fill(pdf::WindingRule::NonZero),
-        ));
-    }
-
+    pdf::specify_polygon(points, path_builder);
     Ok(())
 }
 
@@ -588,11 +610,10 @@ fn calc_pulley_line_points_acw_from_lower_right(
     Some([right_start, right_end, left_start, left_end])
 }
 
-fn draw_simple_pulley(
+fn append_simple_pulley(
     [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
     use_arcs: bool,
-    specify_only: bool,
-    ops: &mut Vec<pdf::Operation>,
+    path_builder: &mut PathBuilder,
 ) -> Result<(), ()> {
     let [a_right, b_right, b_left, a_left] =
         calc_pulley_line_points_acw_from_lower_right(a, radius_a, b, radius_b).ok_or(())?;
@@ -649,56 +670,48 @@ fn draw_simple_pulley(
         )
     };
 
-    if specify_only {
-        ops.extend(pdf::specify_polygon(points));
-    } else {
-        ops.extend(pdf::draw_polygon(
-            points,
-            pdf::PolygonDrawMode::Fill(pdf::WindingRule::NonZero),
-        ));
-    }
-
+    pdf::specify_polygon(points, path_builder);
     Ok(())
 }
 
-fn draw_simple_line(
+fn append_simple_line(
     [(a, radius_a), (b, radius_b)]: [(Point, f64); 2],
     round_ends: bool,
-    specify_only: bool,
-    ops: &mut Vec<pdf::Operation>,
+    path_builder: &mut PathBuilder,
 ) {
-    if specify_only {
-        use pdf::PolygonPoint::{Control, Normal};
+    // if specify_only {
+    use pdf::PolygonPoint::{Control, Normal};
 
-        let forwards = (b - a).normalize();
+    let forwards = (b - a).normalize();
 
-        let left: Vector = (-forwards.y, forwards.x).into();
-        let right = -left;
+    let left: Vector = (-forwards.y, forwards.x).into();
+    let right = -left;
 
-        if !forwards.is_finite() {
-            if !round_ends {
-                // A zero-length line with butt caps is invisible.
-                return;
-            }
+    if !forwards.is_finite() {
+        if !round_ends {
+            // A zero-length line with butt caps is invisible.
+            return;
+        }
 
-            // The points are equal. We need to draw a circle, but as we are specifying it as a
-            // path, we can only approximate it using Bézier curves.
-            let radius = (radius_a + radius_b) / 2.0;
+        // The points are equal. We need to draw a circle, but as we are specifying it as a
+        // path, we can only approximate it using Bézier curves.
+        let radius = (radius_a + radius_b) / 2.0;
 
-            let left = a + Vector::new(-radius, 0.0);
-            let right = a + Vector::new(radius, 0.0);
-            let top = a + Vector::new(0.0, radius);
-            let bottom = a + Vector::new(0.0, -radius);
+        let left = a + Vector::new(-radius, 0.0);
+        let right = a + Vector::new(radius, 0.0);
+        let top = a + Vector::new(0.0, radius);
+        let bottom = a + Vector::new(0.0, -radius);
 
-            // Calculate the control points for the arc in each quadrant.
-            // todo: Precompute these for the unit circle and translate as needed instead of
-            // calculating them every time.
-            let [q1_c1, q1_c2] = bezier_arc_control_points(right, top, a).unwrap();
-            let [q2_c1, q2_c2] = bezier_arc_control_points(top, left, a).unwrap();
-            let [q3_c1, q3_c2] = bezier_arc_control_points(left, bottom, a).unwrap();
-            let [q4_c1, q4_c2] = bezier_arc_control_points(bottom, right, a).unwrap();
+        // Calculate the control points for the arc in each quadrant.
+        // todo: Precompute these for the unit circle and translate as needed instead of
+        // calculating them every time.
+        let [q1_c1, q1_c2] = bezier_arc_control_points(right, top, a).unwrap();
+        let [q2_c1, q2_c2] = bezier_arc_control_points(top, left, a).unwrap();
+        let [q3_c1, q3_c2] = bezier_arc_control_points(left, bottom, a).unwrap();
+        let [q4_c1, q4_c2] = bezier_arc_control_points(bottom, right, a).unwrap();
 
-            ops.extend(pdf::specify_polygon([
+        pdf::specify_polygon(
+            [
                 Normal(right),
                 Control(q1_c1),
                 Control(q1_c2),
@@ -712,51 +725,57 @@ fn draw_simple_line(
                 Control(q4_c1),
                 Control(q4_c2),
                 Normal(right),
-            ]));
+            ],
+            path_builder,
+        );
 
+        return;
+    }
+
+    let bottom_right = a + right * radius_a;
+    let top_right = b + right * radius_b;
+    let top_left = b + left * radius_b;
+    let bottom_left = a + left * radius_a;
+
+    if !round_ends {
+        // A zero-length line with butt caps is invisible.
+        if !forwards.is_finite() {
             return;
         }
 
-        let bottom_right = a + right * radius_a;
-        let top_right = b + right * radius_b;
-        let top_left = b + left * radius_b;
-        let bottom_left = a + left * radius_a;
-
-        if !round_ends {
-            // A zero-length line with butt caps is invisible.
-            if !forwards.is_finite() {
-                return;
-            }
-
-            ops.extend(pdf::specify_polygon([
+        pdf::specify_polygon(
+            [
                 Normal(bottom_right),
                 Normal(top_right),
                 Normal(top_left),
                 Normal(bottom_left),
-            ]));
-
-            return;
-        }
-
-        // Non-zero length line with round ends. We could make this look like the normal case where
-        // we take the mean radius, but since we have to draw a path instead of a line, we might as
-        // well take advantage of the fact we can use different widths at the start and end.
-        let bottom_arc_lowest = a - forwards * radius_a;
-        let top_arc_highest = b + forwards * radius_b;
-
-        let (
-            [top_right_to_arc_highest_cp1, top_right_to_arc_highest_cp2],
-            [top_arc_highest_to_left_cp1, top_arc_highest_to_left_cp2],
-            [bot_left_to_arc_lowest_cp1, bot_left_to_arc_lowest_cp2],
-            [bot_arc_lowest_to_right_cp1, bot_arc_lowest_to_right_cp2],
-        ) = (
-            bezier_arc_control_points(top_right, top_arc_highest, b).unwrap(),
-            bezier_arc_control_points(top_arc_highest, top_left, b).unwrap(),
-            bezier_arc_control_points(bottom_left, bottom_arc_lowest, a).unwrap(),
-            bezier_arc_control_points(bottom_arc_lowest, bottom_right, a).unwrap(),
+            ],
+            path_builder,
         );
 
-        ops.extend(pdf::specify_polygon([
+        return;
+    }
+
+    // Non-zero length line with round ends. We could make this look like the normal case where
+    // we take the mean radius, but since we have to draw a path instead of a line, we might as
+    // well take advantage of the fact we can use different widths at the start and end.
+    let bottom_arc_lowest = a - forwards * radius_a;
+    let top_arc_highest = b + forwards * radius_b;
+
+    let (
+        [top_right_to_arc_highest_cp1, top_right_to_arc_highest_cp2],
+        [top_arc_highest_to_left_cp1, top_arc_highest_to_left_cp2],
+        [bot_left_to_arc_lowest_cp1, bot_left_to_arc_lowest_cp2],
+        [bot_arc_lowest_to_right_cp1, bot_arc_lowest_to_right_cp2],
+    ) = (
+        bezier_arc_control_points(top_right, top_arc_highest, b).unwrap(),
+        bezier_arc_control_points(top_arc_highest, top_left, b).unwrap(),
+        bezier_arc_control_points(bottom_left, bottom_arc_lowest, a).unwrap(),
+        bezier_arc_control_points(bottom_arc_lowest, bottom_right, a).unwrap(),
+    );
+
+    pdf::specify_polygon(
+        [
             Normal(top_right),
             Control(top_right_to_arc_highest_cp1),
             Control(top_right_to_arc_highest_cp2),
@@ -771,27 +790,9 @@ fn draw_simple_line(
             Control(bot_arc_lowest_to_right_cp1),
             Control(bot_arc_lowest_to_right_cp2),
             Normal(bottom_right),
-        ]));
-
-        return;
-    }
-
-    ops.extend([
-        pdf::save_graphics_state(),
-        if round_ends {
-            pdf::set_line_cap_round()
-        } else {
-            pdf::set_line_cap_butt()
-        },
-        // The effective radius is the mean of the radii at `a` and `b`, so the _width_ of the line
-        // is the sum.
-        pdf::set_stroke_width((radius_a + radius_b) as f32),
-    ]);
-
-    ops.extend(pdf::draw_line(a, b));
-    ops.push(pdf::restore_graphics_state());
-
-    // todo: Draw line with width equal to the smaller radius and add a dot for the bigger radius?
+        ],
+        path_builder,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -820,13 +821,12 @@ enum ArcMode {
 /// smoother connections, but increase the file size. They also necessarily overlap the next
 /// segment, making them inappropriate for strokes with transparency (because you can see the
 /// arcs).
-fn draw_events_basic<'e>(
+fn append_events_basic<'e>(
     events: EventGroup<'e>,
     pen_size: f32,
     pressure_override: Option<f64>,
     arc_mode: ArcMode,
-    specify_only: bool,
-    ops: &mut Vec<pdf::Operation>,
+    path_builder: &mut PathBuilder,
 ) {
     let pen_size: f64 = pen_size.into();
 
@@ -846,8 +846,7 @@ fn draw_events_basic<'e>(
             let spread = pressure_to_circle_radius(pressure, pen_size);
 
             // Draw a filled circle.
-            ops.push(pdf::set_stroke_width(spread as f32 * 2.0));
-            ops.extend(pdf::draw_line(pos, pos));
+            append_simple_line([(pos, spread), (pos, spread)], true, path_builder);
 
             return;
         }
@@ -881,7 +880,7 @@ fn draw_events_basic<'e>(
         // If the segment is not short, try drawing a Bézier pulley. If that doesn't work, or
         // if the segment is short, use a simpler method.
         if is_quite_short
-            || draw_bezier_pulley(
+            || append_bezier_pulley(
                 {
                     let first_third_s = start_s.lerp(end_s, 1.0 / 3.0);
                     let second_third_s = start_s.lerp(end_s, 2.0 / 3.0);
@@ -928,8 +927,7 @@ fn draw_events_basic<'e>(
                 },
                 want_arcs,
                 &mut last_segment_tan,
-                specify_only,
-                ops,
+                path_builder,
             )
             .is_err()
         {
@@ -939,22 +937,19 @@ fn draw_events_basic<'e>(
 
             // If the segment is quite short but not very short, try drawing a simple pulley.
             // If that doesn't work, or if the segment is very short, draw a simple line.
-            if is_very_short || draw_simple_pulley(points, want_arcs, specify_only, ops).is_err() {
-                draw_simple_line(points, want_arcs, specify_only, ops);
+            if is_very_short || append_simple_pulley(points, want_arcs, path_builder).is_err() {
+                append_simple_line(points, want_arcs, path_builder);
             }
         }
     }
 }
 
-fn draw_events_straight<'e>(events: EventGroup<'e>, pen_size: f32, ops: &mut Vec<pdf::Operation>) {
+fn append_events_straight<'e>(events: EventGroup<'e>, path_builder: &mut PathBuilder) {
     let events = events.events();
 
     let first = events.first().unwrap();
     let last = events.last().unwrap();
 
-    ops.push(pdf::set_stroke_width(pen_size));
-    ops.extend(pdf::draw_line(
-        <(f64, f64)>::from(first.point).into(),
-        <(f64, f64)>::from(last.point).into(),
-    ));
+    path_builder.move_to(first.point.x as f32, first.point.y as f32);
+    path_builder.line_to(last.point.x as f32, last.point.y as f32);
 }

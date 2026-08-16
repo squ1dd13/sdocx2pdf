@@ -1,25 +1,31 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
-    io::Write,
-    path::{Path, PathBuf},
+    io::{Read, Write},
+    path::PathBuf,
     process::ExitCode,
+    sync::Arc,
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use jiff::{
     Timestamp,
     fmt::{StdIoWrite, strtime::BrokenDownTime},
 };
+use krilla::{
+    geom::{Size, Transform},
+    metadata::Metadata,
+    page::PageSettings,
+    pdf::{Pdf, PdfDocument},
+};
 use log::{info, warn};
 use num::ToPrimitive;
 use sdocx::{Document, DocumentError, MediaStorage, PageModel, page::object::InlineObject};
-use thiserror::Error;
 
-use crate::{page::PageConversionCtx, pdf::dictionary};
+use crate::page::PageConversionCtx;
 
 mod page;
 mod pdf;
@@ -72,42 +78,6 @@ struct Args {
     #[arg(help = "Path to write the PDF to", long_help)]
     out: PathBuf,
 
-    /// Inserts page breaks into pageless documents between pages of any embedded PDFs.
-    /// Disabled by default.
-    ///
-    /// By default, a pageless document will be converted to a PDF containing a long single page.
-    /// With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are
-    /// inserted to match the page breaks in the embedded PDFs. For example, if you import a
-    /// five-page PDF into a blank pageless document and annotate it, auto-splitting will give you
-    /// a five-page PDF rather than a single-page PDF.
-    ///
-    /// This option does nothing when converting a paged document. It also does nothing for
-    /// pageless documents that do not embed any PDFs; see the basic splitting option.
-    #[arg(
-        long,
-        help = "Add page breaks to pageless documents matching breaks in any embedded PDFs",
-        long_help
-    )]
-    auto_split: bool,
-
-    /// Specifies the page-splitting behaviour used for pageless documents when auto-splitting is
-    /// not in effect, either because it is disabled or because the document being converted does
-    /// not embed any PDFs.
-    ///
-    /// Basic splitting is disabled by default, resulting in long single-page PDFs when
-    /// auto-splitting is not used. To use basic splitting only, specify a mode and do not enable
-    /// auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting
-    /// is used as a fallback when there are no PDFs embedded in the document. If auto-splitting is
-    /// enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those
-    /// that don't will not be split at all.
-    #[arg(
-        long,
-        help = "Page-splitting mode for pageless documents without embedded PDFs \
-        or for when auto-splitting is disabled",
-        long_help
-    )]
-    basic_split: Option<BasicSplitMode>,
-
     /// Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink pen,
     /// calligraphy brush and pencil.
     ///
@@ -146,131 +116,6 @@ struct Args {
     detailed_errors: bool,
 }
 
-/// Looks for `key` in `current_dict` and its parents, climbing up the tree either until it reaches
-/// the top or finds a (grand)*parent that contains the key.
-fn get_inherited_attr<'dc>(
-    mut current_dict: &'dc pdf::Dictionary,
-    key: &[u8],
-    doc: &'dc pdf::Pdf,
-) -> Option<&'dc pdf::Object> {
-    loop {
-        if let Ok(v) = current_dict.get(key) {
-            return Some(v);
-        }
-
-        match current_dict.get(b"Parent") {
-            Ok(&pdf::Object::Reference(parent_id)) => {
-                current_dict = doc.get_dictionary(parent_id).ok()?;
-            }
-
-            _ => return None,
-        };
-    }
-}
-
-#[derive(Error, Debug)]
-#[error(transparent)]
-enum EmbeddedPdfError {
-    Io(#[from] std::io::Error),
-    Pdf(#[from] pdf::Error),
-
-    #[error("page has no MediaBox entry")]
-    MissingMediaBox,
-
-    #[error("page has no Resources entry")]
-    MissingResources,
-}
-
-struct EmbeddedPdf {
-    /// The IDs in the destination PDF of the pages copied over from the source PDF, in order.
-    src_page_ids: Vec<pdf::ObjectId>,
-}
-
-impl EmbeddedPdf {
-    fn embed(
-        src_name: impl AsRef<Path>,
-        media_storage: &mut sdocx::MediaStorage,
-        dest_pdf: &mut pdf::Pdf,
-    ) -> Result<EmbeddedPdf, EmbeddedPdfError> {
-        // Open and parse the PDF we're embedding.
-        let mut src_pdf = pdf::Pdf::load_from(media_storage.open_file(src_name)?)?;
-
-        // Renumber the objects in the source so their IDs don't collide with those in the
-        // destination. This lets us move objects from the source to the destination directly,
-        // including images, fonts, etc.
-        src_pdf.renumber_objects_with(dest_pdf.max_id + 1);
-
-        // `page_iter` is in order, so the nth element of this vector is the ID of the nth source
-        // page. This is useful because `sdocx` files refer to pages by indices.
-        let src_page_ids: Vec<_> = src_pdf.page_iter().collect();
-
-        // Move all the objects from the source over to the destination.
-        dest_pdf.objects.extend(src_pdf.objects);
-
-        // Having manually inserted objects, we must manually update the max ID.
-        dest_pdf.max_id = src_pdf.max_id;
-
-        Ok(EmbeddedPdf { src_page_ids })
-    }
-
-    /// Adds to `dest_pdf` an XObject containing the contents of the page at `index` in the source
-    /// PDF. The ID of the XObject is returned along with the width and height of the source page.
-    fn create_page_xobject(
-        &self,
-        index: u32,
-        dest_pdf: &mut pdf::Pdf,
-    ) -> Result<(pdf::ObjectId, f32, f32), EmbeddedPdfError> {
-        let page_id = self.src_page_ids[index as usize];
-
-        let (media_box, resources) = {
-            let dict = dest_pdf.get_object(page_id)?.as_dict()?;
-
-            (
-                get_inherited_attr(dict, b"MediaBox", dest_pdf)
-                    .ok_or(EmbeddedPdfError::MissingMediaBox)?,
-                get_inherited_attr(dict, b"Resources", dest_pdf)
-                    .ok_or(EmbeddedPdfError::MissingResources)?,
-            )
-        };
-
-        let (src_width, src_height, src_left, src_bottom) = {
-            // [left, bottom, right, top]. Can be `Integer`s or `Real`s, but `as_float` doesn't
-            // care which.
-            let a = media_box.as_array()?;
-
-            (
-                dest_pdf.dereference(&a[2])?.1.as_float()?
-                    - dest_pdf.dereference(&a[0])?.1.as_float()?,
-                dest_pdf.dereference(&a[3])?.1.as_float()?
-                    - dest_pdf.dereference(&a[1])?.1.as_float()?,
-                dest_pdf.dereference(&a[0])?.1.as_float()?,
-                dest_pdf.dereference(&a[1])?.1.as_float()?,
-            )
-        };
-
-        // Even though the source page won't show up in the destination as a normal page, the
-        // object is still in there, so we can ask the destination PDF for the content.
-        let content = dest_pdf.get_page_content(page_id)?;
-
-        let xobj_dict = pdf::dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
-            "FormType" => 1,
-            "BBox" => media_box.clone(),
-            // Translate the content back to the origin so it can be positioned using the graphics
-            // state transformation matrix without awareness of its original position.
-            "Matrix" => pdf::matrix_vec([1.0, 0.0, 0.0, 1.0, -src_left, -src_bottom]),
-            "Resources" => resources.clone(),
-        };
-
-        // Add a `Stream` object containing the XObject stream.
-        let xobj_id =
-            dest_pdf.add_object(pdf::Object::Stream(pdf::Stream::new(xobj_dict, content)));
-
-        Ok((xobj_id, src_width, src_height))
-    }
-}
-
 fn group_inline_objects_by_page(document: &Document) -> Vec<Vec<&InlineObject>> {
     let mut by_page = vec![Vec::new(); document.pages().len()];
 
@@ -300,11 +145,10 @@ fn group_inline_objects_by_page(document: &Document) -> Vec<Vec<&InlineObject>> 
 fn create_document_pdf(
     document: &Document,
     media_storage: &mut MediaStorage,
-    document_name: &str,
     pageless: bool,
     multi_progress: &MultiProgress,
     args: &Args,
-) -> Result<pdf::Pdf, anyhow::Error> {
+) -> Result<krilla::Document, anyhow::Error> {
     // Only show a progress bar for the pages if there is more than one.
     let pages_bar = if let page_count @ 2.. = document.pages().len() as u64 {
         Some(
@@ -318,28 +162,14 @@ fn create_document_pdf(
         None
     };
 
-    let mut pdf = pdf::Pdf::with_version("1.5");
-
-    // (Used `printpdf::serialize::to_pdf_doc` as a reference for the basic setup)
-    let pages_id = pdf.new_object_id();
-
-    let catalog = pdf::dictionary! {
-        "Type" => "Catalog",
-        "PageLayout" => "OneColumn",
-        "PageMode" => "UseNone",
-        "Pages" => pages_id,
-    };
-
-    let mut page_id_refs = Vec::with_capacity(document.pages().len());
+    let mut pdf = krilla::Document::new();
 
     const A4_PTRT_WIDTH_PT: f32 = 210.0 * 2.84526;
     const A4_PTRT_HEIGHT_PT: f32 = 297.0 * 2.84526;
 
-    // Maps the names of PDF files to `EmbeddedPdf`s that can be used to place pages from the PDFs
+    // Maps the names of PDF files to `PdfDocument`s that can be used to place pages from the PDFs
     // into the output PDF.
     let mut embedded_pdfs = HashMap::new();
-
-    let mut auto_split_points = Vec::new();
 
     // Since we work in pages, we need the inline objects grouped by page.
     let inline_objects_by_page = group_inline_objects_by_page(document);
@@ -367,7 +197,7 @@ fn create_document_pdf(
         let page_h_internal = page_h_internal.to_f32().unwrap();
 
         // Use A4 width for the smaller dimension of the page. When the paged A4 mode is used in
-        // the app, this results in A4-sized pages for both portrait and lanscape. For pageless
+        // the app, this results in A4-sized pages for both portrait and landscape. For pageless
         // documents and for the app's "long portrait" option, the width is that of A4, with the
         // height scaled accordingly.
         let pt_per_unit = A4_PTRT_WIDTH_PT / page_w_internal.min(page_h_internal);
@@ -419,105 +249,79 @@ fn create_document_pdf(
             }
         };
 
-        let mut page_ctx = PageConversionCtx::new((page_w_internal, page_h_internal));
+        let mut pdf_page = pdf.start_page_with(PageSettings::new(
+            Size::from_wh(page_w_pt, page_h_pt).expect("page size calculation failed"),
+        ));
+
+        let mut page_ctx = PageConversionCtx::new(
+            (page_w_internal, page_h_internal),
+            pt_per_unit,
+            pdf_page.surface(),
+        );
 
         if let Some([b, g, r, a]) = page.background_colour() {
-            let name = page_ctx.add_graphics_dict(pdf::dictionary! {
-                "Type" => "ExtGState",
-                // Fill alpha
-                "ca" => a as f32 / 255.0,
-            });
-
-            page_ctx.ops.extend([
-                pdf::save_graphics_state(),
-                pdf::load_graphics_dict(name),
-                pdf::set_fill_colour(r, g, b),
-                pdf::specify_rectangle([0.0, 0.0, page_w_pt, page_h_pt]),
-                pdf::fill(),
-                pdf::restore_graphics_state(),
-            ]);
+            page_ctx.fill_background(r, g, b, a);
         }
 
         // Add any embedded PDF pages before drawing the page objects.
         for emb_page in page.embedded_pdf_pages().iter() {
             let emb_pdf_name = emb_page.file().name();
 
-            // Get an existing `EmbeddedPdf` for the PDF in question or, if one does not exist,
-            // create it by embedding the PDF into the one we're building.
+            // Usually, there are many pages embedded that come from the same PDF, in which
+            // case it is likely that this is not the first page we're embedding from the PDF.
+            // Find the already-loaded PDF object, or load it from the media storage if it is
+            // actually the first time we're embedding something from this PDF.
             let embedded_pdf = match embedded_pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
-                Entry::Vacant(vac) => vac.insert(
-                    EmbeddedPdf::embed(emb_pdf_name, media_storage, &mut pdf)
-                        .with_context(|| format!("Failed to embed PDF '{emb_pdf_name}'"))?,
-                ),
+                Entry::Vacant(vac) => {
+                    let mut pdf_bytes = Vec::new();
+
+                    media_storage
+                        .open_file(emb_pdf_name)
+                        .with_context(|| format!("Failed to open embedded PDF '{emb_pdf_name}'"))?
+                        .read_to_end(&mut pdf_bytes)
+                        .with_context(|| format!("Failed to read embedded PDF '{emb_pdf_name}'"))?;
+
+                    let pdf = Pdf::new(pdf_bytes).map_err(|e| {
+                        anyhow::anyhow!("Failed to parse embedded PDF '{emb_pdf_name}': {e:?}")
+                    })?;
+
+                    vac.insert(PdfDocument::new(Arc::new(pdf)))
+                }
             };
 
-            let emb_page_index = emb_page.page_index();
+            let src_page_index = emb_page.page_index() as usize;
+            let dest_rect = emb_page.rect();
 
-            let (xobj_id, src_width_pt, src_height_pt) = embedded_pdf
-                .create_page_xobject(emb_page_index, &mut pdf)
-                .with_context(|| {
-                    format!(
-                        "Failed to embed page {} of PDF '{emb_pdf_name}'",
-                        emb_page_index + 1
+            let dest_width = dest_rect.right - dest_rect.left;
+            let dest_height = dest_rect.bottom - dest_rect.top;
+
+            let dest_size =
+                Size::from_wh(dest_width as f32, dest_height as f32).ok_or_else(|| {
+                    anyhow!(
+                        "Invalid destination size ({}, {}) for embedded PDF page",
+                        dest_width,
+                        dest_height,
                     )
                 })?;
 
-            // We have to scale and translate the embedded page to fit inside the prescribed
-            // rectangle.
-            let (x_pt, y_pt, horiz_scale, vert_scale) = {
-                let sdocx::page::Rect {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                } = emb_page.rect();
+            // Transform to position the embedded page. The scaling is handled by `draw_pdf_page`
+            // (which apparently doesn't want to bother with positioning...?)
+            page_ctx.surface.push_transform(&Transform::from_row(
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                dest_rect.left as f32,
+                dest_rect.top as f32,
+            ));
 
-                // y = 0 at the top in document space, so `bottom > top`.
-                let dest_width_units = (right - left) as f32;
-                let dest_height_units = (bottom - top) as f32;
+            page_ctx
+                .surface
+                .draw_pdf_page(embedded_pdf, dest_size, src_page_index);
 
-                let x_pt = left as f32 * pt_per_unit;
-                let horiz_scale = (dest_width_units * pt_per_unit) / src_width_pt;
-
-                // The document gives us the vertical position of the lower-left corner in document
-                // space, so we have to flip it. We don't use a negative vertical scale because the
-                // content of the page being embedded lives in PDF space, so is already the correct
-                // way up.
-                let y_pt = page_h_pt - bottom as f32 * pt_per_unit;
-                let vert_scale = (dest_height_units * pt_per_unit) / src_height_pt;
-
-                (x_pt, y_pt, horiz_scale, vert_scale)
-            };
-
-            let xobj_name = page_ctx.add_xobject(xobj_id);
-
-            page_ctx.ops.extend([
-                pdf::save_graphics_state(),
-                pdf::set_transformation_matrix([horiz_scale, 0.0, 0.0, vert_scale, x_pt, y_pt]),
-                pdf::paint_xobject(xobj_name),
-                pdf::restore_graphics_state(),
-            ]);
-
-            if args.auto_split {
-                // If this is the first embedded page, it needs to go on a new page.
-                if auto_split_points.is_empty() {
-                    // Break at the top.
-                    auto_split_points.push(y_pt + vert_scale * src_height_pt);
-                }
-
-                // Break at the bottom.
-                auto_split_points.push(y_pt);
-            }
+            page_ctx.surface.pop();
         }
-
-        page_ctx.ops.push({
-            // Document space has y = 0 at the top; PDF space has it at the bottom. Rather than
-            // converting coordinates everywhere, we just flip everything on the horizontal axis
-            // using a negative y scale followed by a translation. While doing that, we also scale
-            // the document contents to fit our chosen page dimensions.
-            pdf::set_transformation_matrix([pt_per_unit, 0.0, 0.0, -pt_per_unit, 0.0, page_h_pt])
-        });
 
         for inline_obj in &inline_objects_by_page[page_index] {
             if let Err(err) = page_ctx.draw_single_object(
@@ -537,131 +341,7 @@ fn create_document_pdf(
                 multi_progress,
             );
         }
-
-        let (ops, graphics_dicts, xobject_ids) = page_ctx.into_parts();
-
-        let content = pdf::Content { operations: ops };
-
-        let contents_id = pdf.add_object(pdf::Stream::new(
-            pdf::Dictionary::new(),
-            content.encode().context("Failed to encode page content")?,
-        ));
-
-        let resources_id = pdf::dictionary! {
-            "ExtGState" => pdf.add_object(graphics_dicts),
-            "XObject" => xobject_ids,
-        };
-
-        let page_base = pdf::dictionary! {
-            "Type" => "Page",
-            "Parent" => pages_id,
-            "Resources" => resources_id,
-            "Contents" => contents_id,
-        };
-
-        // Split pages if basic splitting is enabled or auto-splitting is enabled and working.
-        if args.basic_split.is_some() || (args.auto_split && !auto_split_points.is_empty()) {
-            let split_points = if !auto_split_points.is_empty() {
-                let mut asp = &auto_split_points[..];
-
-                // In a lot of cases, the first and last embedded PDF pages align with the
-                // beginning and end of the document. We use a 5pt margin to determine whether this
-                // is the case at either end. If it is, we ignore the relevant split.
-                if (page_h_pt - asp[0]) < 5.0 {
-                    asp = &asp[1..];
-                }
-
-                if asp.last().is_some_and(|&p| p < 5.0) {
-                    asp = &asp[..asp.len() - 1];
-                }
-
-                // Add precise points at the top and bottom of the document.
-                Either::Left(
-                    std::iter::once(page_h_pt)
-                        .chain(asp.iter().copied())
-                        .chain(std::iter::once(0.0)),
-                )
-            } else {
-                Either::Right({
-                    let split_page_height = match args.basic_split {
-                        Some(BasicSplitMode::A4Portrait) => A4_PTRT_HEIGHT_PT,
-                        Some(BasicSplitMode::A4Landscape) => {
-                            // This is a pageless document, so we've already scaled it down
-                            // to have A4 width. To get A4 aspect ratio (even if we don't currently
-                            // resize again to make things properly A4) we need
-                            A4_PTRT_WIDTH_PT / std::f32::consts::SQRT_2
-                        }
-                        // Per the outer `if`
-                        None => unreachable!(),
-                    };
-
-                    let split_page_count: u32 =
-                        (page_h_pt / split_page_height).ceil().to_u32().unwrap();
-
-                    // If the desired height doesn't perfectly divide the document height, we'll be
-                    // adding a bit onto the last page.
-                    let _last_split_page_extension =
-                        split_page_height - (page_h_pt % split_page_height);
-
-                    // fixme: That will mess up the background colour, because we only filled as
-                    // much as we needed before.
-
-                    (0..=split_page_count)
-                        .map(move |i| (i as f32).mul_add(-split_page_height, page_h_pt))
-                })
-            };
-
-            let page_tops_bottoms = split_points.tuple_windows::<(_, _)>();
-
-            for (top, bottom) in page_tops_bottoms {
-                // We use the same content and resources for all of the pages, but shift the media
-                // box to show different parts.
-                // fixme: Some PDF readers really don't like that and take ages to load the pages.
-                let mut page = page_base.clone();
-
-                page.set(
-                    b"MediaBox",
-                    vec![0.0.into(), bottom.into(), page_w_pt.into(), top.into()],
-                );
-
-                let page_id = pdf.new_object_id();
-                pdf.set_object(page_id, page);
-                page_id_refs.push(pdf::Object::Reference(page_id));
-            }
-        } else {
-            let mut page = page_base;
-
-            page.set(
-                b"MediaBox",
-                vec![0.into(), 0.into(), page_w_pt.into(), page_h_pt.into()],
-            );
-
-            let page_id = pdf.new_object_id();
-            pdf.set_object(page_id, page);
-            page_id_refs.push(pdf::Object::Reference(page_id));
-        }
     }
-
-    pdf.set_object(
-        pages_id,
-        pdf::dictionary! {
-            "Type" => "Pages",
-            "Count" => page_id_refs.len() as i64,
-            "Kids" => page_id_refs,
-        },
-    );
-
-    let catalog_ref: pdf::Object = pdf.add_object(catalog).into();
-
-    let doc_info_ref: pdf::Object = pdf
-        .add_object(pdf::dictionary! {
-            "Title" => pdf::Object::string_literal(document_name),
-            "Creator" => pdf::Object::string_literal("sdocx2pdf"),
-        })
-        .into();
-
-    pdf.trailer.set("Root", catalog_ref);
-    pdf.trailer.set("Info", doc_info_ref);
 
     Ok(pdf)
 }
@@ -670,7 +350,7 @@ fn main_convert(
     document: Document,
     mut media_storage: MediaStorage,
     multi_progress: &MultiProgress,
-    mut args: Args,
+    args: Args,
 ) -> anyhow::Result<()> {
     let document_name = document.title_text().raw_string().unwrap_or("Missing name");
 
@@ -684,19 +364,23 @@ fn main_convert(
         if pageless { "pageless" } else { "paged" },
     );
 
-    if !pageless {
-        args.auto_split = false;
-        args.basic_split = None;
-    }
-
     let mut pdf = create_document_pdf(
         &document,
         &mut media_storage,
-        document_name,
         pageless,
         multi_progress,
         &args,
     )?;
+
+    pdf.set_metadata(
+        Metadata::new()
+            .title(document_name.to_owned())
+            .producer("sdocx2pdf".to_owned())
+            .creator("Samsung Notes".to_owned()),
+        // todo: Include date created/modified (included in the end tag)
+        // Not bothering now because krilla uses its own structure for timestamps and we'd have to
+        // build it from year, month, day, hour, etc. - no fun
+    );
 
     let out_path_str = args.out.to_string_lossy();
 
@@ -710,17 +394,10 @@ fn main_convert(
 
     write_spinner.enable_steady_tick(Duration::from_millis(130));
 
-    // Pruning unused objects is most important when embedding PDFs because there may be some large
-    // unused objects if only some of the PDF is embedded (or if the PDF being embedded is poorly
-    // optimised).
-    pdf.prune_objects();
-    pdf.compress();
+    let pdf_bytes = pdf.finish().context("Failed to finalise PDF document")?;
 
-    pdf.save_modern(
-        &mut std::fs::File::create(&args.out)
-            .with_context(|| format!("Failed to create output file '{out_path_str}'"))?,
-    )
-    .context("Failed to save PDF to output file")?;
+    std::fs::write(&args.out, &pdf_bytes)
+        .with_context(|| format!("Failed to write output file '{out_path_str}'"))?;
 
     let metadata_r = std::fs::metadata(&args.out);
     write_spinner.finish_and_clear();

@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
+use krilla::{color::rgb, geom::Transform, num::NormalizedF32, paint::Fill, surface::Surface};
 use log::{error, warn};
 use thiserror::Error;
 
 use crate::{
-    pdf,
     shape::{NoStyleError, PathDrawingCtx, PathDrawingError},
     tool::{EventGroup, Tool},
 };
@@ -54,74 +52,65 @@ impl DrawObjectError {
 }
 
 /// SDOCX page -> PDF page conversion context.
-pub struct PageConversionCtx {
-    /// The size of the page (in document units).
+pub struct PageConversionCtx<'s> {
+    /// Page size in document units: `(width, height)`.
     page_size: (f32, f32),
 
-    /// The PDF operations for the page.
-    pub ops: Vec<pdf::Operation>,
-
-    /// Maps names to the graphics state parameter dictionaries.
-    graphics_dicts: pdf::Dictionary,
-
-    /// Maps `t -> n` where `t` is a tool and `n` is the name of an existing graphics state
-    /// parameter dictionary that can be used to draw strokes for `t`.
+    /// PDF drawing surface.
     ///
-    /// Helps reduce the size of the PDF produced by allowing graphics state dictionaries to be
-    /// reused.
-    tool_graphics_dict_names: HashMap<Tool, pdf::GraphicsDictName>,
-
-    /// Maps names to XObjects.
-    xobjects: pdf::Dictionary,
+    /// When the page conversion context is constructed, a transformation matrix is pushed to this
+    /// drawing surface that scales the content such that drawing operations can be done in
+    /// document space rather than PDF space.
+    pub surface: Surface<'s>,
 }
 
-impl PageConversionCtx {
-    pub fn new(page_size: (f32, f32)) -> PageConversionCtx {
-        PageConversionCtx {
-            page_size,
-            ops: Vec::new(),
-            graphics_dicts: pdf::Dictionary::new(),
-            tool_graphics_dict_names: HashMap::new(),
-            xobjects: pdf::Dictionary::new(),
-        }
+impl<'s> PageConversionCtx<'s> {
+    pub fn new(
+        page_size: (f32, f32),
+        pt_per_unit: f32,
+        mut surface: Surface<'s>,
+    ) -> PageConversionCtx<'s> {
+        // Apply a transformation here so that drawing operations to the surface can use document
+        // units rather than locally scaling things whenever we need to draw them.
+        surface.push_transform(&Transform::from_row(
+            pt_per_unit,
+            0.0,
+            0.0,
+            pt_per_unit,
+            0.0,
+            0.0,
+        ));
+
+        PageConversionCtx { page_size, surface }
     }
 
-    pub fn add_xobject(&mut self, xobj: impl Into<pdf::Object>) -> pdf::XObjectName {
-        let name = format!("s2p-xobj-{}", self.xobjects.len());
-        self.xobjects.set(name.clone(), xobj);
-        name.into()
+    pub fn fill_background(&mut self, r: u8, g: u8, b: u8, a: u8) {
+        self.surface.set_stroke(None);
+        self.surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(r, g, b).into(),
+            opacity: NormalizedF32::new(a as f32 / 255.0).unwrap(),
+            ..Fill::default()
+        }));
+
+        self.surface.draw_path(&self.boundary_path());
     }
 
-    pub fn add_graphics_dict(&mut self, gd: impl Into<pdf::Object>) -> pdf::GraphicsDictName {
-        let name = format!("s2p-gd-{}", self.graphics_dicts.len());
-        self.graphics_dicts.set(name.clone(), gd);
-        name.into()
-    }
+    fn boundary_path(&self) -> krilla::geom::Path {
+        let mut rect_pb = krilla::geom::PathBuilder::new();
+        rect_pb.push_rect(
+            krilla::geom::Rect::from_xywh(0.0, 0.0, self.page_size.0, self.page_size.1).unwrap(),
+        );
 
-    pub fn tool_graphics_dict_name(&mut self, tool: &Tool) -> pdf::GraphicsDictName {
-        if let Some(name) = self.tool_graphics_dict_names.get(tool) {
-            return name.clone();
-        }
-
-        let name = self.add_graphics_dict(tool.create_egs());
-
-        self.tool_graphics_dict_names
-            .insert(tool.clone(), name.clone());
-
-        name
+        rect_pb.finish().unwrap()
     }
 
     fn draw_stroke_chunk_events<'e>(
         &mut self,
         stroke_events: impl IntoIterator<Item = EventGroup<'e>>,
+        fill_boundary: &krilla::geom::Path,
         tool: Tool,
     ) -> Result<(), ()> {
-        tool.draw_events(
-            self.tool_graphics_dict_name(&tool),
-            self.page_size,
-            stroke_events,
-            &mut self.ops,
-        )
+        tool.draw_events(stroke_events, fill_boundary, &mut self.surface)
     }
 
     pub fn draw_single_object(
@@ -134,6 +123,7 @@ impl PageConversionCtx {
             sdocx::DocObject::Stroke(stroke) => self
                 .draw_stroke_chunk_events(
                     [EventGroup::from_stroke(stroke)],
+                    &self.boundary_path(),
                     Tool::for_stroke(stroke).with_scaled_width(pen_width_mul, marker_width_mul),
                 )
                 .map_err(|()| DrawObjectError::Stroke),
@@ -184,10 +174,10 @@ impl PageConversionCtx {
                 .progress_chars("# "),
             );
 
-        // Consecutive stokes very often use the same tool. To reduce the size of the output PDF, we
-        // can process chains of such strokes in one go, loading the necessary graphics state only
-        // once and then using it for all the strokes rather than loading the same graphics state for
-        // every stroke.
+        // Consecutive strokes very often use the same tool. To reduce the size of the output PDF,
+        // we can process chains of such strokes in one go, loading the necessary graphics state
+        // only once and then using it for all the strokes rather than loading the same graphics
+        // state for every stroke.
         let chunked_objects = objects
             .iter()
             .inspect(|_| objects_bar.inc(1))
@@ -198,6 +188,10 @@ impl PageConversionCtx {
                 _non_stroke => None,
             });
 
+        // Compute the filling boundary once for this layer so we don't have to recompute it for
+        // every chunk of events we draw.
+        let fill_boundary = self.boundary_path();
+
         for (opt_stroke_tool, objects) in &chunked_objects {
             if let Some(tool) = opt_stroke_tool {
                 // This is a chunk of strokes that all use `tool`.
@@ -207,11 +201,11 @@ impl PageConversionCtx {
                     let sdocx::DocObject::Stroke(s) = o else {
                         unreachable!()
                     };
-
                     EventGroup::from_stroke(s)
                 });
 
-                if let Err(()) = self.draw_stroke_chunk_events(stroke_events, tool) {
+                if let Err(()) = self.draw_stroke_chunk_events(stroke_events, &fill_boundary, tool)
+                {
                     DrawObjectError::Stroke.log();
                 }
 
@@ -226,17 +220,11 @@ impl PageConversionCtx {
             }
         }
     }
+}
 
-    /// Returns (operations, name -> graphics dict map, name -> XObject ID map)
-    pub fn into_parts(self) -> (Vec<pdf::Operation>, pdf::Dictionary, pdf::Dictionary) {
-        let PageConversionCtx {
-            page_size: _,
-            ops,
-            graphics_dicts,
-            tool_graphics_dict_names: _,
-            xobjects: xobject_ids,
-        } = self;
-
-        (ops, graphics_dicts, xobject_ids)
+impl Drop for PageConversionCtx<'_> {
+    fn drop(&mut self) {
+        // Pop the coordinate transformation.
+        self.surface.pop();
     }
 }
