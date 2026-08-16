@@ -270,9 +270,14 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
                     object_hash != hash_read
                 })
             {
-                return Err(LayerParseError::ObjectHashMismatch(
-                    object.object_base().uuid().to_owned(),
-                ));
+                // Older notes (and some pen/object variants) fail this integrity check even when
+                // the object body itself parses. Treat as a soft warning so conversion can continue.
+                // Observed on format_version 2034 notes where every stroke object mismatched while
+                // the parsed content still produced a correct vector PDF.
+                warn!(
+                    "Object hash mismatch for {} (type {object_type}); continuing without aborting.",
+                    object.object_base().uuid()
+                );
             }
 
             object
