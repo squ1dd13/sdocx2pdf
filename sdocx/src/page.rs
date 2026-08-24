@@ -328,8 +328,8 @@ pub struct Page {
     is_text_only: bool,
 
     orientation: u32,
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
     offset_x: u32,
     offset_y: u32,
     uuid: String,

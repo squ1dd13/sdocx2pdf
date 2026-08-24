@@ -1,9 +1,12 @@
 use krilla::geom::PathBuilder;
-use sdocx::euclid::{Point2D, Vector2D};
+use sdocx::euclid;
 
-pub struct PdfSpace;
-pub type Point2d = Point2D<f64, PdfSpace>;
-pub type Vector2d = Vector2D<f64, PdfSpace>;
+pub enum PdfSpace {}
+pub type Point2d = euclid::Point2D<f64, PdfSpace>;
+pub type Vector2d = euclid::Vector2D<f64, PdfSpace>;
+pub type Box2d = euclid::Box2D<f64, PdfSpace>;
+pub type Size2d = euclid::Size2D<f64, PdfSpace>;
+pub type Length = euclid::Length<f64, PdfSpace>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PolygonPoint {

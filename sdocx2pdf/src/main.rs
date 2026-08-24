@@ -1,11 +1,4 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    io::{Read, Write},
-    path::PathBuf,
-    process::ExitCode,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io::Write, path::PathBuf, process::ExitCode, time::Duration};
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
@@ -19,13 +12,11 @@ use krilla::{
     geom::{Size, Transform},
     metadata::Metadata,
     page::PageSettings,
-    pdf::{Pdf, PdfDocument},
 };
 use log::{info, warn};
-use num::ToPrimitive;
-use sdocx::{Document, DocumentError, MediaStorage, PageModel, page::object::InlineObject};
+use sdocx::{Document, DocumentError, MediaStorage};
 
-use crate::page::PageConversionCtx;
+use crate::page::{EmbedMap, PageConversionCtx};
 
 mod page;
 mod pdf;
@@ -35,12 +26,18 @@ mod tool;
 
 const DETAILED_ERRORS_ARG_NAME: &str = "--detailed-errors";
 
-#[derive(ValueEnum, Clone)]
+#[derive(ValueEnum, Clone, Copy)]
 enum BasicSplitMode {
-    #[value(help = "Split the document into portrait A4 pages")]
-    A4Portrait,
-    #[value(help = "Split the document into landscape A4 pages")]
-    A4Landscape,
+    #[value(
+        help = "Split the document into portrait pages with a 1:√2 aspect ratio, \
+    like ISO 216 paper sizes (A1, A2, A3, A4, etc.)"
+    )]
+    IsoPortrait,
+    #[value(
+        help = "Split the document into landscape pages with a √2:1 aspect ratio, \
+    like ISO 216 paper sizes (A1, A2, A3, A4, etc.)"
+    )]
+    IsoLandscape,
 }
 
 fn parse_stroke_width_mul(s: &str) -> Result<f32, String> {
@@ -77,6 +74,42 @@ struct Args {
     /// overwritten.
     #[arg(help = "Path to write the PDF to", long_help)]
     out: PathBuf,
+
+    /// Inserts page breaks into pageless documents between pages of any embedded PDFs. Disabled by
+    /// default.
+    ///
+    /// By default, a pageless document will be converted to a PDF containing a long single page.
+    /// With auto-splitting enabled, if a pageless document embeds any PDFs, page breaks are
+    /// inserted to match the page breaks in the embedded PDFs. For example, if you import a
+    /// five-page PDF into a blank pageless document and annotate it, auto-splitting will give you
+    /// a five-page PDF rather than a single-page PDF.
+    ///
+    /// This option does nothing when converting a paged document. It also does nothing for
+    /// pageless documents that do not embed any PDFs; see the basic splitting option.
+    #[arg(
+        long,
+        help = "Add page breaks to pageless documents matching breaks in any embedded PDFs",
+        long_help
+    )]
+    auto_split: bool,
+
+    /// Specifies the page-splitting behaviour used for pageless documents when auto-splitting is
+    /// not in effect, either because it is disabled or because the document being converted does
+    /// not embed any PDFs.
+    ///
+    /// Basic splitting is disabled by default, resulting in long single-page PDFs when
+    /// auto-splitting is not used. To use basic splitting only, specify a mode and do not enable
+    /// auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting
+    /// is used as a fallback when there are no PDFs embedded in the document. If auto-splitting is
+    /// enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those
+    /// that don't will not be split at all.
+    #[arg(
+        long,
+        help = "Page-splitting mode for pageless documents without embedded PDFs \
+        or for when auto-splitting is disabled",
+        long_help
+    )]
+    basic_split: Option<BasicSplitMode>,
 
     /// Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink pen,
     /// calligraphy brush and pencil.
@@ -116,36 +149,9 @@ struct Args {
     detailed_errors: bool,
 }
 
-fn group_inline_objects_by_page(document: &Document) -> Vec<Vec<&InlineObject>> {
-    let mut by_page = vec![Vec::new(); document.pages().len()];
-
-    let pageless = matches!(document.page_model(), PageModel::Pageless);
-
-    for inline_obj in document.body_text().inline_objects() {
-        match inline_obj.object.page_index() {
-            Some(i) => by_page[i as usize].push(inline_obj),
-
-            // If no page is specified and this is a pageless document, put the inline object on
-            // the first (only) page.
-            None if pageless => by_page[0].push(inline_obj),
-
-            None => {
-                warn!(
-                    "Ignoring inline {} because it does not specify a page, \
-                    and this is not a pageless document",
-                    <&str>::from(&inline_obj.object),
-                );
-            }
-        }
-    }
-
-    by_page
-}
-
 fn create_document_pdf(
     document: &Document,
     media_storage: &mut MediaStorage,
-    pageless: bool,
     multi_progress: &MultiProgress,
     args: &Args,
 ) -> Result<krilla::Document, anyhow::Error> {
@@ -164,16 +170,6 @@ fn create_document_pdf(
 
     let mut pdf = krilla::Document::new();
 
-    const A4_PTRT_WIDTH_PT: f32 = 210.0 * 2.84526;
-    const A4_PTRT_HEIGHT_PT: f32 = 297.0 * 2.84526;
-
-    // Maps the names of PDF files to `PdfDocument`s that can be used to place pages from the PDFs
-    // into the output PDF.
-    let mut embedded_pdfs = HashMap::new();
-
-    // Since we work in pages, we need the inline objects grouped by page.
-    let inline_objects_by_page = group_inline_objects_by_page(document);
-
     // An inline object with `index_in_text == k` is represented in the raw string by an object
     // replacement character (U+FFFC) at character index `k`. Thus, if the entire raw string
     // consists of whitespace and object replacement characters, there is no meaningful text.
@@ -183,115 +179,38 @@ fn create_document_pdf(
         warn!("Ignoring typed text in document body");
     }
 
-    for (pos, (page_index, page)) in document.pages().iter().enumerate().with_position() {
+    let embed_map = EmbedMap::new(document, media_storage)?;
+
+    let pages =
+        page::split_document_into_pages(document, &embed_map, args.auto_split, args.basic_split)
+            // Collect the pages because the iterator borrows `embed_map`, and we need to move out
+            // of it.
+            .collect_vec();
+
+    let embedded_documents = embed_map.into_documents();
+
+    for page in pages {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
 
-        // For paged documents, there is a ghost page in the sdocx that is not represented in the
-        // raster PDF. We ignore it too.
-        if !pageless && matches!(pos, itertools::Position::Last) && page.is_empty() {
-            continue;
-        }
+        // todo: Move page-internal conversion logic into `page`
 
-        let (page_w_internal, page_h_internal) = page.width_height();
-        let page_w_internal = page_w_internal.to_f32().unwrap();
-        let page_h_internal = page_h_internal.to_f32().unwrap();
-
-        // Use A4 width for the smaller dimension of the page. When the paged A4 mode is used in
-        // the app, this results in A4-sized pages for both portrait and landscape. For pageless
-        // documents and for the app's "long portrait" option, the width is that of A4, with the
-        // height scaled accordingly.
-        let pt_per_unit = A4_PTRT_WIDTH_PT / page_w_internal.min(page_h_internal);
-
-        let page_w_pt = page_w_internal * pt_per_unit;
-
-        let page_h_pt = {
-            if pageless && let Some(drawn_rect) = page.drawn_rect() {
-                // The sdocx tends to report an extra "page-height" worth of empty space at the end
-                // of a pageless document. When the app exports a PDF, this space is not included,
-                // and we don't want to include it either, so we subtract it from the height. Just
-                // to be safe, we make sure not to reduce the height below the combined height of
-                // the pages we'd need to hold the drawn content or embedded PDF content if this
-                // were a paged document.
-
-                // Distance from the top of the document to the lowest point drawn to.
-                let drawn_floor_pt = drawn_rect.max.y as f32 * pt_per_unit;
-
-                // Find the rectangle of the embedded PDF page furthest down the document.
-                let lowest_pdf_rect = page
-                    .embedded_pdf_pages()
-                    .iter()
-                    .map(|epp| epp.rect())
-                    .max_by(|l, r| l.max.y.total_cmp(&r.max.y));
-
-                let (floor_pt, assumed_page_height) = if let Some(rect_unit) = lowest_pdf_rect {
-                    // Distance from the top to the lowest point reached by a page of an embedded
-                    // PDF.
-                    let pdf_floor_pt = rect_unit.max.y as f32 * pt_per_unit;
-
-                    (
-                        pdf_floor_pt.max(drawn_floor_pt),
-                        // Assume the added space will be the same size as the last PDF page.
-                        rect_unit.height() as f32 * pt_per_unit,
-                    )
-                } else {
-                    // Assume the added space will be the same height as an A4 page, as we've
-                    // nothing else to go on (and this is usually correct).
-                    (drawn_floor_pt, A4_PTRT_HEIGHT_PT)
-                };
-
-                let used_page_count = (floor_pt / assumed_page_height).ceil();
-                let reduced_page_count =
-                    (page_h_internal * pt_per_unit) / assumed_page_height - 1.0;
-
-                reduced_page_count.max(used_page_count) * assumed_page_height
-            } else {
-                page_h_internal * pt_per_unit
-            }
-        };
+        let output_size = page.output_size();
 
         let mut pdf_page = pdf.start_page_with(PageSettings::new(
-            Size::from_wh(page_w_pt, page_h_pt).expect("page size calculation failed"),
+            Size::from_wh(output_size.width as f32, output_size.height as f32)
+                .expect("page size calculation failed"),
         ));
 
-        let mut page_ctx = PageConversionCtx::new(
-            (page_w_internal, page_h_internal),
-            pt_per_unit,
-            pdf_page.surface(),
-        );
+        let mut page_ctx = PageConversionCtx::new(&page, pdf_page.surface());
 
         if let Some([b, g, r, a]) = page.background_colour() {
             page_ctx.fill_background(r, g, b, a);
         }
 
         // Add any embedded PDF pages before drawing the page objects.
-        for emb_page in page.embedded_pdf_pages().iter() {
-            let emb_pdf_name = emb_page.file().name();
-
-            // Usually, there are many pages embedded that come from the same PDF, in which
-            // case it is likely that this is not the first page we're embedding from the PDF.
-            // Find the already-loaded PDF object, or load it from the media storage if it is
-            // actually the first time we're embedding something from this PDF.
-            let embedded_pdf = match embedded_pdfs.entry(emb_pdf_name) {
-                Entry::Occupied(occ) => occ.into_mut(),
-                Entry::Vacant(vac) => {
-                    let mut pdf_bytes = Vec::new();
-
-                    media_storage
-                        .open_file(emb_pdf_name)
-                        .with_context(|| format!("Failed to open embedded PDF '{emb_pdf_name}'"))?
-                        .read_to_end(&mut pdf_bytes)
-                        .with_context(|| format!("Failed to read embedded PDF '{emb_pdf_name}'"))?;
-
-                    let pdf = Pdf::new(pdf_bytes).map_err(|e| {
-                        anyhow::anyhow!("Failed to parse embedded PDF '{emb_pdf_name}': {e:?}")
-                    })?;
-
-                    vac.insert(PdfDocument::new(Arc::new(pdf)))
-                }
-            };
-
-            let src_page_index = emb_page.page_index() as usize;
-            let dest_rect = emb_page.rect();
+        for embed in page.embeds() {
+            let src_page_index = embed.page_index() as usize;
+            let dest_rect = embed.rect();
 
             let dest_width = dest_rect.width();
             let dest_height = dest_rect.height();
@@ -316,14 +235,18 @@ fn create_document_pdf(
                 dest_rect.min.y as f32,
             ));
 
-            page_ctx
-                .surface
-                .draw_pdf_page(embedded_pdf, dest_size, src_page_index);
+            page_ctx.surface.draw_pdf_page(
+                embedded_documents
+                    .get(embed.file().name())
+                    .ok_or_else(|| anyhow!("Missing embedded PDF '{}'", embed.file().name()))?,
+                dest_size,
+                src_page_index,
+            );
 
             page_ctx.surface.pop();
         }
 
-        for inline_obj in &inline_objects_by_page[page_index] {
+        for inline_obj in page.inline_objects() {
             if let Err(err) = page_ctx.draw_single_object(
                 &inline_obj.object,
                 args.pen_width_multiplier,
@@ -333,14 +256,12 @@ fn create_document_pdf(
             }
         }
 
-        for layer in page.layers() {
-            page_ctx.draw_layer(
-                layer,
-                args.pen_width_multiplier,
-                args.marker_width_multiplier,
-                multi_progress,
-            );
-        }
+        page_ctx.draw_objects(
+            page.objects(),
+            args.pen_width_multiplier,
+            args.marker_width_multiplier,
+            multi_progress,
+        );
     }
 
     Ok(pdf)
@@ -364,13 +285,7 @@ fn main_convert(
         if pageless { "pageless" } else { "paged" },
     );
 
-    let mut pdf = create_document_pdf(
-        &document,
-        &mut media_storage,
-        pageless,
-        multi_progress,
-        &args,
-    )?;
+    let mut pdf = create_document_pdf(&document, &mut media_storage, multi_progress, &args)?;
 
     pdf.set_metadata(
         Metadata::new()

@@ -156,7 +156,7 @@ pub struct ObjectBase {
     pub format_version: u32,
     uuid: String,
     modified_time: DateTime<Utc>,
-    rect: Box2d<f64>,
+    pub rect: Box2d<f64>,
     timestamp_int: u32,
     resize_mode: ResizeMode,
 

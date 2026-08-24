@@ -145,10 +145,12 @@ impl<R: Read> TryParse<R> for AppVersion {
     }
 }
 
-pub struct SdocxSpace;
+pub enum SdocxSpace {}
 pub type Point2d<T> = euclid::Point2D<T, SdocxSpace>;
 pub type Vector2d<T> = euclid::Vector2D<T, SdocxSpace>;
 pub type Box2d<T> = euclid::Box2D<T, SdocxSpace>;
+pub type Size2d<T> = euclid::Size2D<T, SdocxSpace>;
+pub type Length<T> = euclid::Length<T, SdocxSpace>;
 
 impl<R: Read> TryParse<R> for Point2d<f32> {
     type ParseError = std::io::Error;
