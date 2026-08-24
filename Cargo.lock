@@ -1767,7 +1767,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdocx"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "byteorder",
  "chrono",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "sdocx2pdf"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "clap",
