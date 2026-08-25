@@ -42,7 +42,7 @@ impl<'e> EmbedMap<'e> {
         {
             let emb_pdf_name = embed.file().name();
 
-            match pdfs.entry(emb_pdf_name) {
+            let pdf = &*match pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => {
                     info!("Loading embedded PDF '{emb_pdf_name}'");
@@ -62,6 +62,13 @@ impl<'e> EmbedMap<'e> {
                     vac.insert(pdf)
                 }
             };
+
+            // Ensure that the PDF for this embed actually has the requisite page.
+            anyhow::ensure!(
+                (embed.page_index() as usize) < pdf.pages().len(),
+                "PDF '{emb_pdf_name}' is loaded, but does not have page {}",
+                embed.page_index()
+            );
         }
 
         Ok(Self { pdfs })
@@ -78,8 +85,8 @@ impl<'e> EmbedMap<'e> {
             .get_pdf(embed)
             .pages()
             .get(embed.page_index() as usize)
-            // fixme: This is a document error, and we should not be panicking here
-            .expect("no such page")
+            // Unwrapping is fine here because `new` checks that every embed's page exists.
+            .unwrap()
             .crop_box();
 
         pdf::Box2d::new((rect.x0, rect.y0).into(), (rect.x1, rect.y1).into())

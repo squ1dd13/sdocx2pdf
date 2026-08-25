@@ -230,7 +230,7 @@ impl Tool {
         }
 
         // todo: Soft masks for pencil and calligraphy brush
-        // todo: Allow dashed/dotted lines because krilla supports them
+        // todo: Allow dashed/dotted lines
 
         if self.is_like_highlighter() {
             surface.push_blend_mode(krilla::blend::BlendMode::Multiply);
