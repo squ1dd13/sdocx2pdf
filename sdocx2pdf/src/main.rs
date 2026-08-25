@@ -155,19 +155,6 @@ fn create_document_pdf(
     multi_progress: &MultiProgress,
     args: &Args,
 ) -> Result<krilla::Document, anyhow::Error> {
-    // Only show a progress bar for the pages if there is more than one.
-    let pages_bar = if let page_count @ 2.. = document.pages().len() as u64 {
-        Some(
-            multi_progress.add(ProgressBar::new(page_count)).with_style(
-                ProgressStyle::with_template("Processing pages   [{bar:40}] [{pos}/{len}]")
-                    .unwrap()
-                    .progress_chars("# "),
-            ),
-        )
-    } else {
-        None
-    };
-
     let mut pdf = krilla::Document::new();
 
     // An inline object with `index_in_text == k` is represented in the raw string by an object
@@ -188,6 +175,19 @@ fn create_document_pdf(
             .collect_vec();
 
     let embedded_documents = embed_map.into_documents();
+
+    // Only show a progress bar for the pages if there is more than one.
+    let pages_bar = if let page_count @ 2.. = pages.len() as u64 {
+        Some(
+            multi_progress.add(ProgressBar::new(page_count)).with_style(
+                ProgressStyle::with_template("Processing pages   [{bar:40}] [{pos}/{len}]")
+                    .unwrap()
+                    .progress_chars("# "),
+            ),
+        )
+    } else {
+        None
+    };
 
     for page in pages {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
@@ -273,17 +273,27 @@ fn main_convert(
     multi_progress: &MultiProgress,
     args: Args,
 ) -> anyhow::Result<()> {
-    let document_name = document.title_text().raw_string().unwrap_or("Missing name");
+    let document_name = document
+        .title_text()
+        .raw_string()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
 
-    let pageless = match document.page_model() {
-        sdocx::PageModel::Paged => false,
-        sdocx::PageModel::Pageless => true,
+    let page_model_str = match document.page_model() {
+        sdocx::PageModel::Paged => "paged",
+        sdocx::PageModel::Pageless => "pageless",
     };
 
-    info!(
-        "Successfully parsed {} document '{document_name}'",
-        if pageless { "pageless" } else { "paged" },
-    );
+    let document_name = match document_name {
+        Some(document_name) => {
+            info!("Opened {page_model_str} document '{document_name}'");
+            document_name
+        }
+        None => {
+            info!("Opened an untitled {page_model_str} document");
+            "Untitled"
+        }
+    };
 
     let mut pdf = create_document_pdf(&document, &mut media_storage, multi_progress, &args)?;
 

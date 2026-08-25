@@ -45,8 +45,6 @@ impl<'e> EmbedMap<'e> {
             let pdf = &*match pdfs.entry(emb_pdf_name) {
                 Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => {
-                    info!("Loading embedded PDF '{emb_pdf_name}'");
-
                     let mut pdf_bytes = Vec::new();
 
                     media
@@ -58,6 +56,18 @@ impl<'e> EmbedMap<'e> {
                     let pdf = krilla::pdf::Pdf::new(pdf_bytes).map_err(|e| {
                         anyhow::anyhow!("failed to parse embedded PDF '{emb_pdf_name}': {e:?}")
                     })?;
+
+                    match pdf
+                        .metadata()
+                        .title
+                        .as_ref()
+                        .and_then(|v| str::from_utf8(v).ok())
+                    {
+                        Some(title) if !title.is_empty() => {
+                            info!("Loaded embedded PDF '{emb_pdf_name}' ('{title}')")
+                        }
+                        _ => info!("Loaded embedded PDF '{emb_pdf_name}'"),
+                    }
 
                     vac.insert(pdf)
                 }
