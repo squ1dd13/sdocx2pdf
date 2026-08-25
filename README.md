@@ -23,7 +23,7 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
 - add handwriting and shapes to PDFs by hand in SNotes and get a vector PDF with your annotations
   on top of the original PDF (with searchable/selectable text) using sdocx2pdf.
 
-**As of sdocx2pdf v0.3.4, handwriting, shapes and embedded PDFs are represented in converted
+**As of sdocx2pdf v0.3.5, handwriting, shapes and embedded PDFs are represented in converted
 documents.**
 
 There are options for splitting pageless documents into pages based either on page length or on the
@@ -162,8 +162,10 @@ Options:
           split at all.
 
           Possible values:
-          - a4-portrait:  Split the document into portrait A4 pages
-          - a4-landscape: Split the document into landscape A4 pages
+          - iso-portrait:  Split the document into portrait pages with a 1:√2 aspect
+            ratio, like ISO 216 paper sizes (A1, A2, A3, A4, etc.)
+          - iso-landscape: Split the document into landscape pages with a √2:1 aspect
+            ratio, like ISO 216 paper sizes (A1, A2, A3, A4, etc.)
 
       --pen-width-multiplier <PEN_WIDTH_MULTIPLIER>
           Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink

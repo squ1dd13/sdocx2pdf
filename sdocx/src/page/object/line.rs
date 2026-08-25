@@ -1,15 +1,13 @@
 use crate::{
+    Box2d, Point2d,
     byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     impl_try_from_for_optional_from,
-    page::{
-        Point, Rect,
-        object::{
-            LineColourEffect, LineStyleEffect,
-            base::{HasObjectBase, ObjectBase},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-            shape_base::{ShapeBase, ShapeBaseParseError},
-            shared::{Path, PathParseError},
-        },
+    page::object::{
+        LineColourEffect, LineStyleEffect,
+        base::{HasObjectBase, ObjectBase},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
+        shape_base::{ShapeBase, ShapeBaseParseError},
+        shared::{Path, PathParseError},
     },
     read_size_and_vec, unpack_field_flags,
 };
@@ -47,11 +45,11 @@ pub struct Line {
     shape_base: ShapeBase,
     connector_type: ConnectorType,
     start_direction: u8,
-    control_points: Vec<Point>,
-    start_point: Point,
-    end_point: Point,
-    original_drawn_rect: Rect,
-    original_rect: Rect,
+    control_points: Vec<Point2d<f64>>,
+    start_point: Point2d<f64>,
+    end_point: Point2d<f64>,
+    original_drawn_rect: Box2d<f64>,
+    original_rect: Box2d<f64>,
     original_angle: f32,
     default_pen_name_id: Option<u32>,
     pen_style_id: Option<u32>,
@@ -60,11 +58,11 @@ pub struct Line {
 }
 
 impl Line {
-    pub const fn start(&self) -> Point {
+    pub const fn start(&self) -> Point2d<f64> {
         self.start_point
     }
 
-    pub const fn end(&self) -> Point {
+    pub const fn end(&self) -> Point2d<f64> {
         self.end_point
     }
 
@@ -92,13 +90,13 @@ impl<R: Read + Seek> TryParse<R> for Line {
         let connector_type: ConnectorType = stream.read_u8()?.try_into()?;
         let start_direction = stream.read_u8()?;
 
-        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f64(&mut stream)?);
+        let control_points = read_size_and_vec!(stream, u8, Point2d::try_parse(&mut stream)?);
 
-        let start_point = Point::try_parse_f64(&mut stream)?;
-        let end_point = Point::try_parse_f64(&mut stream)?;
+        let start_point = Point2d::try_parse(&mut stream)?;
+        let end_point = Point2d::try_parse(&mut stream)?;
 
-        let original_drawn_rect = Rect::try_parse_f64(&mut stream)?;
-        let original_rect = Rect::try_parse_f64(&mut stream)?;
+        let original_drawn_rect = Box2d::try_parse(&mut stream)?;
+        let original_rect = Box2d::try_parse(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
         let field_flags = flag_block.init_flex(&mut stream)?;

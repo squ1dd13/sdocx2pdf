@@ -1,19 +1,17 @@
 use crate::{
+    Point2d,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError,
         TakeInclusiveLengthPrefixedError, TryParse, UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,
-    page::{
-        Point,
-        object::{
-            base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-            shared::{
-                ColourType, GradientColour, GradientType, InvalidColourTypeError,
-                InvalidGradientTypeError,
-            },
+    page::object::{
+        base::{HasObjectBase, ObjectBase, ObjectBaseParseError},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
+        shared::{
+            ColourType, GradientColour, GradientType, InvalidColourTypeError,
+            InvalidGradientTypeError,
         },
     },
     read_size_and_vec, read_u32_sized_vec, unpack_bool_flag, unpack_field_flags,
@@ -43,7 +41,7 @@ pub struct LineColourEffect {
     solid_colour: [u8; 4],
     gradient_type: GradientType,
     angle: u16,
-    radial_gradient_pos: Point,
+    radial_gradient_pos: Point2d<f32>,
     colours: Vec<GradientColour>,
 }
 
@@ -63,7 +61,7 @@ impl LineColourEffect {
             solid_colour: stream.read_4_bytes()?,
             gradient_type: stream.read_u8()?.try_into()?,
             angle: stream.read_u16_le()?,
-            radial_gradient_pos: Point::try_parse_f32(&mut stream)?,
+            radial_gradient_pos: Point2d::try_parse(&mut stream)?,
             colours: read_size_and_vec!(stream, u8, GradientColour::try_parse(&mut stream)?),
         };
 
@@ -269,7 +267,7 @@ impl Default for LineStyleEffect {
 #[derive(Debug)]
 #[expect(dead_code)]
 struct ConnectionPoint {
-    point: Point,
+    point: Point2d<f64>,
     uuids: Vec<String>,
 }
 
@@ -300,7 +298,7 @@ pub struct ShapeBase {
     // Unclear on these. In the JVM code, both are `ArrayList`s of `ConnectionPoint`s, but
     // one uses only the `point` field, while the other uses both `point` and `uuids`.
     connection_points: Vec<ConnectionPoint>,
-    points_of_connection: Vec<Point>,
+    points_of_connection: Vec<Point2d<f64>>,
 }
 
 impl ShapeBase {
@@ -324,7 +322,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
         let points_of_connection = read_u32_sized_vec!(
             stream,
             ShapeBaseParseError::TooManyElements,
-            Point::try_parse_f64(&mut stream)?
+            Point2d::try_parse(&mut stream)?
         );
 
         // Inclusive size. Living on the edge by not constructing a window here ;)
@@ -332,7 +330,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
 
         let conn_pts = read_size_and_vec!(stream, u32, ShapeBaseParseError::TooManyElements, {
             ConnectionPoint {
-                point: Point::try_parse_f64(&mut stream)?,
+                point: Point2d::try_parse(&mut stream)?,
                 uuids: read_u32_sized_vec!(
                     stream,
                     ShapeBaseParseError::TooManyElements,

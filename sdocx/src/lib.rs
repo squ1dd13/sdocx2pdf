@@ -41,6 +41,7 @@
 )]
 
 use byte_stream::{ByteStreamLe, ReadStringError, TryParse};
+pub use euclid;
 use std::io::Read;
 use thiserror::Error;
 
@@ -142,4 +143,65 @@ impl<R: Read> TryParse<R> for AppVersion {
             patch_name: reader.read_short_u16_string()?,
         })
     }
+}
+
+pub enum SdocxSpace {}
+pub type Point2d<T> = euclid::Point2D<T, SdocxSpace>;
+pub type Vector2d<T> = euclid::Vector2D<T, SdocxSpace>;
+pub type Box2d<T> = euclid::Box2D<T, SdocxSpace>;
+pub type Size2d<T> = euclid::Size2D<T, SdocxSpace>;
+pub type Length<T> = euclid::Length<T, SdocxSpace>;
+
+impl<R: Read> TryParse<R> for Point2d<f32> {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
+        Ok((reader.read_f32_le()?, reader.read_f32_le()?).into())
+    }
+}
+
+impl<R: Read> TryParse<R> for Point2d<f64> {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
+        Ok((reader.read_f64_le()?, reader.read_f64_le()?).into())
+    }
+}
+
+impl<R: Read> TryParse<R> for Point2d<i32> {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
+        Ok((reader.read_i32_le()?, reader.read_i32_le()?).into())
+    }
+}
+
+impl<R: Read> TryParse<R> for Box2d<f32> {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
+        let top_left = Point2d::try_parse(reader)?;
+        let bottom_right = Point2d::try_parse(reader)?;
+
+        Ok(Box2d::new(top_left, bottom_right))
+    }
+}
+
+impl<R: Read> TryParse<R> for Box2d<f64> {
+    type ParseError = std::io::Error;
+
+    fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
+        let top_left = Point2d::try_parse(reader)?;
+        let bottom_right = Point2d::try_parse(reader)?;
+
+        Ok(Box2d::new(top_left, bottom_right))
+    }
+}
+
+pub fn try_parse_i32_box<R: Read>(reader: &mut R) -> std::io::Result<Box2d<f64>> {
+    let top_left = Point2d::<i32>::try_parse(reader)?;
+    let bottom_right = Point2d::<i32>::try_parse(reader)?;
+
+    // Cast is OK here because `f64` can represent anything `i32` can.
+    Ok(Box2d::new(top_left.cast(), bottom_right.cast()))
 }

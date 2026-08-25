@@ -1,22 +1,20 @@
 use crate::{
+    Box2d, Point2d,
     byte_stream::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, TryParse,
         UnfinishedParsingError,
     },
     context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
-    page::{
-        Point, Rect,
-        object::{
-            LineColourEffect, LineStyleEffect,
-            base::{HasObjectBase, ObjectBase},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-            shape_base::{ShapeBase, ShapeBaseParseError},
-            shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
-            text_core::{self, CommonParseContext},
-        },
+    page::object::{
+        LineColourEffect, LineStyleEffect,
+        base::{HasObjectBase, ObjectBase},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
+        shape_base::{ShapeBase, ShapeBaseParseError},
+        shared::{ColourType, GradientColour, GradientType, Path, PathParseError},
+        text_core::{self, CommonParseContext},
     },
-    read_size_and_vec, unpack_bool_flags, unpack_field_flags,
+    read_size_and_vec, try_parse_i32_box, unpack_bool_flags, unpack_field_flags,
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -231,7 +229,7 @@ pub struct FillColourEffect {
     gradient_rotatable: bool,
     gradient_type: GradientType,
     angle: i16,
-    radial_gradient_pos: Point,
+    radial_gradient_pos: Point2d<f32>,
     colours: Vec<GradientColour>,
 }
 
@@ -253,7 +251,7 @@ impl FillColourEffect {
         };
 
         let angle = stream.read_i16_le()?;
-        let radial_gradient_pos = Point::try_parse_f32(stream)?;
+        let radial_gradient_pos = Point2d::try_parse(stream)?;
 
         let col_count: usize = stream.read_u8()?.into();
         let mut colours = Vec::with_capacity(col_count);
@@ -283,10 +281,10 @@ impl FillColourEffect {
 pub struct FillImageEffect {
     image_type: u8,
     image_id: i32,
-    nine_patch_rect: Rect,
+    nine_patch_rect: Box2d<f64>,
     nine_patch_width: u32,
-    stretch_offset: Rect,
-    tiling_offset: Point,
+    stretch_offset: Box2d<f32>,
+    tiling_offset: Point2d<f32>,
     tiling_scale_x: f32,
     tiling_scale_y: f32,
     alpha: f32,
@@ -298,13 +296,13 @@ impl FillImageEffect {
         Ok(FillImageEffect {
             image_type: stream.read_u8()?,
             image_id: stream.read_i32_le()?,
-            stretch_offset: Rect::try_parse_f32(stream)?,
-            tiling_offset: Point::try_parse_f32(stream)?,
+            stretch_offset: Box2d::try_parse(stream)?,
+            tiling_offset: Point2d::try_parse(stream)?,
             tiling_scale_x: stream.read_f32_le()?,
             tiling_scale_y: stream.read_f32_le()?,
             alpha: stream.read_f32_le()?,
             rotatable: stream.read_u8()? != 0,
-            nine_patch_rect: Rect::try_parse_i32(stream)?,
+            nine_patch_rect: try_parse_i32_box(stream)?,
             nine_patch_width: stream.read_u32_le()?,
         })
     }
@@ -381,7 +379,7 @@ impl_try_from_for_optional_from!(BorderType, u16, from_u16, pub InvalidBorderTyp
 struct Template {
     is_flipped_horizontally: bool,
     is_flipped_vertically: bool,
-    owner_rect: Rect,
+    owner_rect: Box2d<f64>,
     rotation: f32,
     path: Path,
 }
@@ -395,8 +393,8 @@ pub struct ShapeData {
     pub border_colour: Option<[u8; 4]>,
     pub border_width: Option<f32>,
     pub border_type: Option<BorderType>,
-    original_drawn_rect: Option<Rect>,
-    pub original_rect: Rect,
+    original_drawn_rect: Option<Box2d<f64>>,
+    pub original_rect: Box2d<f64>,
     pub original_angle: f32,
 }
 
@@ -529,13 +527,13 @@ pub struct ImageData {
     border_image_hash: Option<String>,
     pub border_image_nine_patch_width: Option<u32>,
     original_image_hash: Option<String>,
-    pub crop_rect: Option<Rect>,
-    pub border_line_width: Option<Rect>,
+    pub crop_rect: Option<Box2d<f64>>,
+    pub border_line_width: Option<Box2d<f32>>,
     pub border_image_bind_id: Option<u32>,
-    pub border_image_nine_patch_rect: Option<Rect>,
+    pub border_image_nine_patch_rect: Option<Box2d<f64>>,
     compat_image_id: Option<u32>,
     pub original_image_id: Option<u32>,
-    pub original_rect: Option<Rect>,
+    pub original_rect: Option<Box2d<f64>>,
 }
 
 #[derive(Error, Debug)]
@@ -580,7 +578,7 @@ pub struct Shape {
     pub(crate) text_data: TextData,
     pub(crate) image_data: ImageData,
 
-    control_points: Vec<Point>,
+    control_points: Vec<Point2d<f64>>,
 }
 
 impl Shape {
@@ -627,7 +625,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
         });
 
         let shape_type: ShapeType = stream.read_u32_le()?.try_into()?;
-        let original_rect = Rect::try_parse_f64(&mut stream)?;
+        let original_rect = Box2d::try_parse(&mut stream)?;
         let original_angle = stream.read_f32_le()?;
 
         // Only read the path if its size is >0.
@@ -649,12 +647,12 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
             None
         };
 
-        let control_points = read_size_and_vec!(stream, u8, Point::try_parse_f64(&mut stream)?);
+        let control_points = read_size_and_vec!(stream, u8, Point2d::try_parse(&mut stream)?);
 
         // This field exists iff the object type is 7, i.e. iff this is a pure shape object, and
         // not a subclass (like a text box or image).
         let original_drawn_rect = is_shape_only
-            .then(|| Rect::try_parse_f64(&mut stream))
+            .then(|| Box2d::<f64>::try_parse(&mut stream))
             .transpose()?;
 
         let field_flags = flag_block.init_flex(&mut stream)?;

@@ -11,17 +11,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    OpaqueBytes, OpaqueBytesParseError,
+    Box2d, OpaqueBytes, OpaqueBytesParseError, Point2d,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
         BoundedStream, ByteStreamLe, ReadStringError, ReadTimestampError, TryParse,
         UnfinishedParsingError,
     },
     impl_try_from_for_optional_from,
-    page::{
-        Point, Rect,
-        object::header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-    },
+    page::object::header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
     read_size_and_map, read_size_and_vec, unpack_bool_flags, unpack_field_flags,
 };
 
@@ -159,7 +156,7 @@ pub struct ObjectBase {
     pub format_version: u32,
     uuid: String,
     modified_time: DateTime<Utc>,
-    rect: Rect,
+    pub rect: Box2d<f64>,
     timestamp_int: u32,
     resize_mode: ResizeMode,
 
@@ -177,7 +174,7 @@ pub struct ObjectBase {
     layout_type: Option<LayoutType>,
     unknown_20: Option<[u8; 20]>,
     thumbnail_bind_id: Option<u32>,
-    pivot: Option<Point>,
+    pivot: Option<Point2d<f64>>,
     group_id: Option<String>,
     pub(crate) page_index: Option<u32>,
     render_layer_id: Option<u32>,
@@ -227,7 +224,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
         let format_version = stream.read_u32_le()?;
         let uuid = stream.read_short_u8_string()?;
         let modified_time = stream.read_timestamp()?;
-        let rect = Rect::try_parse_f64(&mut stream)?;
+        let rect = Box2d::try_parse(&mut stream)?;
         let timestamp_int = stream.read_u32_le()?;
         let resize_mode: ResizeMode = stream.read_u8()?.try_into()?;
 
@@ -263,7 +260,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
             };
 
             17 => thumbnail_bind_id: stream.read_u32_le()?;
-            18 => pivot: Point::try_parse_f64(&mut stream)?;
+            18 => pivot: Point2d::try_parse(&mut stream)?;
             19 => group_id: stream.read_short_u16_string()?;
             20 => page_index: stream.read_u32_le()?;
             21 => render_layer_id: stream.read_u32_le()?;

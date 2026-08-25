@@ -1,10 +1,9 @@
 use std::io;
 
 use crate::{
-    byte_stream::ByteStreamLe,
-    impl_try_from_for_optional_from,
-    page::{Point, Rect},
-    read_u32_sized_vec,
+    Box2d, Point2d,
+    byte_stream::{ByteStreamLe, TryParse},
+    impl_try_from_for_optional_from, read_u32_sized_vec,
 };
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -18,20 +17,24 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy)]
 pub enum PathSegment {
     /// `TYPE_MOVETO`; 1
-    MoveTo(Point),
+    MoveTo(Point2d<f64>),
 
     /// `TYPE_LINETO`; 2
-    LineTo(Point),
+    LineTo(Point2d<f64>),
 
     /// `TYPE_QUADTO`; 3
-    QuadTo { cp1: Point, p2: Point },
+    QuadTo { cp1: Point2d<f64>, p2: Point2d<f64> },
 
     /// `TYPE_CUBICTO`; 4
-    CubicTo { cp1: Point, cp2: Point, p3: Point },
+    CubicTo {
+        cp1: Point2d<f64>,
+        cp2: Point2d<f64>,
+        p3: Point2d<f64>,
+    },
 
     /// `TYPE_ARCTO`; 5
     ArcTo {
-        oval: Rect,
+        oval: Box2d<f64>,
         start_angle: f64,
         sweep_angle: f64,
     },
@@ -40,7 +43,7 @@ pub enum PathSegment {
     Close,
 
     /// `TYPE_ADDOVAL`; 7
-    AddOval(Rect),
+    AddOval(Box2d<f64>),
 }
 
 #[derive(Error, Debug)]
@@ -65,28 +68,28 @@ impl Path {
         Ok(Path {
             segments: read_u32_sized_vec!(stream, PathParseError::TooManySegments, {
                 match stream.read_u8()? {
-                    1 => PathSegment::MoveTo(Point::try_parse_f64(stream)?),
-                    2 => PathSegment::LineTo(Point::try_parse_f64(stream)?),
+                    1 => PathSegment::MoveTo(Point2d::try_parse(stream)?),
+                    2 => PathSegment::LineTo(Point2d::try_parse(stream)?),
 
                     3 => PathSegment::QuadTo {
-                        cp1: Point::try_parse_f64(stream)?,
-                        p2: Point::try_parse_f64(stream)?,
+                        cp1: Point2d::try_parse(stream)?,
+                        p2: Point2d::try_parse(stream)?,
                     },
 
                     4 => PathSegment::CubicTo {
-                        cp1: Point::try_parse_f64(stream)?,
-                        cp2: Point::try_parse_f64(stream)?,
-                        p3: Point::try_parse_f64(stream)?,
+                        cp1: Point2d::try_parse(stream)?,
+                        cp2: Point2d::try_parse(stream)?,
+                        p3: Point2d::try_parse(stream)?,
                     },
 
                     5 => PathSegment::ArcTo {
-                        oval: Rect::try_parse_f64(stream)?,
+                        oval: Box2d::try_parse(stream)?,
                         start_angle: stream.read_f64_le()?,
                         sweep_angle: stream.read_f64_le()?,
                     },
 
                     6 => PathSegment::Close,
-                    7 => PathSegment::AddOval(Rect::try_parse_f64(stream)?),
+                    7 => PathSegment::AddOval(Box2d::try_parse(stream)?),
 
                     bad => return Err(PathParseError::BadSegmentType(bad)),
                 }

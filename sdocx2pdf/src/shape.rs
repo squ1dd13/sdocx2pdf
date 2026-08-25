@@ -1,124 +1,47 @@
-use euclid::{Angle, Point2D, Transform2D};
-use sdocx::page::{
-    Point as DocPoint,
-    object::{
+use krilla::{
+    color::rgb,
+    geom::PathBuilder,
+    num::NormalizedF32,
+    paint::{Fill, FillRule, LineCap, LineJoin, Stroke},
+};
+use sdocx::{
+    euclid::{Angle, Transform2D},
+    page::object::{
         ArrowShape, CapType, FillEffect, JoinType, LineColourEffect, LineStyleEffect, PathSegment,
     },
 };
 use thiserror::Error;
 
 use crate::page::PageConversionCtx;
-use crate::pdf::{self, dictionary};
+use crate::pdf;
 
 // --▶
 // Vertices are named for an arrowhead pointing to the right.
-const NORMAL_ARROW: [pdf::Point; 3] = [
+const NORMAL_ARROW: [pdf::Point2d; 3] = [
     // Top
-    pdf::Point::new(-1.0, -0.5),
+    pdf::Point2d::new(-1.0, -0.5),
     // Apex
-    pdf::Point::new(0.0, 0.0),
+    pdf::Point2d::new(0.0, 0.0),
     // Bottom
-    pdf::Point::new(-1.0, 0.5),
+    pdf::Point2d::new(-1.0, 0.5),
 ];
 
 /// Returns `[top, apex, bottom]` if the angle to the horizontal is zero, and the transformed
 /// equivalents otherwise.
 fn normal_arrow_vertices_ordered(
-    apex_at: Point2D<f64, pdf::Space>,
+    apex_at: pdf::Point2d,
     angle_to_horizontal: Angle<f64>,
     size_unit: f64,
-) -> [pdf::Point; 3] {
-    let tx = Transform2D::<f64, pdf::Space, pdf::Space>::scale(size_unit, size_unit)
+) -> [pdf::Point2d; 3] {
+    let tx = Transform2D::<f64, pdf::PdfSpace, pdf::PdfSpace>::scale(size_unit, size_unit)
         .then_rotate(angle_to_horizontal)
         .then_translate(apex_at.to_vector());
 
     NORMAL_ARROW.map(|p| tx.transform_point(p))
 }
 
-fn doc_point_to_pdf(p: DocPoint) -> pdf::Point {
+fn doc_point_to_pdf(p: sdocx::Point2d<f64>) -> pdf::Point2d {
     <(f64, f64)>::from(p).into()
-}
-
-fn specify_path_by_segments(
-    segments: &[PathSegment],
-    ops: &mut Vec<pdf::Operation>,
-) -> Result<(), PathDrawingError> {
-    let mut last_point: Option<pdf::Point> = None;
-
-    // If we encounter an error, we need to know how many ops there were before so we can remove
-    // all the ones we added.
-    let op_count_pre = ops.len();
-
-    let mut found_close = false;
-
-    for s in segments {
-        let op_res: Result<_, PathDrawingError> = 'op_block: {
-            if found_close {
-                break 'op_block Err(PathDrawingError::SegmentAfterClose);
-            }
-
-            Ok(match s {
-                &PathSegment::MoveTo(p) => {
-                    let p = doc_point_to_pdf(p);
-                    last_point = Some(p);
-                    pdf::move_to(p)
-                }
-
-                &PathSegment::LineTo(p) => {
-                    let p = doc_point_to_pdf(p);
-                    last_point = Some(p);
-                    pdf::line_to(p)
-                }
-
-                &PathSegment::CubicTo { cp1, cp2, p3 } => {
-                    let p3 = doc_point_to_pdf(p3);
-                    last_point = Some(p3);
-                    pdf::cubic_to(doc_point_to_pdf(cp1), doc_point_to_pdf(cp2), p3)
-                }
-
-                &PathSegment::QuadTo {
-                    cp1: quad_control,
-                    p2: end,
-                } => {
-                    let Some(start) = last_point else {
-                        break 'op_block Err(PathDrawingError::BadQuad);
-                    };
-
-                    let quad_control = doc_point_to_pdf(quad_control);
-                    let end = doc_point_to_pdf(end);
-
-                    // Convert the quadratic Bézier to a cubic one.
-                    // https://fontforge.org/docs/techref/bezier.html#converting-truetype-to-postscript
-                    let cp1 = (((quad_control - start) * 2.0) / 3.0 + start.to_vector()).to_point();
-                    let cp2 = (((quad_control - end) * 2.0) / 3.0 + end.to_vector()).to_point();
-
-                    last_point = Some(end);
-
-                    pdf::cubic_to(cp1, cp2, end)
-                }
-
-                // todo: Implement these
-                PathSegment::ArcTo { .. } => break 'op_block Err(PathDrawingError::ArcUnsupported),
-                PathSegment::AddOval(..) => break 'op_block Err(PathDrawingError::OvalUnsupported),
-
-                PathSegment::Close => {
-                    found_close = true;
-                    pdf::close_subpath()
-                }
-            })
-        };
-
-        match op_res {
-            Ok(op) => ops.push(op),
-            Err(err) => {
-                // Remove any operations added.
-                ops.truncate(op_count_pre);
-                return Err(err);
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn check_line_style(ls: &LineStyleEffect) {
@@ -190,15 +113,15 @@ trait InternalPathDrawingCtx {
         &mut self,
         stroke_style: Option<StrokeStyle>,
         fill_bgra: Option<[u8; 4]>,
-        path_fn: impl FnOnce(&mut Vec<pdf::Operation>) -> Result<(), PathDrawingError>,
+        path_fn: impl FnOnce(&mut PathBuilder) -> Result<(), PathDrawingError>,
     ) -> Result<(), PathDrawingError>;
 }
 
 pub trait PathDrawingCtx {
     fn draw_line(
         &mut self,
-        start: DocPoint,
-        end: DocPoint,
+        start: sdocx::Point2d<f64>,
+        end: sdocx::Point2d<f64>,
         lc: Option<&LineColourEffect>,
         ls: Option<&LineStyleEffect>,
     ) -> Result<(), NoStyleError>;
@@ -212,12 +135,12 @@ pub trait PathDrawingCtx {
     ) -> Result<(), PathDrawingError>;
 }
 
-impl InternalPathDrawingCtx for PageConversionCtx {
+impl InternalPathDrawingCtx for PageConversionCtx<'_> {
     fn draw_path_with_stroke_fill_style(
         &mut self,
         stroke_style: Option<StrokeStyle>,
         fill_bgra: Option<[u8; 4]>,
-        path_fn: impl FnOnce(&mut Vec<pdf::Operation>) -> Result<(), PathDrawingError>,
+        path_fn: impl FnOnce(&mut PathBuilder) -> Result<(), PathDrawingError>,
     ) -> Result<(), PathDrawingError> {
         let (filling, stroking) = (fill_bgra.is_some(), stroke_style.is_some());
 
@@ -225,10 +148,15 @@ impl InternalPathDrawingCtx for PageConversionCtx {
             return Err(PathDrawingError::NoStyleError(NoStyleError));
         }
 
-        let op_count_pre = self.ops.len();
-        self.ops.push(pdf::save_graphics_state());
-
-        let mut graphics_state = None;
+        if let Some([b, g, r, a]) = fill_bgra {
+            self.surface.set_fill(Some(Fill {
+                paint: rgb::Color::new(r, g, b).into(),
+                opacity: NormalizedF32::new(a as f32 / 255.0).unwrap(),
+                rule: FillRule::NonZero,
+            }));
+        } else {
+            self.surface.set_fill(None);
+        }
 
         if let Some(StrokeStyle {
             bgra: [b, g, r, a],
@@ -237,72 +165,130 @@ impl InternalPathDrawingCtx for PageConversionCtx {
             cap,
         }) = stroke_style
         {
-            self.ops.push(pdf::set_stroke_colour(r, g, b));
+            self.surface.set_stroke(Some({
+                let line_cap = match cap {
+                    CapType::Butt => LineCap::Butt,
+                    CapType::Round => LineCap::Round,
+                    CapType::Square => LineCap::Square,
+                };
 
-            graphics_state = Some(pdf::dictionary! {
-                "Type" => "ExtGState",
-                "LW" => width,
-                "CA" => (a as f32) / 255.0,
-                "LC" => match cap {
-                    CapType::Butt => 0,
-                    CapType::Round => 1,
-                    CapType::Square => 2,
-                },
-                "LJ" => match join {
-                    JoinType::Miter => 0,
-                    JoinType::Round => 1,
-                    JoinType::Bevel => 2,
-                },
-            });
-        }
+                let line_join = match join {
+                    JoinType::Miter => LineJoin::Miter,
+                    JoinType::Round => LineJoin::Round,
+                    JoinType::Bevel => LineJoin::Bevel,
+                };
 
-        if let Some([b, g, r, a]) = fill_bgra {
-            self.ops.push(pdf::set_fill_colour(r, g, b));
-
-            // If the fill is not opaque, we need an extended graphics state for the alpha.
-            if a < 255 {
-                let ca = (a as f32) / 255.0;
-
-                if let Some(graphics_state) = graphics_state.as_mut() {
-                    graphics_state.set("ca", ca);
-                } else {
-                    graphics_state = Some(pdf::dictionary! {
-                        "Type" => "ExtGState",
-                        "ca" => ca,
-                    });
+                Stroke {
+                    paint: rgb::Color::new(r, g, b).into(),
+                    width,
+                    opacity: NormalizedF32::new(a as f32 / 255.0).unwrap(),
+                    line_cap,
+                    line_join,
+                    ..Stroke::default()
                 }
-            }
+            }));
+        } else {
+            self.surface.set_stroke(None);
         }
 
-        if let Some(graphics_dict) = graphics_state {
-            let name = self.add_graphics_dict(graphics_dict);
-            self.ops.push(pdf::load_graphics_dict(name));
+        let mut pb = PathBuilder::new();
+        path_fn(&mut pb)?;
+
+        if let Some(path) = pb.finish() {
+            self.surface.draw_path(&path);
         }
-
-        if let Err(err) = path_fn(&mut self.ops) {
-            // Remove the operations added.
-            self.ops.truncate(op_count_pre);
-            return Err(err);
-        };
-
-        match (filling, stroking) {
-            (true, true) => self.ops.push(pdf::fill_and_stroke()),
-            (true, false) => self.ops.push(pdf::fill()),
-            (false, true) => self.ops.push(pdf::stroke()),
-            _ => (),
-        }
-
-        self.ops.push(pdf::restore_graphics_state());
 
         Ok(())
     }
 }
 
-impl PathDrawingCtx for PageConversionCtx {
+fn specify_path_by_segments(
+    segments: &[PathSegment],
+    pb: &mut PathBuilder,
+) -> Result<(), PathDrawingError> {
+    let mut last_point: Option<pdf::Point2d> = None;
+    let mut found_close = false;
+
+    for s in segments {
+        if found_close {
+            return Err(PathDrawingError::SegmentAfterClose);
+        }
+
+        match s {
+            &PathSegment::MoveTo(p) => {
+                let p = doc_point_to_pdf(p);
+                last_point = Some(p);
+                pb.move_to(p.x as f32, p.y as f32);
+            }
+
+            &PathSegment::LineTo(p) => {
+                let p = doc_point_to_pdf(p);
+                last_point = Some(p);
+                pb.line_to(p.x as f32, p.y as f32);
+            }
+
+            &PathSegment::CubicTo { cp1, cp2, p3 } => {
+                let cp1 = doc_point_to_pdf(cp1);
+                let cp2 = doc_point_to_pdf(cp2);
+                let p3 = doc_point_to_pdf(p3);
+                last_point = Some(p3);
+                pb.cubic_to(
+                    cp1.x as f32,
+                    cp1.y as f32,
+                    cp2.x as f32,
+                    cp2.y as f32,
+                    p3.x as f32,
+                    p3.y as f32,
+                );
+            }
+
+            &PathSegment::QuadTo {
+                cp1: quad_control,
+                p2: end,
+            } => {
+                let Some(start) = last_point else {
+                    return Err(PathDrawingError::BadQuad);
+                };
+
+                let quad_control = doc_point_to_pdf(quad_control);
+                let end = doc_point_to_pdf(end);
+
+                // Convert the quadratic Bézier to a cubic one.
+                // https://fontforge.org/docs/techref/bezier.html#converting-truetype-to-postscript
+                let cp1 = (((quad_control - start) * 2.0) / 3.0 + start.to_vector()).to_point();
+                let cp2 = (((quad_control - end) * 2.0) / 3.0 + end.to_vector()).to_point();
+
+                last_point = Some(end);
+
+                pb.cubic_to(
+                    cp1.x as f32,
+                    cp1.y as f32,
+                    cp2.x as f32,
+                    cp2.y as f32,
+                    end.x as f32,
+                    end.y as f32,
+                );
+            }
+
+            // todo: Implement these
+            PathSegment::ArcTo { .. } => return Err(PathDrawingError::ArcUnsupported),
+            PathSegment::AddOval(..) => return Err(PathDrawingError::OvalUnsupported),
+
+            PathSegment::Close => {
+                found_close = true;
+                pb.close();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+impl PathDrawingCtx for PageConversionCtx<'_> {
     fn draw_line(
         &mut self,
-        start: DocPoint,
-        end: DocPoint,
+        start: sdocx::Point2d<f64>,
+        end: sdocx::Point2d<f64>,
         lc: Option<&LineColourEffect>,
         ls: Option<&LineStyleEffect>,
     ) -> Result<(), NoStyleError> {
@@ -310,10 +296,8 @@ impl PathDrawingCtx for PageConversionCtx {
             return Err(NoStyleError);
         }
 
-        let start: pdf::Point = (start.x, start.y).into();
-        let end: pdf::Point = (end.x, end.y).into();
-
-        self.ops.push(pdf::save_graphics_state());
+        let start: pdf::Point2d = (start.x, start.y).into();
+        let end: pdf::Point2d = (end.x, end.y).into();
 
         let lc = match lc {
             Some(lc) => lc,
@@ -363,64 +347,69 @@ impl PathDrawingCtx for PageConversionCtx {
             }
         };
 
-        match (start_arrow_points, end_arrow_points) {
-            (None, None) => (),
-
-            // If there are arrowheads, we need to clip the line so that it does not poke out from
-            // behind them. At an end where there is an arrowhead, the clipping path conforms to the
-            // shape of the arrow. At an end where there is not, we need the line to fit inside the
-            // clipping path. To do that, we assume the line has butt caps and think of it as a
-            // rectangle. The corners of the clipping path at the non-arrow end are found by padding
-            // this rectangle with some multiple of the stroke width such that regardless of the line
-            // caps, the padded rectangle contains the line.
-            (sap, eap) => {
+        // If there are arrowheads, we need to clip the line so that it does not poke out from
+        // behind them. At an end where there is an arrowhead, the clipping path conforms to the
+        // shape of the arrow. At an end where there is not, we need the line to fit inside the
+        // clipping path. To do that, we assume the line has butt caps and think of it as a
+        // rectangle. The corners of the clipping path at the non-arrow end are found by padding
+        // this rectangle with some multiple of the stroke width such that regardless of the line
+        // caps, the padded rectangle contains the line.
+        let pushed_arrow_clip = match (start_arrow_points, end_arrow_points) {
+            (None, None) => false,
+            _ => {
                 let width = ls.width as f64;
                 let no_arrow_clip_pad = width * 3.0;
 
                 let line_dir = line_vec.normalize();
+                let up = pdf::Vector2d::new(line_dir.y, -line_dir.x) * width;
+                let down = pdf::Vector2d::new(-line_dir.y, line_dir.x) * width;
 
-                let up = pdf::Vector::new(line_dir.y, -line_dir.x) * width;
-                let down = pdf::Vector::new(-line_dir.y, line_dir.x) * width;
+                let mut clip = PathBuilder::new();
 
-                match sap {
+                match start_arrow_points {
                     // Start is rotated, so order is bottom, apex, top
                     Some([bottom, apex, top]) => {
-                        self.ops.extend([
-                            pdf::move_to(bottom),
-                            pdf::line_to(apex),
-                            pdf::line_to(top),
-                        ]);
+                        clip.move_to(bottom.x as f32, bottom.y as f32);
+                        clip.line_to(apex.x as f32, apex.y as f32);
+                        clip.line_to(top.x as f32, top.y as f32);
                     }
                     None => {
                         let start_plus_pad = start - line_dir * no_arrow_clip_pad;
 
-                        self.ops.extend([
-                            pdf::move_to(start_plus_pad + down * no_arrow_clip_pad),
-                            pdf::line_to(start_plus_pad + up * no_arrow_clip_pad),
-                        ]);
+                        // As promised: No arrowhead at this end, so just add a butt cap with
+                        // padding so that it won't clip the line itself.
+                        let padded_down = start_plus_pad + down * no_arrow_clip_pad;
+                        let padded_up = start_plus_pad + up * no_arrow_clip_pad;
+
+                        clip.move_to(padded_down.x as f32, padded_down.y as f32);
+                        clip.line_to(padded_up.x as f32, padded_up.y as f32);
                     }
                 };
 
-                match eap {
+                match end_arrow_points {
                     Some([top, apex, bottom]) => {
-                        self.ops.extend([
-                            pdf::line_to(top),
-                            pdf::line_to(apex),
-                            pdf::line_to(bottom),
-                        ]);
+                        clip.line_to(top.x as f32, top.y as f32);
+                        clip.line_to(apex.x as f32, apex.y as f32);
+                        clip.line_to(bottom.x as f32, bottom.y as f32);
                     }
                     None => {
                         let end_plus_pad = end + line_dir * no_arrow_clip_pad;
 
-                        self.ops.extend([
-                            pdf::line_to(end_plus_pad + up * no_arrow_clip_pad),
-                            pdf::line_to(end_plus_pad + down * no_arrow_clip_pad),
-                        ]);
+                        let padded_up = end_plus_pad + up * no_arrow_clip_pad;
+                        let padded_down = end_plus_pad + down * no_arrow_clip_pad;
+
+                        clip.line_to(padded_up.x as f32, padded_up.y as f32);
+                        clip.line_to(padded_down.x as f32, padded_down.y as f32);
                     }
                 };
 
-                // Clip the current graphics state with the path just specified.
-                self.ops.extend(pdf::clip(pdf::WindingRule::NonZero));
+                clip.close();
+                let clip_path = clip.finish().unwrap();
+
+                self.surface.push_clip_path(&clip_path, &FillRule::NonZero);
+
+                // "Yes, we pushed a clip path"
+                true
             }
         };
 
@@ -434,8 +423,9 @@ impl PathDrawingCtx for PageConversionCtx {
             }),
             // No fill
             None,
-            |ops| {
-                ops.extend([pdf::move_to(start), pdf::line_to(end)]);
+            |pb| {
+                pb.move_to(start.x as f32, start.y as f32);
+                pb.line_to(end.x as f32, end.y as f32);
                 Ok(())
             },
         );
@@ -449,13 +439,10 @@ impl PathDrawingCtx for PageConversionCtx {
                 // The arrowheads are part of the line, but they are filled, so the line stroke
                 // becomes the arrowhead fill.
                 Some(lc.solid_colour_bgra()),
-                |ops| {
-                    ops.extend([
-                        pdf::move_to(arrow_points[0]),
-                        pdf::line_to(arrow_points[1]),
-                        pdf::line_to(arrow_points[2]),
-                    ]);
-
+                |pb| {
+                    pb.move_to(arrow_points[0].x as f32, arrow_points[0].y as f32);
+                    pb.line_to(arrow_points[1].x as f32, arrow_points[1].y as f32);
+                    pb.line_to(arrow_points[2].x as f32, arrow_points[2].y as f32);
                     Ok(())
                 },
             );
@@ -464,7 +451,9 @@ impl PathDrawingCtx for PageConversionCtx {
             arrow_res.expect("arrowhead path drawing should not fail");
         }
 
-        self.ops.push(pdf::restore_graphics_state());
+        if pushed_arrow_clip {
+            self.surface.pop();
+        }
 
         Ok(())
     }
@@ -504,7 +493,7 @@ impl PathDrawingCtx for PageConversionCtx {
         self.draw_path_with_stroke_fill_style(
             stroke_style,
             fill_effect.and_then(fe_to_solid_bgra),
-            |ops| specify_path_by_segments(segments, ops),
+            |pb| specify_path_by_segments(segments, pb),
         )
     }
 }

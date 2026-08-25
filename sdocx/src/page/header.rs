@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io::Read, rc::Rc};
 
 use crate::{
+    Box2d,
     bits::{CheckedBitfield, UnhandledBitsError},
     byte_stream::{
         BoundedStream, ByteStreamLe, ReadBitfieldError, ReadStringError, TryParse,
@@ -8,8 +9,7 @@ use crate::{
     },
     context::TryParseWithContext,
     media_info::{BoundFile, FileRegistry, NoSuchRegisteredFileError},
-    page::Rect,
-    read_size_and_map,
+    read_size_and_map, try_parse_i32_box,
 };
 use log::warn;
 use thiserror::Error;
@@ -31,7 +31,7 @@ pub enum PdfDataItemParseError {
 pub struct PdfPage {
     pdf: Rc<BoundFile>,
     page_index: u32,
-    rect: Rect,
+    rect: Box2d<f64>,
 }
 
 impl PdfPage {
@@ -46,7 +46,7 @@ impl PdfPage {
     }
 
     /// Returns the rectangle within which the page is displayed.
-    pub const fn rect(&self) -> Rect {
+    pub const fn rect(&self) -> Box2d<f64> {
         self.rect
     }
 }
@@ -62,9 +62,9 @@ impl<R: Read> TryParseWithContext<R, PdfDataItemParseCtx<'_>> for PdfPage {
             pdf: ctx.file_registry.try_get(reader.read_u32_le()?)?,
             page_index: reader.read_u32_le()?,
             rect: if ctx.format_version < 2034 {
-                Rect::try_parse_f64(reader)?
+                Box2d::try_parse(reader)?
             } else {
-                Rect::try_parse_i32(reader)?
+                try_parse_i32_box(reader)?
             },
         })
     }
@@ -161,7 +161,7 @@ pub struct CustomPageObject {
     uuid: String,
     attached_files: HashMap<String, Rc<BoundFile>>,
     custom_data: HashMap<String, String>,
-    rect: Rect,
+    rect: Box2d<f64>,
 }
 
 impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
@@ -208,7 +208,7 @@ impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
             (reader.read_long_u8_string()?, reader.read_long_u8_string()?)
         );
 
-        let rect = Rect::try_parse_f64(&mut reader)?;
+        let rect = Box2d::try_parse(&mut reader)?;
 
         reader.ensure_eof()?;
 

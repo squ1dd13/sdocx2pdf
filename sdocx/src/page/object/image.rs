@@ -3,17 +3,15 @@ use std::io::{self, Read, Seek};
 use thiserror::Error;
 
 use crate::{
-    byte_stream::{BoundedStream, ByteStreamLe, UnfinishedParsingError},
+    Box2d,
+    byte_stream::{BoundedStream, ByteStreamLe, TryParse, UnfinishedParsingError},
     context::{DocumentContext, TryParseWithContext},
-    page::{
-        Rect,
-        object::{
-            base::{HasObjectBase, ObjectBase},
-            header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
-            shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
-        },
+    page::object::{
+        base::{HasObjectBase, ObjectBase},
+        header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
+        shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
     },
-    unpack_field_flags,
+    try_parse_i32_box, unpack_field_flags,
 };
 
 #[derive(Error, Debug)]
@@ -53,18 +51,18 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {
 
         unpack_field_flags!(field_flags, {
             // (missing 0)
-            1 => crop_rect: Rect::try_parse_i32(&mut stream)?;
+            1 => crop_rect: try_parse_i32_box(&mut stream)?;
             // (missing 2)
             3 => border_colour: stream.read_4_bytes()?;
             4 => border_width: stream.read_f32_le()?;
             5 => border_type: stream.read_u16_le()?.try_into()?;
             // (missing 6, 7, 8)
             9 => border_image_bind_id: stream.read_u32_le()?;
-            10 => border_image_nine_patch_rect: Rect::try_parse_i32(&mut stream)?;
-            11 => border_line_width: Rect::try_parse_f32(&mut stream)?;
+            10 => border_image_nine_patch_rect: try_parse_i32_box(&mut stream)?;
+            11 => border_line_width: Box2d::try_parse(&mut stream)?;
             12 => border_image_nine_patch_width: stream.read_u32_le()?;
             // (missing 13, 14, 15, 16)
-            17 => original_rect: Rect::try_parse_f64(&mut stream)?;
+            17 => original_rect: Box2d::try_parse(&mut stream)?;
             18 => original_image_bind_id: stream.read_u32_le()?;
         });
 
