@@ -8,7 +8,7 @@ use crate::{
         image::{Image, ImageParseError},
         line::{Line, LineParseError},
         painting::{Painting, PaintingParseError},
-        shape::{Shape, ShapeParseContext, ShapeParseError},
+        shape::{ShapeParseContext, ShapeParseError},
         stroke::{Stroke, StrokeParseError},
         table::{Table, TableParseError},
         text::{Text, TextParseError},
@@ -35,7 +35,10 @@ pub mod text;
 mod text_core;
 mod web;
 
-pub use shape::{FillColourEffect, FillEffect, FillImageEffect, ShapeType};
+pub use shape::{
+    FillColourEffect, FillEffect, FillImageEffect, ImageData, ImagePixelsUnit, Shape, ShapeType,
+    Template,
+};
 pub use shape_base::{
     ArrowShape, ArrowSize, CapType, CompoundType, DashType, JoinType, LineColourEffect,
     LineStyleEffect,

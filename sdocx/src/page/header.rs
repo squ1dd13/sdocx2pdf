@@ -210,6 +210,12 @@ impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
 
         let rect = Box2d::try_parse(&mut reader)?;
 
+        // todo: Check what these are
+        if reader.n_remaining() == 8 {
+            let value = reader.read_u64_le()?;
+            warn!("Found 8 unknown bytes at end of custom page object (value {value:#x})");
+        }
+
         reader.ensure_eof()?;
 
         Ok(CustomPageObject {

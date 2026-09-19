@@ -6,6 +6,7 @@ use crate::{
     },
     context::{DocumentContext, TryParseWithContext},
     impl_try_from_for_optional_from,
+    media_info::{BoundFile, FileRegistry, NoSuchRegisteredFileError},
     page::object::{
         LineColourEffect, LineStyleEffect,
         base::{HasObjectBase, ObjectBase},
@@ -16,9 +17,13 @@ use crate::{
     },
     read_size_and_vec, try_parse_i32_box, unpack_bool_flags, unpack_field_flags,
 };
+use log::warn;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
-use std::io::{self, Read, Seek};
+use std::{
+    io::{self, Read, Seek},
+    rc::Rc,
+};
 use strum::Display;
 use thiserror::Error;
 
@@ -280,22 +285,47 @@ impl FillColourEffect {
 #[expect(dead_code)]
 pub struct FillImageEffect {
     image_type: u8,
-    image_id: i32,
+    image: Option<Rc<BoundFile>>,
     nine_patch_rect: Box2d<f64>,
     nine_patch_width: u32,
     stretch_offset: Box2d<f32>,
     tiling_offset: Point2d<f32>,
     tiling_scale_x: f32,
     tiling_scale_y: f32,
-    alpha: f32,
+    pub alpha: f32,
     rotatable: bool,
 }
 
 impl FillImageEffect {
-    fn try_parse(stream: &mut impl ByteStreamLe) -> io::Result<FillImageEffect> {
+    pub fn image_name(&self) -> Option<&str> {
+        self.image.as_ref().map(|i| i.name())
+    }
+}
+
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub enum FillImageEffectParseError {
+    Io(#[from] io::Error),
+    MissingImageFile(#[from] NoSuchRegisteredFileError),
+}
+
+impl<R: ByteStreamLe> TryParseWithContext<R, FileRegistry> for FillImageEffect {
+    type ParseError = FillImageEffectParseError;
+
+    fn try_parse_with_ctx(stream: &mut R, ctx: &FileRegistry) -> Result<Self, Self::ParseError> {
         Ok(FillImageEffect {
             image_type: stream.read_u8()?,
-            image_id: stream.read_i32_le()?,
+            image: match stream.read_i32_le()? {
+                id @ 0.. => Some(ctx.try_get(id.cast_unsigned())?),
+                negative => {
+                    // -1 means "no image", but anything else negative is weird
+                    if negative != -1 {
+                        warn!("Invalid image ID {negative} for fill effect");
+                    }
+
+                    None
+                }
+            },
             stretch_offset: Box2d::try_parse(stream)?,
             tiling_offset: Point2d::try_parse(stream)?,
             tiling_scale_x: stream.read_f32_le()?,
@@ -313,6 +343,7 @@ impl FillImageEffect {
 pub enum FillEffectParseError {
     Io(#[from] io::Error),
     ColourEffect(#[from] FillColourEffectParseError),
+    ImageEffect(#[from] FillImageEffectParseError),
 
     #[error("invalid fill effect type {0}")]
     BadEffectType(u8),
@@ -334,14 +365,18 @@ pub enum FillEffect {
     },
 }
 
-impl FillEffect {
-    fn try_parse<T: ByteStreamLe>(stream: &mut T) -> Result<FillEffect, FillEffectParseError> {
+impl<R: ByteStreamLe> TryParseWithContext<R, FileRegistry> for FillEffect {
+    type ParseError = FillEffectParseError;
+
+    fn try_parse_with_ctx(stream: &mut R, ctx: &FileRegistry) -> Result<Self, Self::ParseError> {
         let _effect_size = stream.read_u32_le()?;
         let effect_type = stream.read_u8()?;
 
         match effect_type {
             1 => Ok(FillEffect::Colour(FillColourEffect::try_parse(stream)?)),
-            2 => Ok(FillEffect::Image(FillImageEffect::try_parse(stream)?)),
+            2 => Ok(FillEffect::Image(FillImageEffect::try_parse_with_ctx(
+                stream, ctx,
+            )?)),
 
             3 => Ok(FillEffect::Pattern {
                 pattern: stream.read_u64_le()?.to_le_bytes(),
@@ -375,13 +410,12 @@ pub enum BorderType {
 impl_try_from_for_optional_from!(BorderType, u16, from_u16, pub InvalidBorderTypeError);
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct Template {
-    is_flipped_horizontally: bool,
-    is_flipped_vertically: bool,
-    owner_rect: Box2d<f64>,
-    rotation: f32,
-    path: Path,
+pub struct Template {
+    pub is_flipped_horizontally: bool,
+    pub is_flipped_vertically: bool,
+    pub owner_rect: Box2d<f64>,
+    pub rotation: f32,
+    pub path: Path,
 }
 
 #[derive(Debug)]
@@ -519,6 +553,8 @@ pub struct TextData {
     lined_paper_colour: Option<[u8; 4]>,
 }
 
+pub enum ImagePixelsUnit {}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub struct ImageData {
@@ -527,7 +563,7 @@ pub struct ImageData {
     border_image_hash: Option<String>,
     pub border_image_nine_patch_width: Option<u32>,
     original_image_hash: Option<String>,
-    pub crop_rect: Option<Box2d<f64>>,
+    pub crop_rect: Option<euclid::Box2D<f64, ImagePixelsUnit>>,
     pub border_line_width: Option<Box2d<f32>>,
     pub border_image_bind_id: Option<u32>,
     pub border_image_nine_patch_rect: Option<Box2d<f64>>,
@@ -582,8 +618,8 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn path(&self) -> Option<&Path> {
-        self.shape_data.template.as_ref().map(|t| &t.path)
+    pub fn template(&self) -> Option<&Template> {
+        self.shape_data.template.as_ref()
     }
 
     pub fn line_colour_effect(&self) -> Option<&LineColourEffect> {
@@ -596,6 +632,10 @@ impl Shape {
 
     pub const fn fill_effect(&self) -> Option<&FillEffect> {
         self.shape_data.fill_effect.as_ref()
+    }
+
+    pub fn image_data(&self) -> &ImageData {
+        &self.image_data
     }
 }
 
@@ -674,7 +714,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
             3 => default_pen_name_id: stream.read_u32_le()?;
             4 => style_id: stream.read_u32_le()?;
 
-            5 => fill_effect: FillEffect::try_parse(&mut stream)?;
+            5 => fill_effect: FillEffect::try_parse_with_ctx(&mut stream, doc_ctx.file_registry)?;
 
             // SPen::ObjectShapeImage::ApplyBinary_BorderData
             6 => _border_1: stream.seek_relative(4)?;

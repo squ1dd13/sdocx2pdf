@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use crate::{
     BasicSplitMode, pdf,
-    shape::{NoStyleError, PathDrawingCtx, PathDrawingError},
+    shape::{NoStyleError, PathDrawingError, ShapeDrawingCtx},
     tool::{EventGroup, Tool},
 };
 
@@ -735,9 +735,6 @@ pub enum DrawObjectError {
     #[error("failed to draw stroke object")]
     Stroke,
 
-    #[error("shape is missing path")]
-    ShapeMissingPath,
-
     #[error("failed to draw path for shape")]
     ShapePath(PathDrawingError),
 
@@ -753,8 +750,8 @@ impl DrawObjectError {
         match self {
             DrawObjectError::Stroke => error!("Failed to draw stroke object"),
 
-            DrawObjectError::ShapeMissingPath => {
-                error!("Shape object has no path")
+            DrawObjectError::ShapePath(e @ PathDrawingError::NothingDrawn(_)) => {
+                warn!("Shape will be invisible in output: {e}");
             }
 
             DrawObjectError::ShapePath(err) => {
@@ -852,6 +849,7 @@ impl<'s> PageConversionCtx<'s> {
         object: &sdocx::DocObject,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        media: &mut MediaStorage,
     ) -> Result<(), DrawObjectError> {
         match object {
             sdocx::DocObject::Stroke(stroke) => self
@@ -871,18 +869,15 @@ impl<'s> PageConversionCtx<'s> {
                     .map_err(DrawObjectError::NoLineStyle)
             }
 
-            sdocx::DocObject::Shape(shape) => {
-                if let Some(path) = shape.path() {
-                    self.draw_path_segments(
-                        path.segments(),
-                        shape.line_colour_effect(),
-                        shape.line_style(),
-                        shape.fill_effect(),
-                    )
+            sdocx::DocObject::Shape(_) | sdocx::DocObject::Image(_) => {
+                let shape = match object {
+                    sdocx::DocObject::Shape(shape) => shape,
+                    sdocx::DocObject::Image(image) => &image.shape,
+                    _ => unreachable!(),
+                };
+
+                self.draw_shape(shape, media)
                     .map_err(DrawObjectError::ShapePath)
-                } else {
-                    Err(DrawObjectError::ShapeMissingPath)
-                }
             }
 
             other => Err(DrawObjectError::Unsupported(<&str>::from(other))),
@@ -895,6 +890,7 @@ impl<'s> PageConversionCtx<'s> {
         pen_width_mul: f32,
         marker_width_mul: f32,
         multi_progress: &MultiProgress,
+        media: &mut MediaStorage,
     ) {
         let objects_bar = multi_progress
             .add(ProgressBar::new(objects.len() as _))
@@ -945,7 +941,9 @@ impl<'s> PageConversionCtx<'s> {
 
             // This is a chunk of non-strokes.
             for obj in objects {
-                if let Err(err) = self.draw_single_object(obj, pen_width_mul, marker_width_mul) {
+                if let Err(err) =
+                    self.draw_single_object(obj, pen_width_mul, marker_width_mul, media)
+                {
                     err.log();
                 }
             }
