@@ -251,6 +251,7 @@ fn create_document_pdf(
                 &inline_obj.object,
                 args.pen_width_multiplier,
                 args.marker_width_multiplier,
+                media_storage,
             ) {
                 err.log();
             }
@@ -261,6 +262,7 @@ fn create_document_pdf(
             args.pen_width_multiplier,
             args.marker_width_multiplier,
             multi_progress,
+            media_storage,
         );
     }
 

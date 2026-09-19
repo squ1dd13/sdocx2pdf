@@ -152,7 +152,7 @@ pub type Box2d<T> = euclid::Box2D<T, SdocxSpace>;
 pub type Size2d<T> = euclid::Size2D<T, SdocxSpace>;
 pub type Length<T> = euclid::Length<T, SdocxSpace>;
 
-impl<R: Read> TryParse<R> for Point2d<f32> {
+impl<R: Read, Unit> TryParse<R> for euclid::Point2D<f32, Unit> {
     type ParseError = std::io::Error;
 
     fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
@@ -160,7 +160,7 @@ impl<R: Read> TryParse<R> for Point2d<f32> {
     }
 }
 
-impl<R: Read> TryParse<R> for Point2d<f64> {
+impl<R: Read, Unit> TryParse<R> for euclid::Point2D<f64, Unit> {
     type ParseError = std::io::Error;
 
     fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
@@ -168,7 +168,7 @@ impl<R: Read> TryParse<R> for Point2d<f64> {
     }
 }
 
-impl<R: Read> TryParse<R> for Point2d<i32> {
+impl<R: Read, Unit> TryParse<R> for euclid::Point2D<i32, Unit> {
     type ParseError = std::io::Error;
 
     fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
@@ -176,14 +176,14 @@ impl<R: Read> TryParse<R> for Point2d<i32> {
     }
 }
 
-impl<R: Read> TryParse<R> for Box2d<f32> {
+impl<R: Read, Unit> TryParse<R> for euclid::Box2D<f32, Unit> {
     type ParseError = std::io::Error;
 
     fn try_parse(reader: &mut R) -> Result<Self, Self::ParseError> {
-        let top_left = Point2d::try_parse(reader)?;
-        let bottom_right = Point2d::try_parse(reader)?;
+        let top_left = euclid::Point2D::try_parse(reader)?;
+        let bottom_right = euclid::Point2D::try_parse(reader)?;
 
-        Ok(Box2d::new(top_left, bottom_right))
+        Ok(euclid::Box2D::new(top_left, bottom_right))
     }
 }
 
@@ -198,10 +198,12 @@ impl<R: Read> TryParse<R> for Box2d<f64> {
     }
 }
 
-pub fn try_parse_i32_box<R: Read>(reader: &mut R) -> std::io::Result<Box2d<f64>> {
-    let top_left = Point2d::<i32>::try_parse(reader)?;
-    let bottom_right = Point2d::<i32>::try_parse(reader)?;
+pub fn try_parse_i32_box<R: Read, Unit>(
+    reader: &mut R,
+) -> std::io::Result<euclid::Box2D<f64, Unit>> {
+    let top_left = euclid::Point2D::<i32, Unit>::try_parse(reader)?;
+    let bottom_right = euclid::Point2D::<i32, Unit>::try_parse(reader)?;
 
     // Cast is OK here because `f64` can represent anything `i32` can.
-    Ok(Box2d::new(top_left.cast(), bottom_right.cast()))
+    Ok(euclid::Box2D::new(top_left.cast(), bottom_right.cast()))
 }

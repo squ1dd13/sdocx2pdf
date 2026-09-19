@@ -27,7 +27,7 @@ pub enum ImageParseError {
 
 #[derive(Debug)]
 pub struct Image {
-    shape: Shape,
+    pub shape: Shape,
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {

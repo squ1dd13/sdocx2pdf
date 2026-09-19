@@ -1,13 +1,18 @@
+use std::io::Read;
+
 use krilla::{
     color::rgb,
     geom::PathBuilder,
     num::NormalizedF32,
     paint::{Fill, FillRule, LineCap, LineJoin, Stroke},
 };
+use log::{error, info, warn};
 use sdocx::{
-    euclid::{Angle, Transform2D},
+    MediaStorage, SdocxSpace,
+    euclid::{self, Angle, Transform2D},
     page::object::{
-        ArrowShape, CapType, FillEffect, JoinType, LineColourEffect, LineStyleEffect, PathSegment,
+        ArrowShape, CapType, FillEffect, FillImageEffect, ImageData, ImagePixelsUnit, JoinType,
+        LineColourEffect, LineStyleEffect, PathSegment, Shape, Template,
     },
 };
 use thiserror::Error;
@@ -48,34 +53,16 @@ fn check_line_style(ls: &LineStyleEffect) {
     match (ls.compound_type, ls.dash_type) {
         (sdocx::page::object::CompoundType::Simple, sdocx::page::object::DashType::Solid) => (),
         (_, _) => {
-            eprintln!(
-                "Warning: Alternative compound line types and dash types are not yet supported"
-            );
+            warn!("Alternative compound line types and dash types are not yet supported");
         }
     }
 }
 
-fn fe_to_solid_bgra(fe: &FillEffect) -> Option<[u8; 4]> {
-    match fe {
-        FillEffect::Colour(fce) => {
-            if !fce.colour_type.is_solid() {
-                eprintln!(
-                    "Warning: Only solid fill colours are supported; found colour type '{}'",
-                    fce.colour_type
-                );
-            }
-
-            Some(fce.solid_colour_bgra())
-        }
-
-        other => {
-            eprintln!(
-                "Warning: Only solid fill colours are supported; effect '{}' will be ignored",
-                other
-            );
-
-            None
-        }
+fn bgra_to_fill([b, g, r, a]: [u8; 4]) -> Fill {
+    Fill {
+        paint: rgb::Color::new(r, g, b).into(),
+        opacity: NormalizedF32::new(a as f32 / 255.0).unwrap(),
+        rule: FillRule::NonZero,
     }
 }
 
@@ -85,8 +72,8 @@ pub struct NoStyleError;
 
 #[derive(Debug, Error)]
 pub enum PathDrawingError {
-    #[error(transparent)]
-    NoStyleError(NoStyleError),
+    #[error("no style was set for the path, and no image was drawn")]
+    NothingDrawn(NoStyleError),
 
     #[error("found extra segment after closure")]
     SegmentAfterClose,
@@ -101,6 +88,7 @@ pub enum PathDrawingError {
     BadQuad,
 }
 
+#[derive(Debug)]
 struct StrokeStyle {
     bgra: [u8; 4],
     width: f32,
@@ -108,16 +96,16 @@ struct StrokeStyle {
     cap: CapType,
 }
 
-trait InternalPathDrawingCtx {
+trait PathDrawingCtx {
     fn draw_path_with_stroke_fill_style(
         &mut self,
         stroke_style: Option<StrokeStyle>,
-        fill_bgra: Option<[u8; 4]>,
+        fill: Option<Fill>,
         path_fn: impl FnOnce(&mut PathBuilder) -> Result<(), PathDrawingError>,
     ) -> Result<(), PathDrawingError>;
 }
 
-pub trait PathDrawingCtx {
+pub trait ShapeDrawingCtx {
     fn draw_line(
         &mut self,
         start: sdocx::Point2d<f64>,
@@ -126,37 +114,27 @@ pub trait PathDrawingCtx {
         ls: Option<&LineStyleEffect>,
     ) -> Result<(), NoStyleError>;
 
-    fn draw_path_segments(
+    fn draw_shape(
         &mut self,
-        segments: &[PathSegment],
-        lc: Option<&LineColourEffect>,
-        ls: Option<&LineStyleEffect>,
-        fill_effect: Option<&FillEffect>,
+        shape: &Shape,
+        media: &mut MediaStorage,
     ) -> Result<(), PathDrawingError>;
 }
 
-impl InternalPathDrawingCtx for PageConversionCtx<'_> {
+impl PathDrawingCtx for PageConversionCtx<'_> {
     fn draw_path_with_stroke_fill_style(
         &mut self,
         stroke_style: Option<StrokeStyle>,
-        fill_bgra: Option<[u8; 4]>,
+        fill: Option<Fill>,
         path_fn: impl FnOnce(&mut PathBuilder) -> Result<(), PathDrawingError>,
     ) -> Result<(), PathDrawingError> {
-        let (filling, stroking) = (fill_bgra.is_some(), stroke_style.is_some());
+        let (filling, stroking) = (fill.is_some(), stroke_style.is_some());
 
         if !filling && !stroking {
-            return Err(PathDrawingError::NoStyleError(NoStyleError));
+            return Err(PathDrawingError::NothingDrawn(NoStyleError));
         }
 
-        if let Some([b, g, r, a]) = fill_bgra {
-            self.surface.set_fill(Some(Fill {
-                paint: rgb::Color::new(r, g, b).into(),
-                opacity: NormalizedF32::new(a as f32 / 255.0).unwrap(),
-                rule: FillRule::NonZero,
-            }));
-        } else {
-            self.surface.set_fill(None);
-        }
+        self.surface.set_fill(fill);
 
         if let Some(StrokeStyle {
             bgra: [b, g, r, a],
@@ -284,7 +262,7 @@ fn specify_path_by_segments(
     Ok(())
 }
 
-impl PathDrawingCtx for PageConversionCtx<'_> {
+impl ShapeDrawingCtx for PageConversionCtx<'_> {
     fn draw_line(
         &mut self,
         start: sdocx::Point2d<f64>,
@@ -320,7 +298,7 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
             arrow_shape => {
                 if !matches!(arrow_shape, ArrowShape::Arrow) {
                     // todo: Implement other arrowheads
-                    eprintln!("Warning: Only the basic arrowhead is implemented");
+                    warn!("Only the basic arrowhead is implemented");
                 }
 
                 Some(normal_arrow_vertices_ordered(
@@ -336,7 +314,7 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
             ArrowShape::None => None,
             arrow_shape => {
                 if !matches!(arrow_shape, ArrowShape::Arrow) {
-                    eprintln!("Warning: Only the basic arrowhead is implemented");
+                    warn!("Only the basic arrowhead is implemented");
                 }
 
                 Some(normal_arrow_vertices_ordered(
@@ -438,7 +416,7 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
                 None,
                 // The arrowheads are part of the line, but they are filled, so the line stroke
                 // becomes the arrowhead fill.
-                Some(lc.solid_colour_bgra()),
+                Some(bgra_to_fill(lc.solid_colour_bgra())),
                 |pb| {
                     pb.move_to(arrow_points[0].x as f32, arrow_points[0].y as f32);
                     pb.line_to(arrow_points[1].x as f32, arrow_points[1].y as f32);
@@ -458,42 +436,264 @@ impl PathDrawingCtx for PageConversionCtx<'_> {
         Ok(())
     }
 
-    fn draw_path_segments(
+    fn draw_shape(
         &mut self,
-        segments: &[PathSegment],
-        lc: Option<&LineColourEffect>,
-        ls: Option<&LineStyleEffect>,
-        fill_effect: Option<&FillEffect>,
+        shape: &Shape,
+        media: &mut MediaStorage,
     ) -> Result<(), PathDrawingError> {
-        let stroke_style = match (lc, ls) {
-            (None, None) => None,
-            (lc, ls) => {
-                let lc = match lc {
-                    Some(lc) => lc,
-                    None => &LineColourEffect::default(),
-                };
-
-                let ls = match ls {
-                    Some(ls) => {
-                        check_line_style(ls);
-                        ls
-                    }
-                    None => &LineStyleEffect::default(),
-                };
-
-                Some(StrokeStyle {
-                    bgra: lc.solid_colour_bgra(),
-                    width: ls.width,
-                    join: ls.join_type,
-                    cap: ls.cap_type,
-                })
-            }
+        let Some(template) = shape.template() else {
+            return Err(PathDrawingError::NothingDrawn(NoStyleError));
         };
 
-        self.draw_path_with_stroke_fill_style(
-            stroke_style,
-            fill_effect.and_then(fe_to_solid_bgra),
-            |pb| specify_path_by_segments(segments, pb),
-        )
+        // To set a stroke style we require a line colour effect, regardless of whether there is a
+        // line style effect. If there is an LCE but no LSE, we use a default LSE.
+        let stroke_style = shape.line_colour_effect().and_then(|lc| {
+            let ls = match shape.line_style() {
+                Some(ls) => {
+                    // If a line style was specified but it has zero width, we're not stroking.
+                    if ls.width == 0.0 {
+                        return None;
+                    }
+
+                    check_line_style(ls);
+                    ls
+                }
+
+                None => &LineStyleEffect::default(),
+            };
+
+            Some(StrokeStyle {
+                bgra: lc.solid_colour_bgra(),
+                width: ls.width,
+                join: ls.join_type,
+                cap: ls.cap_type,
+            })
+        });
+
+        // Path drawing might report an invisibility error, but if we know we've drawn an image,
+        // it's not an issue.
+        let mut drew_image = false;
+
+        let path_fill = match shape.fill_effect() {
+            Some(FillEffect::Colour(fce)) => {
+                if !fce.colour_type.is_solid() {
+                    warn!(
+                        "Only solid fill colours are supported; found colour type '{}'",
+                        fce.colour_type
+                    );
+                }
+
+                Some(bgra_to_fill(fce.solid_colour_bgra()))
+            }
+
+            Some(FillEffect::Image(effect)) => {
+                if let Err(err) = self.draw_image(effect, template, shape.image_data(), media) {
+                    match err {
+                        ImageDrawingError::FailedToOpen(error, n) => {
+                            error!("Failed to open image '{n}': {error}")
+                        }
+
+                        ImageDrawingError::FailedToRead(error, n) => {
+                            error!("Opened but failed to read image '{n}': {error}")
+                        }
+
+                        ImageDrawingError::NotValidJpeg { name, .. } => {
+                            error!(
+                                "Image '{name}' is not a (valid) JPEG. \
+                                It may be an SPI file; this is a proprietary format \
+                                which is not yet supported."
+                            )
+                        }
+
+                        ImageDrawingError::ImagePathMissing => {
+                            warn!("Found image fill without valid path");
+                        }
+                    }
+                } else {
+                    drew_image = true;
+                }
+
+                None
+            }
+
+            Some(other) => {
+                warn!("Fill effect '{other}' is not yet supported");
+                None
+            }
+
+            None => None,
+        };
+
+        match self.draw_path_with_stroke_fill_style(stroke_style, path_fill, |pb| {
+            specify_path_by_segments(template.path.segments(), pb)
+        }) {
+            Err(PathDrawingError::NothingDrawn(_)) if drew_image => Ok(()),
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ImageDrawingError {
+    #[error("failed to open image file '{1}'")]
+    FailedToOpen(std::io::Error, String),
+
+    #[error("successfully opened image file '{1}', but failed to read it")]
+    FailedToRead(std::io::Error, String),
+
+    #[error("image '{name}' is not a valid JPEG")]
+    NotValidJpeg { krilla_err: String, name: String },
+
+    #[error("there is no path for the image")]
+    ImagePathMissing,
+}
+
+trait ImageDrawingCtx {
+    fn draw_image(
+        &mut self,
+        effect: &FillImageEffect,
+        template: &Template,
+        image_data: &ImageData,
+        media: &mut MediaStorage,
+    ) -> Result<(), ImageDrawingError>;
+}
+
+impl ImageDrawingCtx for PageConversionCtx<'_> {
+    fn draw_image(
+        &mut self,
+        effect: &FillImageEffect,
+        template: &Template,
+        image_data: &ImageData,
+        media: &mut MediaStorage,
+    ) -> Result<(), ImageDrawingError> {
+        let image_name = effect
+            .image_name()
+            .ok_or(ImageDrawingError::ImagePathMissing)?;
+
+        let mut image_reader = media
+            .open_file(image_name)
+            .map_err(|err| ImageDrawingError::FailedToOpen(err, image_name.into()))?;
+
+        let mut image_bytes = Vec::new();
+
+        if let Err(err) = image_reader.read_to_end(&mut image_bytes) {
+            return Err(ImageDrawingError::FailedToRead(err, image_name.into()));
+        }
+
+        let image =
+            krilla::image::Image::from_jpeg(image_bytes.into(), true).map_err(|krilla_err| {
+                ImageDrawingError::NotValidJpeg {
+                    krilla_err,
+                    name: image_name.into(),
+                }
+            })?;
+
+        // Original box on page (without rotation), crop box (in pixels, with (0, 0) at the top left of the image), and
+        // x and y scales to get from image space to SDOCX space.
+        let crop_info = image_data
+            .original_rect
+            .zip(image_data.crop_rect)
+            .map(|(o, c)| {
+                (o.cast::<f32>(), c.cast::<f32>(), {
+                    let (image_w, image_h) = image.size();
+
+                    let x_scale = euclid::Scale::<f32, ImagePixelsUnit, SdocxSpace>::new(
+                        o.width() as f32 / image_w as f32,
+                    );
+
+                    let y_scale = euclid::Scale::<f32, ImagePixelsUnit, SdocxSpace>::new(
+                        o.height() as f32 / image_h as f32,
+                    );
+
+                    (x_scale, y_scale)
+                })
+            });
+
+        let (crop_offset_x, crop_offset_y) = match crop_info.as_ref() {
+            Some((_, crop_box, (x_scale, y_scale))) => {
+                (crop_box.min.x * x_scale.0, crop_box.min.y * y_scale.0)
+            }
+            None => (0.0, 0.0),
+        };
+
+        let unrotated_dest: sdocx::Box2d<f32> = template.owner_rect.cast();
+
+        self.surface
+            .push_transform(&krilla::geom::Transform::from_translate(
+                unrotated_dest.min.x - crop_offset_x,
+                unrotated_dest.min.y - crop_offset_y,
+            ));
+
+        self.surface
+            .push_transform(&krilla::geom::Transform::from_rotate_at(
+                template.rotation,
+                unrotated_dest.width() / 2.0 + crop_offset_x,
+                unrotated_dest.height() / 2.0 + crop_offset_y,
+            ));
+
+        // Use negative scales to apply vertical/horizontal flips. (The app ignores flips in the
+        // exported PDFs, so we're actually intentionally diverging from what it does here.)
+        self.surface.push_transform(&{
+            let scale_x = if template.is_flipped_horizontally {
+                -1.0
+            } else {
+                1.0
+            };
+
+            let scale_y = if template.is_flipped_vertically {
+                -1.0
+            } else {
+                1.0
+            };
+
+            let centre_x = unrotated_dest.width() / 2.0 + crop_offset_x;
+            let centre_y = unrotated_dest.height() / 2.0 + crop_offset_y;
+
+            krilla::geom::Transform::from_row(
+                scale_x,
+                0.0,
+                0.0,
+                scale_y,
+                centre_x * (1.0 - scale_x),
+                centre_y * (1.0 - scale_y),
+            )
+        });
+
+        // !!! - We could push_opacity here, but the image fill effect's alpha means nothing
+
+        if let Some((orig_box, crop_rect, (x_scale, y_scale))) = crop_info.as_ref() {
+            let mut cp_builder = PathBuilder::new();
+            cp_builder.move_to(crop_rect.min.x * x_scale.0, crop_rect.min.y * y_scale.0);
+            cp_builder.line_to(crop_rect.max.x * x_scale.0, crop_rect.min.y * y_scale.0);
+            cp_builder.line_to(crop_rect.max.x * x_scale.0, crop_rect.max.y * y_scale.0);
+            cp_builder.line_to(crop_rect.min.x * x_scale.0, crop_rect.max.y * y_scale.0);
+            cp_builder.close();
+
+            let clip_path = cp_builder.finish().unwrap();
+            self.surface.push_clip_path(&clip_path, &FillRule::NonZero);
+
+            self.surface.draw_image(
+                image,
+                krilla::geom::Size::from_wh(orig_box.width(), orig_box.height()).unwrap(),
+            );
+
+            // Pop the clip path.
+            self.surface.pop();
+        } else {
+            self.surface.draw_image(
+                image,
+                krilla::geom::Size::from_wh(unrotated_dest.width(), unrotated_dest.height())
+                    .unwrap(),
+            );
+        }
+
+        info!("Drew image '{image_name}'");
+
+        // Transforms
+        self.surface.pop();
+        self.surface.pop();
+        self.surface.pop();
+
+        Ok(())
     }
 }
