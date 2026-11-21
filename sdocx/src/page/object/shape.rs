@@ -673,7 +673,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
             let mut stream = (&mut stream).take(path_bin_size.into());
             let path = Path::try_parse(&mut stream).map_err(ShapeParseError::TemplatePath)?;
             stream
-                .ensure_eof()
+                .ensure_eof(false)
                 .map_err(ShapeParseError::UnfinishedPath)?;
 
             Some(Template {
@@ -749,7 +749,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for S
         // todo: See SPen::ObjectShapeBinaryHandler::ApplyOwnBinary_ShapeRefresh (_document.dll)
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Shape {
             shape_base,

@@ -81,7 +81,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Image {
         shape.image_data.original_image_id = original_image_bind_id;
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Image { shape })
     }

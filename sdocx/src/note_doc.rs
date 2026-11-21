@@ -179,7 +179,7 @@ impl PenInfo {
             },
         };
 
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(pen_info)
     }
@@ -256,7 +256,7 @@ impl<R: Read> TryParseWithContext<R, FileRegistry> for VoiceRecording {
             precise_duration: chrono::Duration::milliseconds(reader.read_i64_le()?),
         };
 
-        reader.ensure_eof()?;
+        reader.ensure_eof(false)?;
 
         Ok(vri)
     }
@@ -321,7 +321,7 @@ impl<R: Read> TryParse<R> for StringRegistry {
             ),
         };
 
-        reader.ensure_eof()?;
+        reader.ensure_eof(false)?;
 
         Ok(registry)
     }

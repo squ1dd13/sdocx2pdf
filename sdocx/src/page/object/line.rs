@@ -109,7 +109,7 @@ impl<R: Read + Seek> TryParse<R> for Line {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Line {
             shape_base,

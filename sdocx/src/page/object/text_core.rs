@@ -400,7 +400,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, CommonParseContext<'a, 'a>> for 
                     .map_err(Box::new)?;
 
                     inner_stream
-                        .ensure_eof()
+                        .ensure_eof(false)
                         .map_err(CommonParseError::ObjectSpanUnfinished)?;
 
                     obj
@@ -417,7 +417,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, CommonParseContext<'a, 'a>> for 
                 };
 
                 obj_stream
-                    .ensure_eof()
+                    .ensure_eof(false)
                     .map_err(CommonParseError::ObjectSpanUnfinished)?;
 
                 span
@@ -426,7 +426,7 @@ impl<'a, R: Read + Seek> TryParseWithContext<R, CommonParseContext<'a, 'a>> for 
             vec![]
         };
 
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Common {
             text,

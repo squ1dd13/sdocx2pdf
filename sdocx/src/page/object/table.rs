@@ -82,7 +82,7 @@ impl<R: Read + Seek> TryParse<R> for FullBorderStyle {
             }
         };
 
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(border)
     }
@@ -140,7 +140,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Cell {
             let text = Text::try_parse_with_ctx(&mut stream, ctx)?;
 
             stream
-                .ensure_eof()
+                .ensure_eof(false)
                 .map_err(CellParseError::ContentUnfinished)?;
 
             text
@@ -163,7 +163,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Cell {
         flag_block.ensure_flags_used()?;
 
         stream
-            .ensure_eof()
+            .ensure_eof(false)
             .map_err(CellParseError::CellUnfinished)?;
 
         Ok(Cell {
@@ -231,7 +231,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Row {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Row {
             cells,
@@ -341,7 +341,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Table {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Table {
             shape,

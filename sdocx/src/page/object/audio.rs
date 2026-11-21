@@ -45,7 +45,7 @@ impl<R: Read + Seek> TryParse<R> for BackgroundGradient {
             (stream.read_4_bytes()?, stream.read_f32_le()?),
         );
 
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(BackgroundGradient { stops })
     }
@@ -126,7 +126,7 @@ impl<R: Read + Seek> TryParse<R> for Audio {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Audio {
             object_base,

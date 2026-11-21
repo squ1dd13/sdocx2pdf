@@ -150,7 +150,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Layer {
             .ensure_none_set_unchecked()
             .map_err(LayerParseError::UnhandledField)?;
 
-        header_reader.ensure_eof()?;
+        header_reader.ensure_eof(false)?;
 
         let objects = read_size_and_vec!(reader, u32, LayerParseError::TooManyObjects, {
             let object_type = reader.read_u8()?;
