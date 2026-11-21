@@ -302,7 +302,10 @@ fn main_convert(
     pdf.set_metadata(
         Metadata::new()
             .title(document_name.to_owned())
-            .producer("sdocx2pdf".to_owned())
+            .producer(match CARGO_PKG_VERSION {
+                Some(v) => format!("sdocx2pdf {v}"),
+                None => "sdocx2pdf".to_owned(),
+            })
             .creator("Samsung Notes".to_owned()),
         // todo: Include date created/modified (included in the end tag)
         // Not bothering now because krilla uses its own structure for timestamps and we'd have to
