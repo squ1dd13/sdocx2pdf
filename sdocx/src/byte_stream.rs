@@ -1,6 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, Utc};
 use io::Read;
+use log::warn;
 use std::io::{self, Seek, SeekFrom, Take};
 use thiserror::Error;
 
@@ -453,15 +454,23 @@ pub trait BoundedStream {
     /// Returns the number of bytes remaining before a read is guaranteed to return EOF.
     fn n_remaining(&self) -> u64;
 
-    /// Returns an error iff `self.n_remaining() != 0`. This consumes `self` so that it cannot be
-    /// used again.
-    fn ensure_eof(self) -> Result<(), UnfinishedParsingError>
+    /// Returns an error iff `self.n_remaining() != 0 && strict`. This consumes `self` so that it
+    /// cannot be used again. If there are bytes remaining but `strict == false`, a warning is
+    /// logged but `Ok(())` is returned.
+    fn ensure_eof(self, strict: bool) -> Result<(), UnfinishedParsingError>
     where
         Self: Sized,
     {
         match self.n_remaining() {
             0 => Ok(()),
-            remaining => Err(UnfinishedParsingError { remaining }),
+            remaining => {
+                if !strict {
+                    warn!("{remaining} byte(s) remain in bounded stream at close");
+                    return Ok(());
+                }
+
+                Err(UnfinishedParsingError { remaining })
+            }
         }
     }
 }

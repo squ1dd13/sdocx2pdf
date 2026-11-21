@@ -216,7 +216,7 @@ impl<R: Read> TryParseWithContext<R, FileRegistry> for CustomPageObject {
             warn!("Found 8 unknown bytes at end of custom page object (value {value:#x})");
         }
 
-        reader.ensure_eof()?;
+        reader.ensure_eof(false)?;
 
         Ok(CustomPageObject {
             object_type,

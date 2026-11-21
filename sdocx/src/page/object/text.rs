@@ -73,7 +73,7 @@ impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Text {
         shape.shape_data.border_type = border_type;
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Text { shape })
     }

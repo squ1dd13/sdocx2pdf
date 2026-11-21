@@ -65,7 +65,7 @@ impl LineColourEffect {
             colours: read_size_and_vec!(stream, u8, GradientColour::try_parse(&mut stream)?),
         };
 
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(effect)
     }
@@ -360,7 +360,7 @@ impl<R: Read + Seek> TryParse<R> for ShapeBase {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(ShapeBase {
             object_base,

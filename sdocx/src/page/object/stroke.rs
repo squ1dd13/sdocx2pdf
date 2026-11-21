@@ -508,7 +508,7 @@ impl<R: Read + Seek> TryParseWithContext<R, StringRegistry> for Stroke {
         };
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Stroke {
             object_base,

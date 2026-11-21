@@ -332,7 +332,7 @@ impl<R: Read + Seek> TryParseWithContext<R, NoteSdkType> for EndTag {
 
         let app_custom_data = if_any_left!(payload_reader, payload_reader.read_long_u16_string()?);
 
-        payload_reader.ensure_eof()?;
+        payload_reader.ensure_eof(false)?;
 
         Ok(EndTag {
             sdk_type: *sdk_type,

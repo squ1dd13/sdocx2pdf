@@ -55,7 +55,7 @@ impl<R: Read + Seek> TryParse<R> for Painting {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Painting {
             object_base,

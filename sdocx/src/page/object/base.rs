@@ -274,7 +274,7 @@ impl<R: Read + Seek> TryParse<R> for ObjectBase {
         }
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(ObjectBase {
             is_rotatable,

@@ -75,7 +75,7 @@ impl<R: Read + Seek> TryParse<R> for Web {
         });
 
         flag_block.ensure_flags_used()?;
-        stream.ensure_eof()?;
+        stream.ensure_eof(false)?;
 
         Ok(Web {
             object_base,
