@@ -23,7 +23,7 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
 - add handwriting and shapes to PDFs by hand in SNotes and get a vector PDF with your annotations
   on top of the original PDF (with searchable/selectable text) using sdocx2pdf.
 
-**As of sdocx2pdf v0.4.1, handwriting, shapes, embedded PDFs and *most*[^1] images are represented
+**As of sdocx2pdf v0.5.0, handwriting, shapes, embedded PDFs and images are represented
 in converted documents.**
 
 There are options for splitting pageless documents into pages based either on page length or on the
@@ -103,7 +103,7 @@ For example, I'd do the following:
 
 The process is even easier if you're using the Samsung Notes app on a Windows computer; then, you
 can just 'Save note as Samsung Notes file' and immediately feed the SDOCX file into sdocx2pdf
-without sending it between devices.[^2]
+without sending it between devices.[^1]
 
 <details open>
 
@@ -210,12 +210,17 @@ produce the note, but I don't know yet.
 
 This repository contains two crates: `sdocx`, a library crate, and `sdocx2pdf`, the binary crate
 implementing the tool. sdocx2pdf is built on the library, which parses the SDOCX format almost
-completely.[^3] The limitations described above are due to sdocx2pdf not implementing the output
+completely.[^2] The limitations described above are due to sdocx2pdf not implementing the output
 logic for all the features of SNotes documents. Note that `sdocx2pdf` was written over a long time
 while I was experimenting with different ways to draw the handwriting, so the code is very messy
 (right now). `sdocx`, on the other hand, was easier to write, and the code is fairly clean. The
 library features extensive error reporting to make it easier to update when Samsung updates the
 file format.
+
+A second repository, [spi-rs](https://github.com/squ1dd13/spi-rs), contains an `spi` crate
+that is used for decoding SPI images. SPI is a proprietary format that Samsung Notes uses for
+some images. (It uses JPEG and PNG for most images.) That decoder and the process used to make it
+are interesting in their own right; see that repo for more information.
 
 I have mostly focused on handwriting. (Accordingly, the way it is converted is stupidly
 complicated.) SDOCX represents handwriting as a list of events. A single event gives a position, a
@@ -246,28 +251,22 @@ strategically between the key features to reduce the maximum angle change betwee
 To draw the stroke in the PDF, sdocx2pdf joins adjacent points by filling between Bézier curves
 that are combined to form the shape of an
 ['idealised bean'](https://math.stackexchange.com/questions/256937/what-shape-is-a-bean) (or cashew
-nut).[^4] The control points for the Bézier curves on either side of the bean (along the long axis)
+nut).[^3] The control points for the Bézier curves on either side of the bean (along the long axis)
 are calculated so that the body of the bean roughly follows the shape of the stroke between the two
 points. For some pens, the width of the bean is determined using pressure.
 
 [^1]:
-    Some images in SDOCX files are embedded in JPEG format, and others in SPI format. sdocx2pdf
-    will embed JPEGs in the output PDF, but SPI files are currently unsupported as the SPI format
-    is proprietary and sdocx2pdf does not include a decoder for it. Samsung Notes will convert
-    images to SPI format under certain circumstances, such as if the 'lasso crop' tool is used.
-
-[^2]:
     In fact, the Windows app stores documents in an extracted SDOCX format that sdocx2pdf supports.
     Once you've found them, you can just give sdocx2pdf the path to the folder corresponding to the
     note you'd like to convert.
 
-[^3]:
+[^2]:
     Technically, there are some types of objects that could exist but which the apps never create
     (as far as I can tell). These include plots and tables. The library does not parse these
     objects because I have never been able to create them. As of June 2026, the library can parse
     any object that you can add to a document in the Android app.
 
-[^4]:
+[^3]:
     The full bean is not always created. The round ends make for better connections, because the
     overlap prevents hairline gaps between beans, but there is still an overlap if the end of one
     bean is round and the start of the next bean is flat. Except for sharp corners, where the

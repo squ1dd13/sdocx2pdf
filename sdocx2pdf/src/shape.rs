@@ -497,11 +497,10 @@ impl ShapeDrawingCtx for PageConversionCtx<'_> {
                             error!("Opened but failed to read image '{n}': {error}")
                         }
 
-                        ImageDrawingError::NotValidJpeg { name, .. } => {
+                        ImageDrawingError::FailedToDecode { name, spi_error } => {
                             error!(
-                                "Image '{name}' is not a (valid) JPEG. \
-                                It may be an SPI file; this is a proprietary format \
-                                which is not yet supported."
+                                "Image '{name}' is not a (valid) image in any supported format. \
+                                SPI decode errror: {spi_error}"
                             )
                         }
 
@@ -541,8 +540,11 @@ pub enum ImageDrawingError {
     #[error("successfully opened image file '{1}', but failed to read it")]
     FailedToRead(std::io::Error, String),
 
-    #[error("image '{name}' is not a valid JPEG")]
-    NotValidJpeg { krilla_err: String, name: String },
+    #[error("image '{name}' could not be decoded")]
+    FailedToDecode {
+        name: String,
+        spi_error: spi::DecodeError,
+    },
 
     #[error("there is no path for the image")]
     ImagePathMissing,
@@ -580,13 +582,41 @@ impl ImageDrawingCtx for PageConversionCtx<'_> {
             return Err(ImageDrawingError::FailedToRead(err, image_name.into()));
         }
 
-        let image =
-            krilla::image::Image::from_jpeg(image_bytes.into(), true).map_err(|krilla_err| {
-                ImageDrawingError::NotValidJpeg {
-                    krilla_err,
-                    name: image_name.into(),
+        let image_bytes: krilla::Data = image_bytes.into();
+
+        // Try the standard formats first.
+        let image = [
+            // Most images are JPEGs, but...
+            krilla::image::Image::from_jpeg,
+            // ...some are PNG.
+            krilla::image::Image::from_png,
+            // I've never seen WebP or GIF, but we might as well include them, since `krilla`
+            // provides for them.
+            krilla::image::Image::from_webp,
+            krilla::image::Image::from_gif,
+        ]
+        .into_iter()
+        .find_map(|f| f(image_bytes.clone(), true).ok())
+        .map_or_else(
+            // If the image is not JPEG or PNG, then it's probably an SPI file.
+            // We can decode these to RGBA8.
+            || match spi::decode_with_limits(image_bytes.as_ref(), spi::DecodeLimits::MAX) {
+                Ok(image) => {
+                    let w = image.width();
+                    let h = image.height();
+
+                    Ok(krilla::image::Image::from_rgba8(image.into_raw(), w, h))
                 }
-            })?;
+
+                // If we get an SPI decoding error, then we've tried decoding the image as every
+                // format we know. Give up.
+                Err(spi_error) => Err(ImageDrawingError::FailedToDecode {
+                    name: image_name.into(),
+                    spi_error,
+                }),
+            },
+            Ok,
+        )?;
 
         // Original box on page (without rotation), crop box (in pixels, with (0, 0) at the top left of the image), and
         // x and y scales to get from image space to SDOCX space.
