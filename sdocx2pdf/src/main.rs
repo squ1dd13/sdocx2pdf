@@ -421,6 +421,9 @@ fn print_intro() {
 }
 
 fn main() -> ExitCode {
+    let args = Args::parse();
+    let detailed_errors = args.detailed_errors;
+
     let logger = env_logger::builder()
         .format(|mut buf, record| {
             BrokenDownTime::from(Timestamp::now())
@@ -437,7 +440,11 @@ fn main() -> ExitCode {
                 record.args()
             )
         })
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(if detailed_errors {
+            log::LevelFilter::Trace
+        } else {
+            log::LevelFilter::Info
+        })
         .build();
 
     let multi = MultiProgress::new();
@@ -445,9 +452,6 @@ fn main() -> ExitCode {
     indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
         .try_init()
         .unwrap();
-
-    let args = Args::parse();
-    let detailed_errors = args.detailed_errors;
 
     print_intro();
 

@@ -1,6 +1,6 @@
 [package]
 name = "sdocx2pdf"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license.workspace = true
 
@@ -24,3 +24,4 @@ env_logger = "0.11"
 indicatif-log-bridge = "0.2.3"
 jiff = "0.2"
 krilla = { version = "0.8.2", features = ["pdf"] }
+spi = { git = "https://github.com/squ1dd13/spi-rs", tag = "v0.1.0" }
